@@ -3,4 +3,4 @@ project(zym_cli)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(zym_cli src/main.cpp)
+add_executable(zym src/main.cpp)

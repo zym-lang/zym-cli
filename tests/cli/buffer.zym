@@ -372,6 +372,76 @@ assert_wrap(off.decodeU32(0) == 0xAAAAAAAA, "11.6: U16 overwrite does not touch 
 
 
 // ============================================================================
+// SECTION 12: ENDIANNESS (optional trailing "le"/"be" arg)
+// ============================================================================
+print("--- [12] Endianness ---")
+
+// Default (no arg) is little-endian.
+var e1 = Buffer.new(4)
+e1.encodeU32(0, 0x11223344)
+assert_wrap(e1.decodeU32(0) == 0x11223344,         "12.1: default is LE round-trip")
+assert_wrap(e1.decodeU32(0, "le") == 0x11223344,   "12.2: explicit le matches default")
+// LE layout: low byte first.
+assert_wrap(e1.get(0) == 0x44, "12.3: LE byte 0")
+assert_wrap(e1.get(3) == 0x11, "12.4: LE byte 3")
+
+// BE write reverses on-disk byte order.
+var e2 = Buffer.new(4)
+e2.encodeU32(0, 0x11223344, "be")
+assert_wrap(e2.get(0) == 0x11, "12.5: BE byte 0 (high)")
+assert_wrap(e2.get(3) == 0x44, "12.6: BE byte 3 (low)")
+assert_wrap(e2.decodeU32(0, "be") == 0x11223344, "12.7: BE round-trip")
+// Reading the BE-encoded bytes as LE should yield the byte-swapped value.
+assert_wrap(e2.decodeU32(0) == 0x44332211, "12.8: BE bytes read as LE byte-swap")
+
+// U16 / I16 / I32 / U64 / I64 BE round-trips.
+var e3 = Buffer.new(8)
+e3.encodeU16(0, 0xBEEF, "be")
+assert_wrap(e3.get(0) == 0xBE, "12.9: U16 BE high byte")
+assert_wrap(e3.get(1) == 0xEF, "12.10: U16 BE low byte")
+assert_wrap(e3.decodeU16(0, "be") == 0xBEEF, "12.11: U16 BE round-trip")
+
+e3.encodeI16(2, -2, "be")
+assert_wrap(e3.decodeI16(2, "be") == -2, "12.12: I16 BE negative round-trip")
+
+e3.encodeI32(0, -123456789, "be")
+assert_wrap(e3.decodeI32(0, "be") == -123456789, "12.13: I32 BE negative round-trip")
+
+// Stay within 2^53 so double precision preserves every byte.
+var e4 = Buffer.new(8)
+e4.encodeU64(0, 0x001F203040506070, "be")
+assert_wrap(e4.get(0) == 0x00, "12.14: U64 BE first byte")
+assert_wrap(e4.get(1) == 0x1F, "12.15: U64 BE byte 1")
+assert_wrap(e4.get(7) == 0x70, "12.16: U64 BE last byte")
+assert_wrap(e4.decodeU64(0, "be") == 0x001F203040506070, "12.17: U64 BE round-trip")
+
+// Float / Double BE round-trips.
+var e5 = Buffer.new(8)
+e5.encodeFloat(0, 1.5, "be")
+assert_wrap(e5.decodeFloat(0, "be") == 1.5, "12.18: float BE round-trip")
+e5.encodeDouble(0, -3.25, "be")
+assert_wrap(e5.decodeDouble(0, "be") == -3.25, "12.19: double BE round-trip")
+
+// Half BE round-trip.
+var e6 = Buffer.new(2)
+e6.encodeHalf(0, 0.5, "be")
+assert_wrap(e6.decodeHalf(0, "be") == 0.5, "12.20: half BE round-trip")
+
+// 1-byte methods accept endian arg but ignore it.
+var e7 = Buffer.new(1)
+e7.encodeU8(0, 0x7F, "be")
+assert_wrap(e7.decodeU8(0, "be") == 0x7F, "12.21: U8 BE arg ignored round-trip")
+assert_wrap(e7.decodeU8(0, "le") == 0x7F, "12.22: U8 LE arg ignored round-trip")
+e7.encodeI8(0, -1, "be")
+assert_wrap(e7.decodeI8(0) == -1, "12.23: I8 BE write then default read")
+
+// Same bytes can hold different values under different endians (sanity).
+var e8 = Buffer.new(4)
+e8.encodeU32(0, 0xABCDEF01, "le")
+assert_wrap(e8.decodeU32(0, "be") == 0x01EFCDAB, "12.24: LE write read as BE is bswapped")
+
+
+// ============================================================================
 // FINAL RESULTS
 // ============================================================================
 print("")

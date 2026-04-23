@@ -22,7 +22,9 @@ invoked as `b.method(...)`.
   `find`, etc. are coerced to a `uint8` (`0..255`).
 - **Decode/encode offsets.** An offset `o` is valid when
   `0 <= o <= size() - width`, where `width` is `1/2/4/8` for the corresponding
-  integer/float size. Multi-byte integers and floats use little-endian layout.
+  integer/float size.
+- **Endianness.** Every multi-byte decode/encode takes an optional trailing
+  string `"le"` (default) or `"be"`. See [Endianness](#endianness).
 - **Errors.** Bad argument types or out-of-range indices produce a Zym runtime
   error of the form `Buffer.method(args) ...`.
 
@@ -118,10 +120,13 @@ variants zero-extend.
 
 | Width | Decode (unsigned) | Decode (signed) | Encode (unsigned) | Encode (signed) |
 | --- | --- | --- | --- | --- |
-| 1 byte  | `b.decodeU8(offset)`  | `b.decodeI8(offset)`  | `b.encodeU8(offset, v)`  | `b.encodeI8(offset, v)`  |
-| 2 bytes | `b.decodeU16(offset)` | `b.decodeI16(offset)` | `b.encodeU16(offset, v)` | `b.encodeI16(offset, v)` |
-| 4 bytes | `b.decodeU32(offset)` | `b.decodeI32(offset)` | `b.encodeU32(offset, v)` | `b.encodeI32(offset, v)` |
-| 8 bytes | `b.decodeU64(offset)` | `b.decodeI64(offset)` | `b.encodeU64(offset, v)` | `b.encodeI64(offset, v)` |
+| 1 byte  | `b.decodeU8(offset)`       | `b.decodeI8(offset)`       | `b.encodeU8(offset, v)`       | `b.encodeI8(offset, v)`       |
+| 2 bytes | `b.decodeU16(offset[, e])` | `b.decodeI16(offset[, e])` | `b.encodeU16(offset, v[, e])` | `b.encodeI16(offset, v[, e])` |
+| 4 bytes | `b.decodeU32(offset[, e])` | `b.decodeI32(offset[, e])` | `b.encodeU32(offset, v[, e])` | `b.encodeI32(offset, v[, e])` |
+| 8 bytes | `b.decodeU64(offset[, e])` | `b.decodeI64(offset[, e])` | `b.encodeU64(offset, v[, e])` | `b.encodeI64(offset, v[, e])` |
+
+`e` is the optional endian string `"le"` (default) or `"be"`. 1-byte methods
+accept `e` for API symmetry but ignore it.
 
 ---
 
@@ -129,12 +134,35 @@ variants zero-extend.
 
 | Width | Decode | Encode |
 | --- | --- | --- |
-| 2 bytes (IEEE 754 half)   | `b.decodeHalf(offset)`   | `b.encodeHalf(offset, v)`   |
-| 4 bytes (IEEE 754 single) | `b.decodeFloat(offset)`  | `b.encodeFloat(offset, v)`  |
-| 8 bytes (IEEE 754 double) | `b.decodeDouble(offset)` | `b.encodeDouble(offset, v)` |
+| 2 bytes (IEEE 754 half)   | `b.decodeHalf(offset[, e])`   | `b.encodeHalf(offset, v[, e])`   |
+| 4 bytes (IEEE 754 single) | `b.decodeFloat(offset[, e])`  | `b.encodeFloat(offset, v[, e])`  |
+| 8 bytes (IEEE 754 double) | `b.decodeDouble(offset[, e])` | `b.encodeDouble(offset, v[, e])` |
 
-All floats are little-endian. `encodeHalf` / `encodeFloat` narrow a Zym number
-(double) to the target precision.
+`e` is the optional endian string `"le"` (default) or `"be"`. `encodeHalf` /
+`encodeFloat` narrow a Zym number (double) to the target precision.
+
+---
+
+## Endianness
+
+Every multi-byte `decode*` / `encode*` method accepts an optional trailing
+endian string:
+
+- `"le"` — little-endian (default when the argument is omitted).
+- `"be"` — big-endian.
+
+Any other string, or a non-string value, raises a runtime error. 1-byte
+methods (`decodeU8` / `decodeI8` / `encodeU8` / `encodeI8`) accept the
+argument for API symmetry but ignore it.
+
+```zym
+let b = Buffer.new(4)
+b.encodeU32(0, 0x11223344, "be")   // bytes: 11 22 33 44
+print "%n", b.decodeU32(0, "be")   // 287454020 (0x11223344)
+print "%n", b.decodeU32(0)         // 1144201745 (0x44332211) - read as LE
+```
+
+Choose the endianness at every call site; there is no buffer-wide mode.
 
 ---
 

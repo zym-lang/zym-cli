@@ -183,63 +183,177 @@ static ZymValue b_toAscii(ZymVM* vm, ZymValue ctx) {
 }
 
 // ---- decode/encode ----
+// Optional trailing endian arg: "le" (default) or "be". 1-byte methods ignore it.
 
-#define DECODE_METHOD(name, width, call, cast) \
-    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue offV) { \
+// Returns 0 (LE) / 1 (BE) / -1 on error. Absent arg = LE.
+static int readEndian(ZymVM* vm, const char* where, ZymValue* vargs, int vargc) {
+    if (vargc == 0) return 0;
+    if (vargc > 1 || !zym_isString(vargs[0])) {
+        zym_runtimeError(vm, "%s: optional endian arg must be \"le\" or \"be\"", where);
+        return -1;
+    }
+    const char* s = zym_asCString(vargs[0]);
+    if (s[0] == 'l' && s[1] == 'e' && s[2] == 0) return 0;
+    if (s[0] == 'b' && s[1] == 'e' && s[2] == 0) return 1;
+    zym_runtimeError(vm, "%s: endian must be \"le\" or \"be\"", where);
+    return -1;
+}
+
+static inline uint16_t bswap_if(uint16_t v, bool be) { return be ? __builtin_bswap16(v) : v; }
+static inline uint32_t bswap_if(uint32_t v, bool be) { return be ? __builtin_bswap32(v) : v; }
+static inline uint64_t bswap_if(uint64_t v, bool be) { return be ? __builtin_bswap64(v) : v; }
+
+static inline float bswap_float_if(float v, bool be) {
+    if (!be) return v;
+    uint32_t u; memcpy(&u, &v, 4); u = __builtin_bswap32(u); memcpy(&v, &u, 4); return v;
+}
+static inline double bswap_double_if(double v, bool be) {
+    if (!be) return v;
+    uint64_t u; memcpy(&u, &v, 8); u = __builtin_bswap64(u); memcpy(&v, &u, 8); return v;
+}
+
+// 1-byte decoders: endian arg accepted but ignored.
+#define DECODE_METHOD_1(name, ctype, out_cast) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue* vargs, int vargc) { \
         int64_t off; if (!reqInt(vm, offV, "Buffer." #name "(offset)", &off)) return ZYM_ERROR; \
+        if (readEndian(vm, "Buffer." #name, vargs, vargc) < 0) return ZYM_ERROR; \
+        auto* p = unwrap(ctx); \
+        if (off < 0 || off > (int64_t)p->size() - 1) { \
+            zym_runtimeError(vm, "Buffer." #name ": offset out of range"); return ZYM_ERROR; \
+        } \
+        return zym_newNumber((double)(out_cast)(*(const ctype*)(p->ptr() + off))); \
+    }
+
+#define DECODE_METHOD_INT(name, width, utype, stype, out_cast, signed_read) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue* vargs, int vargc) { \
+        int64_t off; if (!reqInt(vm, offV, "Buffer." #name "(offset)", &off)) return ZYM_ERROR; \
+        int e = readEndian(vm, "Buffer." #name, vargs, vargc); if (e < 0) return ZYM_ERROR; \
         auto* p = unwrap(ctx); \
         if (off < 0 || off > (int64_t)p->size() - (width)) { \
             zym_runtimeError(vm, "Buffer." #name ": offset out of range"); return ZYM_ERROR; \
         } \
-        return zym_newNumber((double)(cast)(call(p->ptr() + off))); \
+        utype raw; memcpy(&raw, p->ptr() + off, width); \
+        /* PBA stores LE, so bswap when caller asked BE */ \
+        raw = bswap_if(raw, e == 1); \
+        if (signed_read) return zym_newNumber((double)(out_cast)(stype)raw); \
+        return zym_newNumber((double)(out_cast)raw); \
     }
 
-DECODE_METHOD(decodeU8,     1, *(const uint8_t*),                 uint64_t)
-DECODE_METHOD(decodeI8,     1, *(const int8_t*),                  int64_t)
-DECODE_METHOD(decodeU16,    2, decode_uint16,                     uint64_t)
-DECODE_METHOD(decodeI16,    2, (int16_t)decode_uint16,            int64_t)
-DECODE_METHOD(decodeU32,    4, decode_uint32,                     uint64_t)
-DECODE_METHOD(decodeI32,    4, (int32_t)decode_uint32,            int64_t)
-DECODE_METHOD(decodeU64,    8, (int64_t)decode_uint64,            int64_t)
-DECODE_METHOD(decodeI64,    8, (int64_t)decode_uint64,            int64_t)
-DECODE_METHOD(decodeHalf,   2, decode_half,                       double)
-DECODE_METHOD(decodeFloat,  4, decode_float,                      double)
-DECODE_METHOD(decodeDouble, 8, decode_double,                     double)
+#define DECODE_METHOD_FLOAT(name, width, reader, swapper) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue* vargs, int vargc) { \
+        int64_t off; if (!reqInt(vm, offV, "Buffer." #name "(offset)", &off)) return ZYM_ERROR; \
+        int e = readEndian(vm, "Buffer." #name, vargs, vargc); if (e < 0) return ZYM_ERROR; \
+        auto* p = unwrap(ctx); \
+        if (off < 0 || off > (int64_t)p->size() - (width)) { \
+            zym_runtimeError(vm, "Buffer." #name ": offset out of range"); return ZYM_ERROR; \
+        } \
+        auto v = reader(p->ptr() + off); \
+        return zym_newNumber((double)swapper(v, e == 1)); \
+    }
 
-#undef DECODE_METHOD
+// Half is a 16-bit IEEE-754 stored little-endian; swap the 2 raw bytes for BE.
+static ZymValue b_decodeHalf(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue* vargs, int vargc) {
+    int64_t off; if (!reqInt(vm, offV, "Buffer.decodeHalf(offset)", &off)) return ZYM_ERROR;
+    int e = readEndian(vm, "Buffer.decodeHalf", vargs, vargc); if (e < 0) return ZYM_ERROR;
+    auto* p = unwrap(ctx);
+    if (off < 0 || off > (int64_t)p->size() - 2) {
+        zym_runtimeError(vm, "Buffer.decodeHalf: offset out of range"); return ZYM_ERROR;
+    }
+    uint8_t tmp[2] = { p->ptr()[off], p->ptr()[off + 1] };
+    if (e == 1) { uint8_t t = tmp[0]; tmp[0] = tmp[1]; tmp[1] = t; }
+    return zym_newNumber((double)decode_half(tmp));
+}
 
-#define ENCODE_METHOD(name, width, encoder, cast) \
-    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue valV) { \
+DECODE_METHOD_1(decodeU8, uint8_t, uint64_t)
+DECODE_METHOD_1(decodeI8, int8_t,  int64_t)
+DECODE_METHOD_INT(decodeU16, 2, uint16_t, int16_t, uint64_t, false)
+DECODE_METHOD_INT(decodeI16, 2, uint16_t, int16_t, int64_t,  true)
+DECODE_METHOD_INT(decodeU32, 4, uint32_t, int32_t, uint64_t, false)
+DECODE_METHOD_INT(decodeI32, 4, uint32_t, int32_t, int64_t,  true)
+DECODE_METHOD_INT(decodeU64, 8, uint64_t, int64_t, int64_t,  false)
+DECODE_METHOD_INT(decodeI64, 8, uint64_t, int64_t, int64_t,  true)
+DECODE_METHOD_FLOAT(decodeFloat,  4, decode_float,  bswap_float_if)
+DECODE_METHOD_FLOAT(decodeDouble, 8, decode_double, bswap_double_if)
+
+#undef DECODE_METHOD_1
+#undef DECODE_METHOD_INT
+#undef DECODE_METHOD_FLOAT
+
+// 1-byte encoders: endian arg accepted but ignored.
+#define ENCODE_METHOD_1(name, ctype) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue valV, ZymValue* vargs, int vargc) { \
         int64_t off; double val; \
         if (!reqInt(vm, offV, "Buffer." #name "(offset, value)", &off)) return ZYM_ERROR; \
         if (!reqNum(vm, valV, "Buffer." #name "(offset, value)", &val)) return ZYM_ERROR; \
+        if (readEndian(vm, "Buffer." #name, vargs, vargc) < 0) return ZYM_ERROR; \
+        auto* p = unwrap(ctx); \
+        if (off < 0 || off > (int64_t)p->size() - 1) { \
+            zym_runtimeError(vm, "Buffer." #name ": offset out of range"); return ZYM_ERROR; \
+        } \
+        p->ptrw()[off] = (uint8_t)(ctype)val; \
+        return zym_newNull(); \
+    }
+
+#define ENCODE_METHOD_INT(name, width, utype, cast) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue valV, ZymValue* vargs, int vargc) { \
+        int64_t off; double val; \
+        if (!reqInt(vm, offV, "Buffer." #name "(offset, value)", &off)) return ZYM_ERROR; \
+        if (!reqNum(vm, valV, "Buffer." #name "(offset, value)", &val)) return ZYM_ERROR; \
+        int e = readEndian(vm, "Buffer." #name, vargs, vargc); if (e < 0) return ZYM_ERROR; \
         auto* p = unwrap(ctx); \
         if (off < 0 || off > (int64_t)p->size() - (width)) { \
             zym_runtimeError(vm, "Buffer." #name ": offset out of range"); return ZYM_ERROR; \
         } \
-        encoder((cast)val, p->ptrw() + off); \
+        utype raw = (utype)(cast)val; \
+        raw = bswap_if(raw, e == 1); \
+        memcpy(p->ptrw() + off, &raw, width); \
         return zym_newNull(); \
     }
 
-static inline void enc_u8 (uint8_t v, uint8_t* p)  { p[0] = v; }
-static inline void enc_s8 (int8_t v, uint8_t* p)   { p[0] = (uint8_t)v; }
-static inline void enc_s16(int16_t v, uint8_t* p)  { encode_uint16((uint16_t)v, p); }
-static inline void enc_s32(int32_t v, uint8_t* p)  { encode_uint32((uint32_t)v, p); }
-static inline void enc_s64(int64_t v, uint8_t* p)  { encode_uint64((uint64_t)v, p); }
+#define ENCODE_METHOD_FLOAT(name, width, writer, ftype, swapper) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue valV, ZymValue* vargs, int vargc) { \
+        int64_t off; double val; \
+        if (!reqInt(vm, offV, "Buffer." #name "(offset, value)", &off)) return ZYM_ERROR; \
+        if (!reqNum(vm, valV, "Buffer." #name "(offset, value)", &val)) return ZYM_ERROR; \
+        int e = readEndian(vm, "Buffer." #name, vargs, vargc); if (e < 0) return ZYM_ERROR; \
+        auto* p = unwrap(ctx); \
+        if (off < 0 || off > (int64_t)p->size() - (width)) { \
+            zym_runtimeError(vm, "Buffer." #name ": offset out of range"); return ZYM_ERROR; \
+        } \
+        writer(swapper((ftype)val, e == 1), p->ptrw() + off); \
+        return zym_newNull(); \
+    }
 
-ENCODE_METHOD(encodeU8,     1, enc_u8,        uint8_t)
-ENCODE_METHOD(encodeI8,     1, enc_s8,        int8_t)
-ENCODE_METHOD(encodeU16,    2, encode_uint16, uint16_t)
-ENCODE_METHOD(encodeI16,    2, enc_s16,       int16_t)
-ENCODE_METHOD(encodeU32,    4, encode_uint32, uint32_t)
-ENCODE_METHOD(encodeI32,    4, enc_s32,       int32_t)
-ENCODE_METHOD(encodeU64,    8, encode_uint64, uint64_t)
-ENCODE_METHOD(encodeI64,    8, enc_s64,       int64_t)
-ENCODE_METHOD(encodeHalf,   2, encode_half,   float)
-ENCODE_METHOD(encodeFloat,  4, encode_float,  float)
-ENCODE_METHOD(encodeDouble, 8, encode_double, double)
+// Half: encode LE via encode_half, then byte-swap the 2 bytes in place for BE.
+static ZymValue b_encodeHalf(ZymVM* vm, ZymValue ctx, ZymValue offV, ZymValue valV, ZymValue* vargs, int vargc) {
+    int64_t off; double val;
+    if (!reqInt(vm, offV, "Buffer.encodeHalf(offset, value)", &off)) return ZYM_ERROR;
+    if (!reqNum(vm, valV, "Buffer.encodeHalf(offset, value)", &val)) return ZYM_ERROR;
+    int e = readEndian(vm, "Buffer.encodeHalf", vargs, vargc); if (e < 0) return ZYM_ERROR;
+    auto* p = unwrap(ctx);
+    if (off < 0 || off > (int64_t)p->size() - 2) {
+        zym_runtimeError(vm, "Buffer.encodeHalf: offset out of range"); return ZYM_ERROR;
+    }
+    uint8_t* w = p->ptrw() + off;
+    encode_half((float)val, w);
+    if (e == 1) { uint8_t t = w[0]; w[0] = w[1]; w[1] = t; }
+    return zym_newNull();
+}
 
-#undef ENCODE_METHOD
+ENCODE_METHOD_1(encodeU8, uint8_t)
+ENCODE_METHOD_1(encodeI8, int8_t)
+ENCODE_METHOD_INT(encodeU16, 2, uint16_t, uint16_t)
+ENCODE_METHOD_INT(encodeI16, 2, uint16_t, int16_t)
+ENCODE_METHOD_INT(encodeU32, 4, uint32_t, uint32_t)
+ENCODE_METHOD_INT(encodeI32, 4, uint32_t, int32_t)
+ENCODE_METHOD_INT(encodeU64, 8, uint64_t, uint64_t)
+ENCODE_METHOD_INT(encodeI64, 8, uint64_t, int64_t)
+ENCODE_METHOD_FLOAT(encodeFloat,  4, encode_float,  float,  bswap_float_if)
+ENCODE_METHOD_FLOAT(encodeDouble, 8, encode_double, double, bswap_double_if)
+
+#undef ENCODE_METHOD_1
+#undef ENCODE_METHOD_INT
+#undef ENCODE_METHOD_FLOAT
 
 // ---- instance assembly ----
 
@@ -254,6 +368,13 @@ static ZymValue makeInstance(ZymVM* vm, const PackedByteArray& src) {
 
 #define M(name, sig, fn) do { \
         ZymValue cl = zym_createNativeClosure(vm, sig, (void*)fn, ctx); \
+        zym_pushRoot(vm, cl); \
+        zym_mapSet(vm, obj, name, cl); \
+        zym_popRoot(vm); \
+    } while (0)
+
+#define MV(name, sig, fn) do { \
+        ZymValue cl = zym_createNativeClosureVariadic(vm, sig, (void*)fn, ctx); \
         zym_pushRoot(vm, cl); \
         zym_mapSet(vm, obj, name, cl); \
         zym_popRoot(vm); \
@@ -286,31 +407,32 @@ static ZymValue makeInstance(ZymVM* vm, const PackedByteArray& src) {
     M("toUtf8",    "toUtf8()",            b_toUtf8);
     M("toAscii",   "toAscii()",           b_toAscii);
 
-    M("decodeU8",     "decodeU8(offset)",     b_decodeU8);
-    M("decodeI8",     "decodeI8(offset)",     b_decodeI8);
-    M("decodeU16",    "decodeU16(offset)",    b_decodeU16);
-    M("decodeI16",    "decodeI16(offset)",    b_decodeI16);
-    M("decodeU32",    "decodeU32(offset)",    b_decodeU32);
-    M("decodeI32",    "decodeI32(offset)",    b_decodeI32);
-    M("decodeU64",    "decodeU64(offset)",    b_decodeU64);
-    M("decodeI64",    "decodeI64(offset)",    b_decodeI64);
-    M("decodeHalf",   "decodeHalf(offset)",   b_decodeHalf);
-    M("decodeFloat",  "decodeFloat(offset)",  b_decodeFloat);
-    M("decodeDouble", "decodeDouble(offset)", b_decodeDouble);
+    MV("decodeU8",     "decodeU8(offset, ...)",     b_decodeU8);
+    MV("decodeI8",     "decodeI8(offset, ...)",     b_decodeI8);
+    MV("decodeU16",    "decodeU16(offset, ...)",    b_decodeU16);
+    MV("decodeI16",    "decodeI16(offset, ...)",    b_decodeI16);
+    MV("decodeU32",    "decodeU32(offset, ...)",    b_decodeU32);
+    MV("decodeI32",    "decodeI32(offset, ...)",    b_decodeI32);
+    MV("decodeU64",    "decodeU64(offset, ...)",    b_decodeU64);
+    MV("decodeI64",    "decodeI64(offset, ...)",    b_decodeI64);
+    MV("decodeHalf",   "decodeHalf(offset, ...)",   b_decodeHalf);
+    MV("decodeFloat",  "decodeFloat(offset, ...)",  b_decodeFloat);
+    MV("decodeDouble", "decodeDouble(offset, ...)", b_decodeDouble);
 
-    M("encodeU8",     "encodeU8(offset, value)",     b_encodeU8);
-    M("encodeI8",     "encodeI8(offset, value)",     b_encodeI8);
-    M("encodeU16",    "encodeU16(offset, value)",    b_encodeU16);
-    M("encodeI16",    "encodeI16(offset, value)",    b_encodeI16);
-    M("encodeU32",    "encodeU32(offset, value)",    b_encodeU32);
-    M("encodeI32",    "encodeI32(offset, value)",    b_encodeI32);
-    M("encodeU64",    "encodeU64(offset, value)",    b_encodeU64);
-    M("encodeI64",    "encodeI64(offset, value)",    b_encodeI64);
-    M("encodeHalf",   "encodeHalf(offset, value)",   b_encodeHalf);
-    M("encodeFloat",  "encodeFloat(offset, value)",  b_encodeFloat);
-    M("encodeDouble", "encodeDouble(offset, value)", b_encodeDouble);
+    MV("encodeU8",     "encodeU8(offset, value, ...)",     b_encodeU8);
+    MV("encodeI8",     "encodeI8(offset, value, ...)",     b_encodeI8);
+    MV("encodeU16",    "encodeU16(offset, value, ...)",    b_encodeU16);
+    MV("encodeI16",    "encodeI16(offset, value, ...)",    b_encodeI16);
+    MV("encodeU32",    "encodeU32(offset, value, ...)",    b_encodeU32);
+    MV("encodeI32",    "encodeI32(offset, value, ...)",    b_encodeI32);
+    MV("encodeU64",    "encodeU64(offset, value, ...)",    b_encodeU64);
+    MV("encodeI64",    "encodeI64(offset, value, ...)",    b_encodeI64);
+    MV("encodeHalf",   "encodeHalf(offset, value, ...)",   b_encodeHalf);
+    MV("encodeFloat",  "encodeFloat(offset, value, ...)",  b_encodeFloat);
+    MV("encodeDouble", "encodeDouble(offset, value, ...)", b_encodeDouble);
 
 #undef M
+#undef MV
 
     zym_popRoot(vm); // obj
     zym_popRoot(vm); // ctx

@@ -4,6 +4,7 @@
 
 #include "runtime_loader.hpp"
 #include "full_executor.hpp"
+#include "godot_host.hpp"
 #include "zym/zym.h"
 
 // ---- Custom Allocator Example ------------------------------------------------
@@ -36,6 +37,9 @@ static void cli_free(void* ctx, void* ptr, size_t size) {
 
 int main(int argc, char** argv)
 {
+    // Godot core up before Zym, down on scope exit (covers all return paths).
+    zym::godot_host::Scope godot_scope;
+
     // Create a custom allocator that wraps standard malloc/free.
     // A real application could point these at a custom pool, arena, etc.
     ZymAllocator allocator = {

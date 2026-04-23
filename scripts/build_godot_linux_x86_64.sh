@@ -34,7 +34,7 @@ exec scons \
     arch=x86_64 \
     library_type=static_library \
     lto=full \
-    optimize=speed \
+    optimize=size_extra \
     production=yes \
     \
     modules_enabled_by_default=no \
@@ -70,4 +70,7 @@ exec scons \
     brotli=no \
     use_static_cpp=yes \
     disable_exceptions=yes \
+    build_profile="../scripts/zym_profile.gdbuild" \
+    ccflags="-fvisibility=hidden -ffunction-sections -fdata-sections" \
+    cxxflags="-fvisibility-inlines-hidden" \
     "$@"

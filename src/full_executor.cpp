@@ -848,7 +848,7 @@ int full_main(int argc, char** argv, ZymAllocator* allocator) {
     }
 
     if (argc == 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0)) {
-        printf("0.1.0\n");
+        printf("0.3.0\n");
         return 0;
     }
 

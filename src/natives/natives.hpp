@@ -5,4 +5,4 @@
 void setupNatives(ZymVM* vm);
 
 ZymValue nativePrint(ZymVM* vm, ZymValue* args, int argc);
-ZymValue nativeTime_clock(ZymVM* vm);
+ZymValue nativeTime_create(ZymVM* vm);

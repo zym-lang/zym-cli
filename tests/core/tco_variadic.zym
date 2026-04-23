@@ -1,0 +1,655 @@
+// ============================================================================
+// TAIL CALL OPTIMIZATION + VARIADIC FUNCTION TEST SUITE
+// Tests TCO with variadic (...rest) patterns to verify O(1) stack usage
+// ============================================================================
+
+// Test helper function
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+print("=== STARTING TCO VARIADIC FUNCTION TESTS ===")
+print("")
+
+// ============================================================================
+// TEST 1: Simple Tail Recursive Countdown (Pure Variadic)
+// ============================================================================
+print("--- [1] Tail Recursive Countdown (Pure Variadic) ---")
+
+func vCountdown(...args) {
+    var n = args[0]
+    if (n <= 0) {
+        return n
+    }
+    @tco aggressive
+    return vCountdown(n - 1)
+}
+
+assert_wrap(vCountdown(100) == 0, "1.1: Variadic countdown 100")
+assert_wrap(vCountdown(1000) == 0, "1.2: Variadic deep countdown 1000 (no stack overflow)")
+
+// ============================================================================
+// TEST 2: Tail Recursive Sum with Accumulator (Fixed + Rest)
+// ============================================================================
+print("--- [2] Tail Recursive Sum (Fixed + Rest) ---")
+
+func vSum(n, ...rest) {
+    var acc = 0
+    if (length(rest) > 0) {
+        acc = rest[0]
+    }
+    if (n <= 0) {
+        return acc
+    }
+    @tco aggressive
+    return vSum(n - 1, acc + n)
+}
+
+assert_wrap(vSum(10) == 55, "2.1: Variadic sum 1 to 10")
+assert_wrap(vSum(100) == 5050, "2.2: Variadic sum 1 to 100")
+assert_wrap(vSum(10, 100) == 155, "2.3: Variadic sum 1-10 with initial acc 100")
+
+// ============================================================================
+// TEST 3: Tail Recursive Factorial (Pure Variadic, Unpack Args)
+// ============================================================================
+print("--- [3] Tail Recursive Factorial (Pure Variadic) ---")
+
+func vFactorial(...args) {
+    var n = args[0]
+    var acc = 1
+    if (length(args) > 1) {
+        acc = args[1]
+    }
+    if (n <= 1) {
+        return acc
+    }
+    @tco aggressive
+    return vFactorial(n - 1, n * acc)
+}
+
+assert_wrap(vFactorial(5) == 120, "3.1: Variadic factorial 5!")
+assert_wrap(vFactorial(10) == 3628800, "3.2: Variadic factorial 10!")
+assert_wrap(vFactorial(5, 2) == 240, "3.3: Variadic factorial 5! with initial acc 2")
+
+// ============================================================================
+// TEST 4: Mutual Tail Recursion (Both Variadic)
+// ============================================================================
+print("--- [4] Mutual Tail Recursion (Both Variadic) ---")
+
+func vIsEven(...args) {
+    var n = args[0]
+    if (n == 0) {
+        return true
+    }
+    @tco aggressive
+    return vIsOdd(n - 1)
+}
+
+func vIsOdd(...args) {
+    var n = args[0]
+    if (n == 0) {
+        return false
+    }
+    @tco aggressive
+    return vIsEven(n - 1)
+}
+
+assert_wrap(vIsEven(0) == true, "4.1: Variadic mutual recursion - isEven(0)")
+assert_wrap(vIsEven(1) == false, "4.2: Variadic mutual recursion - isEven(1)")
+assert_wrap(vIsEven(10) == true, "4.3: Variadic mutual recursion - isEven(10)")
+assert_wrap(vIsOdd(0) == false, "4.4: Variadic mutual recursion - isOdd(0)")
+assert_wrap(vIsOdd(1) == true, "4.5: Variadic mutual recursion - isOdd(1)")
+assert_wrap(vIsOdd(11) == true, "4.6: Variadic mutual recursion - isOdd(11)")
+
+// ============================================================================
+// TEST 5: Tail Call with Closure Capture (Variadic Inner)
+// ============================================================================
+print("--- [5] Tail Call with Closure (Variadic) ---")
+
+func makeVCounter(start) {
+    func count(...args) {
+        var n = args[0]
+        var limit = args[1]
+        if (n >= limit) {
+            return n
+        }
+        @tco aggressive
+        return count(n + start, limit)
+    }
+    return count
+}
+
+var vCounter = makeVCounter(2)
+assert_wrap(vCounter(0, 10) == 10, "5.1: Variadic closure tail call - count by 2s to 10")
+assert_wrap(vCounter(0, 20) == 20, "5.2: Variadic closure tail call - count by 2s to 20")
+
+// ============================================================================
+// TEST 6: Tail Call to Different Variadic Function
+// ============================================================================
+print("--- [6] Tail Call to Different Variadic Function ---")
+
+func vHelper(n, ...rest) {
+    var acc = 0
+    if (length(rest) > 0) {
+        acc = rest[0]
+    }
+    if (n <= 0) {
+        return acc
+    }
+    @tco aggressive
+    return vHelper(n - 1, acc + n)
+}
+
+func vCaller(...args) {
+    var n = args[0]
+    @tco aggressive
+    return vHelper(n, 0)
+}
+
+assert_wrap(vCaller(10) == 55, "6.1: Variadic tail call to different function - sum 1 to 10")
+assert_wrap(vCaller(20) == 210, "6.2: Variadic tail call to different function - sum 1 to 20")
+
+// ============================================================================
+// TEST 7: GCD with Variadic Tail Recursion
+// ============================================================================
+print("--- [7] GCD Variadic Tail Recursion ---")
+
+func vGcd(...args) {
+    var a = args[0]
+    var b = args[1]
+    if (b == 0) {
+        return a
+    }
+    @tco aggressive
+    return vGcd(b, a % b)
+}
+
+assert_wrap(vGcd(48, 18) == 6, "7.1: Variadic GCD - gcd(48, 18)")
+assert_wrap(vGcd(100, 35) == 5, "7.2: Variadic GCD - gcd(100, 35)")
+
+// ============================================================================
+// TEST 8: Collatz Sequence (Variadic)
+// ============================================================================
+print("--- [8] Collatz Sequence (Variadic) ---")
+
+func vCollatz(...args) {
+    var n = args[0]
+    var steps = args[1]
+    if (n == 1) {
+        return steps
+    }
+    if (n % 2 == 0) {
+        @tco aggressive
+        return vCollatz(n / 2, steps + 1)
+    }
+    @tco aggressive
+    return vCollatz(n * 3 + 1, steps + 1)
+}
+
+assert_wrap(vCollatz(10, 0) == 6, "8.1: Variadic Collatz - 10")
+assert_wrap(vCollatz(27, 0) == 111, "8.2: Variadic Collatz - 27")
+
+// ============================================================================
+// TEST 9: Deep Recursion with Variadic Closure
+// ============================================================================
+print("--- [9] Deep Recursion with Variadic Closure ---")
+
+func makeVRecursive(factor) {
+    func recurse(...args) {
+        var n = args[0]
+        var acc = args[1]
+        if (n <= 0) {
+            return acc
+        }
+        @tco aggressive
+        return recurse(n - 1, acc + factor)
+    }
+    return recurse
+}
+
+var vr = makeVRecursive(3)
+assert_wrap(vr(100, 0) == 300, "9.1: Variadic deep recursion with closure - 100 * 3")
+assert_wrap(vr(500, 0) == 1500, "9.2: Variadic deep recursion with closure - 500 * 3")
+
+// ============================================================================
+// TEST 10: Tail Recursive Power (Variadic)
+// ============================================================================
+print("--- [10] Tail Recursive Power (Variadic) ---")
+
+func vPower(...args) {
+    var base = args[0]
+    var exp = args[1]
+    var acc = 1
+    if (length(args) > 2) {
+        acc = args[2]
+    }
+    if (exp <= 0) {
+        return acc
+    }
+    @tco aggressive
+    return vPower(base, exp - 1, acc * base)
+}
+
+assert_wrap(vPower(2, 10) == 1024, "10.1: Variadic power - 2^10")
+assert_wrap(vPower(3, 5) == 243, "10.2: Variadic power - 3^5")
+assert_wrap(vPower(2, 10, 3) == 3072, "10.3: Variadic power - 2^10 with initial acc 3")
+
+// ============================================================================
+// TEST 11: Stress Test - Very Deep Variadic Recursion
+// ============================================================================
+print("--- [11] Stress Test - Deep Variadic Recursion ---")
+
+func vDeepRecursion(...args) {
+    var n = args[0]
+    var acc = args[1]
+    if (n <= 0) {
+        return acc
+    }
+    @tco aggressive
+    return vDeepRecursion(n - 1, acc + 1)
+}
+
+assert_wrap(vDeepRecursion(5000, 0) == 5000, "11.1: Variadic stress test - 5000 iterations (no overflow)")
+
+// ============================================================================
+// TEST 12: Tail Call with Overloaded + Variadic Fallback
+// ============================================================================
+print("--- [12] Tail Call with Overloaded + Variadic Fallback ---")
+
+func vCompute(n) {
+    return n * 2
+}
+
+func vCompute(n, acc) {
+    if (n <= 0) {
+        return acc
+    }
+    @tco aggressive
+    return vCompute(n - 1, acc + n)
+}
+
+func vCompute(...args) {
+    // Variadic fallback: sum all args and start accumulating from that
+    var total = 0
+    for (var i = 0; i < length(args); i++) {
+        total = total + args[i]
+    }
+    return total
+}
+
+assert_wrap(vCompute(10) == 20, "12.1: Exact overload 1-arg - 10 * 2")
+assert_wrap(vCompute(10, 0) == 55, "12.2: Exact overload 2-arg tail recursive sum")
+assert_wrap(vCompute(1, 2, 3, 4) == 10, "12.3: Variadic fallback - sum all")
+
+// ============================================================================
+// TEST 13: Variadic Accordion (Small ↔ Large Frame Swap)
+// ============================================================================
+print("--- [13] Variadic Accordion ---")
+
+func vPing(...args) {
+    var n = args[0]
+    if (n == 0) return "Success"
+    @tco aggressive
+    return vPong(n - 1)
+}
+
+func vPong(...args) {
+    var n = args[0]
+    // Stack bloat: many locals to force a large frame
+    var a = 1 var b = 2 var c = 3 var d = 4
+    var e = 5 var f = 6 var g = 7 var h = 8
+    var i = 9 var j = 10
+
+    var sum = a + b + c + d + e + f + g + h + i + j
+    if (sum != 55) {
+        return "MEMORY CORRUPTION"
+    }
+
+    @tco aggressive
+    return vPing(n - 1)
+}
+
+assert_wrap(vPing(1000) == "Success", "13.1: Variadic accordion - 1000 iterations")
+assert_wrap(vPing(10000) == "Success", "13.2: Variadic accordion - 10000 iterations")
+
+// ============================================================================
+// TEST 14: Variadic Shattered Accordion (3-Way Mutual, Varying Args)
+// ============================================================================
+print("--- [14] Variadic Shattered Accordion ---")
+
+func vAlpha(...args) {
+    var n = args[0]
+    var x = args[1]
+    if (n <= 0) return x
+    // Tiny frame: just 2 values from args
+    @tco aggressive
+    return vBeta(n - 1, x + 1, "extra_junk")
+}
+
+func vBeta(...args) {
+    var n = args[0]
+    var x = args[1]
+    // Medium frame: 3 values from args + 2 locals
+    var val1 = x * 2
+    var val2 = n + 1
+    @tco aggressive
+    return vGamma(n - 1, val1, val2, "more_junk", 42)
+}
+
+func vGamma(...args) {
+    var n = args[0]
+    var a = args[1]
+    var b = args[2]
+    // Large frame: 5 values from args + 4 locals
+    var l1 = 1 var l2 = 2 var l3 = 3 var l4 = 4
+    var check = a + b + l1 + l2 + l3 + l4
+    if (n <= 0) return "Success"
+    @tco aggressive
+    return vAlpha(n - 1, a / 2)
+}
+
+assert_wrap(vAlpha(1000, 1) == "Success", "14.1: Variadic shattered accordion - 1000 iterations")
+assert_wrap(vAlpha(10000, 1) == "Success", "14.2: Variadic shattered accordion - 10000 iterations")
+
+// ============================================================================
+// TEST 15: Variadic Overwrite (Closure Capture During TCO)
+// ============================================================================
+print("--- [15] Variadic Overwrite (Closure Capture) ---")
+
+var vHistory = [null, null, null, null, null]
+
+func vTortureTest(...args) {
+    var n = args[0]
+    var index = args[1]
+    var list = args[2]
+    if (n == 0) return list
+
+    // Closure captures 'n' — must survive the tail call overwrite
+    func snap() {
+        return n
+    }
+
+    list[index] = snap
+
+    @tco aggressive
+    return vTortureTest(n - 1, index + 1, list)
+}
+
+vTortureTest(5, 0, vHistory)
+assert_wrap(vHistory[0]() == 5, "15.1: Variadic overwrite - index 0 captured 5")
+assert_wrap(vHistory[1]() == 4, "15.2: Variadic overwrite - index 1 captured 4")
+assert_wrap(vHistory[2]() == 3, "15.3: Variadic overwrite - index 2 captured 3")
+assert_wrap(vHistory[3]() == 2, "15.4: Variadic overwrite - index 3 captured 2")
+assert_wrap(vHistory[4]() == 1, "15.5: Variadic overwrite - index 4 captured 1")
+
+// ============================================================================
+// TEST 16: Mixed Variadic ↔ Fixed Mutual TCO
+// ============================================================================
+print("--- [16] Mixed Variadic <-> Fixed Mutual TCO ---")
+
+func fixedStep(n, acc) {
+    if (n <= 0) {
+        return acc
+    }
+    // Fixed function tail-calls a variadic function
+    @tco aggressive
+    return variadicStep(n - 1, acc + 1)
+}
+
+func variadicStep(...args) {
+    var n = args[0]
+    var acc = args[1]
+    if (n <= 0) {
+        return acc
+    }
+    // Variadic function tail-calls a fixed function
+    @tco aggressive
+    return fixedStep(n - 1, acc + 1)
+}
+
+assert_wrap(fixedStep(100, 0) == 100, "16.1: Mixed fixed->variadic mutual TCO - 100")
+assert_wrap(variadicStep(100, 0) == 100, "16.2: Mixed variadic->fixed mutual TCO - 100")
+assert_wrap(fixedStep(1000, 0) == 1000, "16.3: Mixed mutual TCO deep - 1000")
+
+// ============================================================================
+// TEST 17: Variadic Self-Recursion with Varying Arg Counts
+// ============================================================================
+print("--- [17] Variadic Self-Recursion Varying Arg Counts ---")
+
+func vVary(...args) {
+    if (length(args) == 1) {
+        // Base case: single arg, return it
+        return args[0]
+    }
+    if (length(args) == 3) {
+        // 3 args: combine and recurse with 2 args
+        @tco aggressive
+        return vVary(args[0] + args[1], args[2])
+    }
+    if (length(args) == 2) {
+        // 2 args: combine and recurse with 1 arg
+        @tco aggressive
+        return vVary(args[0] + args[1])
+    }
+    return -1
+}
+
+assert_wrap(vVary(10) == 10, "17.1: Variadic vary - 1 arg passthrough")
+assert_wrap(vVary(10, 20) == 30, "17.2: Variadic vary - 2 args combine")
+assert_wrap(vVary(10, 20, 30) == 60, "17.3: Variadic vary - 3 args -> 2 -> 1")
+
+// ============================================================================
+// TEST 18: Deep Variadic with Increasing Arg Count per Hop
+// ============================================================================
+print("--- [18] Deep Variadic Increasing Args ---")
+
+func vGrow(...args) {
+    var n = args[0]
+    if (n <= 0) {
+        return length(args)
+    }
+    // Always tail-call with same first arg decremented, plus carry extra
+    if (length(args) < 4) {
+        @tco aggressive
+        return vGrow(n - 1, 1, 2, 3)
+    }
+    @tco aggressive
+    return vGrow(n - 1, args[1], args[2], args[3])
+}
+
+assert_wrap(vGrow(100) == 4, "18.1: Deep variadic growing args - 100 iterations")
+assert_wrap(vGrow(1000) == 4, "18.2: Deep variadic growing args - 1000 iterations")
+
+// ============================================================================
+// TEST 19: Deep Variadic with Shrinking Arg Count per Hop
+// ============================================================================
+print("--- [19] Deep Variadic Shrinking Args ---")
+
+func vShrinkA(...args) {
+    // Receives 3 args: n, a, b
+    var n = args[0]
+    if (n <= 0) return args[1] + args[2]
+    @tco aggressive
+    return vShrinkB(n - 1, args[1] + args[2])
+}
+
+func vShrinkB(...args) {
+    // Receives 2 args: n, val
+    var n = args[0]
+    if (n <= 0) return args[1]
+    @tco aggressive
+    return vShrinkA(n - 1, args[1], 1)
+}
+
+assert_wrap(vShrinkA(100, 0, 1) == 51, "19.1: Deep variadic shrink/grow mutual - 100")
+assert_wrap(vShrinkA(1000, 0, 1) == 501, "19.2: Deep variadic shrink/grow mutual - 1000")
+
+// ============================================================================
+// TEST 20: Variadic Tail Recursion with List Building
+// ============================================================================
+print("--- [20] Variadic Tail Recursion with List ---")
+
+func vBuildList(...args) {
+    var n = args[0]
+    var lst = args[1]
+    if (n <= 0) {
+        return lst
+    }
+    lst[n - 1] = n
+    @tco aggressive
+    return vBuildList(n - 1, lst)
+}
+
+var vResult = vBuildList(5, [0, 0, 0, 0, 0])
+assert_wrap(vResult[0] == 1, "20.1: Variadic list build - first element")
+assert_wrap(vResult[4] == 5, "20.2: Variadic list build - last element")
+
+// ============================================================================
+// TEST 21: Variadic Closure Chain with TCO
+// ============================================================================
+print("--- [21] Variadic Closure Chain with TCO ---")
+
+func makeVChain(offset) {
+    func step(...args) {
+        var n = args[0]
+        var acc = args[1]
+        if (n <= 0) {
+            return acc
+        }
+        @tco aggressive
+        return step(n - 1, acc + offset)
+    }
+    return step
+}
+
+var chain1 = makeVChain(5)
+var chain2 = makeVChain(10)
+assert_wrap(chain1(100, 0) == 500, "21.1: Variadic closure chain - 100 * 5")
+assert_wrap(chain2(100, 0) == 1000, "21.2: Variadic closure chain - 100 * 10")
+assert_wrap(chain1(1000, 0) == 5000, "21.3: Variadic closure chain deep - 1000 * 5")
+
+// ============================================================================
+// TEST 22: Variadic Fixed+Rest Accordion
+// ============================================================================
+print("--- [22] Variadic Fixed+Rest Accordion ---")
+
+func frPing(n, ...extra) {
+    if (n == 0) return "Success"
+    @tco aggressive
+    return frPong(n - 1, "padding_a", "padding_b")
+}
+
+func frPong(n, ...extra) {
+    // Verify rest args arrived intact
+    if (length(extra) != 2) return "REST_CORRUPTION"
+    if (extra[0] != "padding_a") return "VALUE_CORRUPTION"
+
+    var a = 1 var b = 2 var c = 3 var d = 4 var e = 5
+    var sum = a + b + c + d + e
+    if (sum != 15) return "MEMORY_CORRUPTION"
+
+    @tco aggressive
+    return frPing(n - 1)
+}
+
+assert_wrap(frPing(1000) == "Success", "22.1: Fixed+rest accordion - 1000 iterations")
+assert_wrap(frPing(5000) == "Success", "22.2: Fixed+rest accordion - 5000 iterations")
+
+// ============================================================================
+// TEST 23: Variadic Fibonacci Tail Recursive (CPS Style)
+// ============================================================================
+print("--- [23] Variadic Fibonacci CPS ---")
+
+func vFib(...args) {
+    var n = args[0]
+    var a = 0
+    var b = 1
+    if (length(args) > 1) { a = args[1] }
+    if (length(args) > 2) { b = args[2] }
+    if (n <= 0) {
+        return a
+    }
+    @tco aggressive
+    return vFib(n - 1, b, a + b)
+}
+
+assert_wrap(vFib(0) == 0, "23.1: Variadic fib CPS - fib(0)")
+assert_wrap(vFib(1) == 1, "23.2: Variadic fib CPS - fib(1)")
+assert_wrap(vFib(10) == 55, "23.3: Variadic fib CPS - fib(10)")
+assert_wrap(vFib(20) == 6765, "23.4: Variadic fib CPS - fib(20)")
+
+// ============================================================================
+// TEST 24: Variadic State Machine
+// ============================================================================
+print("--- [24] Variadic State Machine ---")
+
+func stateA(...args) {
+    var n = args[0]
+    var transitions = args[1]
+    if (n <= 0) return "A:" + str(transitions)
+    @tco aggressive
+    return stateB(n - 1, transitions + 1)
+}
+
+func stateB(...args) {
+    var n = args[0]
+    var transitions = args[1]
+    if (n <= 0) return "B:" + str(transitions)
+    @tco aggressive
+    return stateC(n - 1, transitions + 1)
+}
+
+func stateC(...args) {
+    var n = args[0]
+    var transitions = args[1]
+    if (n <= 0) return "C:" + str(transitions)
+    @tco aggressive
+    return stateA(n - 1, transitions + 1)
+}
+
+assert_wrap(stateA(0, 0) == "A:0", "24.1: State machine - stop at A")
+assert_wrap(stateA(1, 0) == "B:1", "24.2: State machine - A->B")
+assert_wrap(stateA(2, 0) == "C:2", "24.3: State machine - A->B->C")
+assert_wrap(stateA(3, 0) == "A:3", "24.4: State machine - full cycle back to A")
+assert_wrap(stateA(1000, 0) == "B:1000", "24.5: State machine deep - 1000 transitions (ends at B)")
+
+// ============================================================================
+// TEST 25: Variadic Stress - 100K Deep Recursion
+// ============================================================================
+print("--- [25] Variadic Stress - 100K Deep ---")
+
+func vStress(...args) {
+    var n = args[0]
+    var acc = args[1]
+    if (n <= 0) {
+        return acc
+    }
+    @tco aggressive
+    return vStress(n - 1, acc + 1)
+}
+
+assert_wrap(vStress(100000, 0) == 100000, "25.1: Variadic stress - 100K iterations (no overflow)")
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

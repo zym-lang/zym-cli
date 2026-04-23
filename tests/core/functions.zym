@@ -1,0 +1,1436 @@
+// ============================================================================
+// FULL COVERAGE FUNCTION TEST FILE
+// Tests: Hoisting, Overloading (by arity), Closures, Anonymous Functions
+// ============================================================================
+
+// Test helper function
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+        print("")
+    }
+}
+
+print("=== STARTING FULL COVERAGE FUNCTION TESTS ===")
+print("")
+
+// ============================================================================
+// SECTION 1: FUNCTION HOISTING
+// ============================================================================
+print("--- [1] Basic Hoisting ---")
+
+// Call before definition
+var hoisted_result = hoisted_add(10, 20)
+assert_wrap(hoisted_result == 30, "1.1: Hoisted function call before definition")
+
+func hoisted_add(a, b) {
+    return a + b
+}
+
+// Call after definition to confirm
+assert_wrap(hoisted_add(5, 15) == 20, "1.2: Hoisted function call after definition")
+
+
+// ============================================================================
+// SECTION 2: OVERLOADING BY ARITY
+// ============================================================================
+print("--- [2] Basic Overloading ---")
+
+func process() {
+    return "No arguments"
+}
+
+func process(x) {
+    return x * 2
+}
+
+func process(x, y) {
+    return x + y
+}
+
+func process(x, y, z) {
+    return x + y + z
+}
+
+assert_wrap(process() == "No arguments", "2.1: Overload with 0 args")
+assert_wrap(process(5) == 10, "2.2: Overload with 1 arg")
+assert_wrap(process(3, 7) == 10, "2.3: Overload with 2 args")
+assert_wrap(process(1, 2, 3) == 6, "2.4: Overload with 3 args")
+
+
+// ============================================================================
+// SECTION 3: HOISTING + OVERLOADING
+// ============================================================================
+print("--- [3] Hoisting with Overloading ---")
+
+// Call overloaded functions before definition
+assert_wrap(compute() == 0, "3.1: Hoisted overload 0 args")
+assert_wrap(compute(10) == 100, "3.2: Hoisted overload 1 arg")
+assert_wrap(compute(5, 3) == 15, "3.3: Hoisted overload 2 args")
+
+func compute() {
+    return 0
+}
+
+func compute(x) {
+    return x * x
+}
+
+func compute(x, y) {
+    return x * y
+}
+
+
+// ============================================================================
+// SECTION 4: BASIC CLOSURES
+// ============================================================================
+print("--- [4] Basic Closure with Single Captured Variable ---")
+
+func makeCounter() {
+    var count = 0
+    func increment() {
+        count = count + 1
+        return count
+    }
+    return increment
+}
+
+var counter1 = makeCounter()
+assert_wrap(counter1() == 1, "4.1: First counter call")
+assert_wrap(counter1() == 2, "4.2: Second counter call")
+assert_wrap(counter1() == 3, "4.3: Third counter call")
+
+var counter2 = makeCounter()
+assert_wrap(counter2() == 1, "4.4: New counter starts at 1")
+assert_wrap(counter1() == 4, "4.5: First counter continues at 4")
+
+
+// ============================================================================
+// SECTION 5: CLOSURES WITH MULTIPLE CAPTURED VARIABLES
+// ============================================================================
+print("--- [5] Closure with Multiple Captured Variables ---")
+
+func makeAccumulator(initial) {
+    var sum = initial
+    var count = 0
+    func add(value) {
+        sum = sum + value
+        count = count + 1
+        return sum
+    }
+    return add
+}
+
+var acc = makeAccumulator(100)
+assert_wrap(acc(5) == 105, "5.1: Accumulator add 5")
+assert_wrap(acc(10) == 115, "5.2: Accumulator add 10")
+assert_wrap(acc(20) == 135, "5.3: Accumulator add 20")
+
+
+// ============================================================================
+// SECTION 6: NESTED CLOSURES (DEPTH 2)
+// ============================================================================
+print("--- [6] Nested Closures Depth 2 ---")
+
+func outer(x) {
+    func middle(y) {
+        func inner(z) {
+            return x + y + z
+        }
+        return inner
+    }
+    return middle
+}
+
+var level1 = outer(10)
+var level2 = level1(20)
+assert_wrap(level2(30) == 60, "6.1: Nested closure depth 2")
+
+
+// ============================================================================
+// SECTION 7: NESTED CLOSURES (DEPTH 3)
+// ============================================================================
+print("--- [7] Nested Closures Depth 3 ---")
+
+func deepOuter() {
+    var a = 1
+    func deepMiddle() {
+        var b = 2
+        func deepInner() {
+            var c = 3
+            func deepest() {
+                return a + b + c
+            }
+            return deepest
+        }
+        return deepInner
+    }
+    return deepMiddle
+}
+
+var d1 = deepOuter()
+var d2 = d1()
+var d3 = d2()
+assert_wrap(d3() == 6, "7.1: Nested closure depth 3")
+
+
+// ============================================================================
+// SECTION 8: SHARED UPVALUES BETWEEN SIBLING CLOSURES
+// ============================================================================
+print("--- [8] Shared Upvalues Between Siblings ---")
+
+var getter
+var setter
+var incrementer
+
+func setupShared() {
+    var shared = 0
+    func get() {
+        return shared
+    }
+    func set(value) {
+        shared = value
+    }
+    func inc() {
+        shared = shared + 1
+        return shared
+    }
+    getter = get
+    setter = set
+    incrementer = inc
+}
+
+setupShared()
+assert_wrap(getter() == 0, "8.1: Shared upvalue initial")
+setter(50)
+assert_wrap(getter() == 50, "8.2: Shared upvalue after set")
+assert_wrap(incrementer() == 51, "8.3: Shared upvalue increment to 51")
+assert_wrap(incrementer() == 52, "8.4: Shared upvalue increment to 52")
+assert_wrap(getter() == 52, "8.5: Shared upvalue final")
+
+
+// ============================================================================
+// SECTION 9: PARAMETER CAPTURE IN CLOSURES
+// ============================================================================
+print("--- [9] Parameter Capture ---")
+
+func makeMultiplier(factor) {
+    func multiply(value) {
+        return value * factor
+    }
+    return multiply
+}
+
+var times3 = makeMultiplier(3)
+var times5 = makeMultiplier(5)
+assert_wrap(times3(10) == 30, "9.1: Multiplier with factor 3")
+assert_wrap(times5(10) == 50, "9.2: Multiplier with factor 5")
+
+
+// ============================================================================
+// SECTION 10: ANONYMOUS FUNCTIONS - BASIC
+// ============================================================================
+print("--- [10] Anonymous Functions with 'func' Keyword ---")
+
+var anon_add = func (a, b) {
+    return a + b
+}
+
+assert_wrap(anon_add(7, 8) == 15, "10.1: Anonymous function addition")
+
+var anon_greet = func (name) {
+    return "Hello, " + name
+}
+
+assert_wrap(anon_greet("Zym") == "Hello, Zym", "10.2: Anonymous function string concat")
+
+
+// ============================================================================
+// SECTION 11: ARROW FUNCTIONS - BLOCK BODY
+// ============================================================================
+print("--- [11] Arrow Functions with Block Body ---")
+
+var arrow_multiply = (x, y) => {
+    return x * y
+}
+
+assert_wrap(arrow_multiply(6, 7) == 42, "11.1: Arrow function with block body")
+
+var arrow_square = (n) => {
+    var result = n * n
+    return result
+}
+
+assert_wrap(arrow_square(8) == 64, "11.2: Arrow function with local variable")
+
+
+// ============================================================================
+// SECTION 12: ARROW FUNCTIONS - DIRECT RETURN
+// ============================================================================
+print("--- [12] Arrow Functions with Direct Return ---")
+
+var arrow_cube = (x) => x * x * x
+assert_wrap(arrow_cube(3) == 27, "12.1: Arrow function cube")
+
+var arrow_double = (x) => x * 2
+assert_wrap(arrow_double(21) == 42, "12.2: Arrow function double")
+
+var arrow_identity = (x) => x
+assert_wrap(arrow_identity(99) == 99, "12.3: Arrow function identity")
+
+
+// ============================================================================
+// SECTION 13: ARROW FUNCTIONS - NO PARAMETERS
+// ============================================================================
+print("--- [13] Arrow Functions with No Parameters ---")
+
+var get_pi = () => 3.14159
+assert_wrap(get_pi() == 3.14159, "13.1: Arrow function no params")
+
+var greet_world = () => {
+    return "Hello, World!"
+}
+assert_wrap(greet_world() == "Hello, World!", "13.2: Arrow function no params with block")
+
+
+// ============================================================================
+// SECTION 14: ANONYMOUS FUNCTIONS IN CLOSURES
+// ============================================================================
+print("--- [14] Anonymous Functions Creating Closures ---")
+
+var makeClosureCounter = func () {
+    var n = 0
+    return func () {
+        n = n + 1
+        return n
+    }
+}
+
+var closureCounter = makeClosureCounter()
+assert_wrap(closureCounter() == 1, "14.1: Anonymous closure counter 1")
+assert_wrap(closureCounter() == 2, "14.2: Anonymous closure counter 2")
+assert_wrap(closureCounter() == 3, "14.3: Anonymous closure counter 3")
+
+
+// ============================================================================
+// SECTION 15: ARROW FUNCTIONS IN CLOSURES
+// ============================================================================
+print("--- [15] Arrow Functions Creating Closures ---")
+
+var arrowClosureFactory = (start) => {
+    var value = start
+    return () => {
+        value = value + 1
+        return value
+    }
+}
+
+var arrowClosure = arrowClosureFactory(100)
+assert_wrap(arrowClosure() == 101, "15.1: Arrow closure counter from 100")
+assert_wrap(arrowClosure() == 102, "15.2: Arrow closure counter continues")
+
+
+// ============================================================================
+// SECTION 16: NESTED ANONYMOUS FUNCTIONS
+// ============================================================================
+print("--- [16] Nested Anonymous Functions ---")
+
+var nested_anon = func (x) {
+    return func (y) {
+        return func (z) {
+            return x + y + z
+        }
+    }
+}
+
+var na1 = nested_anon(1)
+var na2 = na1(2)
+assert_wrap(na2(3) == 6, "16.1: Nested anonymous functions")
+
+
+// ============================================================================
+// SECTION 17: NESTED ARROW FUNCTIONS
+// ============================================================================
+print("--- [17] Nested Arrow Functions ---")
+
+var nested_arrow = (a) => (b) => (c) => a * b * c
+
+var narr1 = nested_arrow(2)
+var narr2 = narr1(3)
+assert_wrap(narr2(4) == 24, "17.1: Nested arrow functions")
+
+
+// ============================================================================
+// SECTION 18: MIXED NAMED AND ANONYMOUS FUNCTIONS
+// ============================================================================
+print("--- [18] Named Functions Returning Anonymous Functions ---")
+
+func createAdder(x) {
+    return func (y) {
+        return x + y
+    }
+}
+
+var add10 = createAdder(10)
+assert_wrap(add10(5) == 15, "18.1: Named returning anonymous - add 5")
+assert_wrap(add10(25) == 35, "18.2: Named returning anonymous - add 25")
+
+
+// ============================================================================
+// SECTION 19: OVERLOADING WITH CLOSURES
+// ============================================================================
+print("--- [19] Overloaded Functions Returning Closures ---")
+
+func factory() {
+    var state = "zero-arg"
+    return func () {
+        return state
+    }
+}
+
+func factory(initial) {
+    var state = initial
+    return func () {
+        return state
+    }
+}
+
+var f0 = factory()
+var f1 = factory("one-arg")
+assert_wrap(f0() == "zero-arg", "19.1: Overloaded factory 0 args")
+assert_wrap(f1() == "one-arg", "19.2: Overloaded factory 1 arg")
+
+
+// ============================================================================
+// SECTION 20: HOISTED FUNCTIONS WITH CLOSURES
+// ============================================================================
+print("--- [20] Hoisted Functions Returning Closures ---")
+
+var hoisted_closure = hoisted_factory(1000)
+assert_wrap(hoisted_closure() == 1001, "20.1: Hoisted closure first call")
+assert_wrap(hoisted_closure() == 1002, "20.2: Hoisted closure second call")
+
+func hoisted_factory(start) {
+    var value = start
+    func tick() {
+        value = value + 1
+        return value
+    }
+    return tick
+}
+
+
+// ============================================================================
+// SECTION 21: ANONYMOUS FUNCTION OVERLOADING SIMULATION
+// ============================================================================
+print("--- [21] Simulated Overloading with Anonymous Functions ---")
+
+var op0 = func () {
+    return "no args"
+}
+
+var op1 = func (x) {
+    return x * 10
+}
+
+var op2 = func (x, y) {
+    return x + y
+}
+
+assert_wrap(op0() == "no args", "21.1: Anonymous 0 args")
+assert_wrap(op1(4) == 40, "21.2: Anonymous 1 arg")
+assert_wrap(op2(3, 7) == 10, "21.3: Anonymous 2 args")
+
+
+// ============================================================================
+// SECTION 22: CLOSURE WITH OVERLOADED NESTED FUNCTIONS
+// ============================================================================
+print("--- [22] Closure with Overloaded Nested Functions ---")
+
+func closureOverloadFactory() {
+    var base = 100
+
+    func operation() {
+        return base
+    }
+
+    func operation(x) {
+        return base + x
+    }
+
+    func operation(x, y) {
+        return base + x + y
+    }
+
+    return func (a, b) {
+        if (a == 0) return operation()
+        if (b == 0) return operation(a)
+        return operation(a, b)
+    }
+}
+
+var cop = closureOverloadFactory()
+assert_wrap(cop(0, 0) == 100, "22.1: Nested overload 0 args")
+assert_wrap(cop(50, 0) == 150, "22.2: Nested overload 1 arg")
+assert_wrap(cop(20, 30) == 150, "22.3: Nested overload 2 args")
+
+
+// ============================================================================
+// SECTION 23: RECURSION WITH CLOSURES
+// ============================================================================
+print("--- [23] Recursive Closures ---")
+
+func makeFibonacci() {
+    func fib(n) {
+        if (n <= 1) return n
+        return fib(n - 1) + fib(n - 2)
+    }
+    return fib
+}
+
+var fibonacci = makeFibonacci()
+assert_wrap(fibonacci(0) == 0, "23.1: Fibonacci(0)")
+assert_wrap(fibonacci(1) == 1, "23.2: Fibonacci(1)")
+assert_wrap(fibonacci(5) == 5, "23.3: Fibonacci(5)")
+assert_wrap(fibonacci(7) == 13, "23.4: Fibonacci(7)")
+
+
+// ============================================================================
+// SECTION 24: ANONYMOUS RECURSIVE FUNCTIONS
+// ============================================================================
+print("--- [24] Anonymous Recursive Functions ---")
+
+var factorial
+factorial = func (n) {
+    if (n <= 1) return 1
+    return n * factorial(n - 1)
+}
+
+assert_wrap(factorial(5) == 120, "24.1: Factorial(5)")
+assert_wrap(factorial(6) == 720, "24.2: Factorial(6)")
+
+
+// ============================================================================
+// SECTION 25: COMPLEX CLOSURE CHAINS WITH MUTATIONS
+// ============================================================================
+print("--- [25] Complex Closure Chains with State Mutation ---")
+
+func createStateMachine(initial) {
+    var state = initial
+    var history = 0
+
+    func get() {
+        return state
+    }
+
+    func set(value) {
+        history = state
+        state = value
+    }
+
+    func revert() {
+        var temp = state
+        state = history
+        history = temp
+    }
+
+    func getHistory() {
+        return history
+    }
+
+    return func (action) {
+        if (action == "get") return get()
+        if (action == "history") return getHistory()
+        return state
+    }
+}
+
+var sm = createStateMachine(10)
+assert_wrap(sm("get") == 10, "25.1: State machine get")
+
+
+// ============================================================================
+// SECTION 26: HOISTING + OVERLOADING + CLOSURES COMBO
+// ============================================================================
+print("--- [26] Hoisting + Overloading + Closures Combined ---")
+
+var combo_result1 = combo_function()
+var combo_result2 = combo_function(5)
+assert_wrap(combo_result1() == 0, "26.1: Combo function 0 args")
+assert_wrap(combo_result2() == 5, "26.2: Combo function 1 arg first call")
+assert_wrap(combo_result2() == 10, "26.3: Combo function 1 arg second call")
+
+func combo_function() {
+    var x = 0
+    return func () {
+        return x
+    }
+}
+
+func combo_function(start) {
+    var x = start
+    return func () {
+        var temp = x
+        x = x + start
+        return temp
+    }
+}
+
+
+// ============================================================================
+// SECTION 27: ANONYMOUS FUNCTIONS WITH MULTIPLE CAPTURES
+// ============================================================================
+print("--- [27] Anonymous Functions with Multiple Captures ---")
+
+var multi_capture = func (a, b) {
+    var sum = a + b
+    var product = a * b
+
+    return func () {
+        return func () {
+            return sum + product
+        }
+    }
+}
+
+var mc1 = multi_capture(3, 4)
+var mc2 = mc1()
+assert_wrap(mc2() == 19, "27.1: Multiple captures (7 + 12)")
+
+
+// ============================================================================
+// SECTION 28: ARROW FUNCTIONS WITH COMPLEX CLOSURES
+// ============================================================================
+print("--- [28] Arrow Functions with Complex Closures ---")
+
+var arrow_complex = (x) => {
+    var state = x
+    return (y) => {
+        state = state + y
+        return () => state
+    }
+}
+
+var ac1 = arrow_complex(10)
+var ac2 = ac1(5)
+assert_wrap(ac2() == 15, "28.1: Arrow complex first")
+var ac3 = ac1(3)
+assert_wrap(ac3() == 18, "28.2: Arrow complex second")
+
+
+// ============================================================================
+// SECTION 29: SHADOWING WITH CLOSURES
+// ============================================================================
+print("--- [29] Shadowing with Closures ---")
+
+func shadowTest() {
+    var x = 10
+
+    func inner() {
+        var x = 20
+        func innermost() {
+            var x = 30
+            return x
+        }
+        return innermost() + x
+    }
+
+    return inner() + x
+}
+
+assert_wrap(shadowTest() == 60, "29.1: Shadowing (30 + 20 + 10)")
+
+
+// ============================================================================
+// SECTION 30: EARLY RETURNS IN CLOSURES
+// ============================================================================
+print("--- [30] Early Returns in Closures ---")
+
+func makeValidator(threshold) {
+    return func (value) {
+        if (value < 0) return "negative"
+        if (value == 0) return "zero"
+        if (value < threshold) return "below threshold"
+        return "above threshold"
+    }
+}
+
+var validate = makeValidator(10)
+assert_wrap(validate(-5) == "negative", "30.1: Validator negative")
+assert_wrap(validate(0) == "zero", "30.2: Validator zero")
+assert_wrap(validate(5) == "below threshold", "30.3: Validator below")
+assert_wrap(validate(15) == "above threshold", "30.4: Validator above")
+
+
+// ============================================================================
+// SECTION 31: NESTED OVERLOADING
+// ============================================================================
+print("--- [31] Nested Function Overloading ---")
+
+var nested_overload_results = []
+
+func outerOverload() {
+    func inner() {
+        return "inner-0"
+    }
+
+    func inner(x) {
+        return "inner-1"
+    }
+
+    func inner(x, y) {
+        return "inner-2"
+    }
+
+    var r0 = inner()
+    var r1 = inner(1)
+    var r2 = inner(1, 2)
+
+    if (r0 == "inner-0") {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 31.1: Nested overload 0 args")
+        print("")
+    }
+
+    if (r1 == "inner-1") {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 31.2: Nested overload 1 arg")
+        print("")
+    }
+
+    if (r2 == "inner-2") {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 31.3: Nested overload 2 args")
+        print("")
+    }
+}
+
+outerOverload()
+
+
+// ============================================================================
+// SECTION 32: HOISTING IN NESTED SCOPES
+// ============================================================================
+print("--- [32] Hoisting in Nested Scopes ---")
+
+var nested_hoist_result = "not set"
+
+func nestedHoist() {
+    nested_hoist_result = nested_hoisted()
+
+    func nested_hoisted() {
+        return "hoisted"
+    }
+}
+
+nestedHoist()
+assert_wrap(nested_hoist_result == "hoisted", "32.1: Hoisting in nested scope")
+
+
+// ============================================================================
+// SECTION 33: CLOSURE ALIASING
+// ============================================================================
+print("--- [33] Closure Aliasing ---")
+
+func aliasTest() {
+    var shared = 0
+
+    func inc1() {
+        shared = shared + 1
+        return shared
+    }
+
+    func inc2() {
+        shared = shared + 2
+        return shared
+    }
+
+    return func (choice) {
+        if (choice == 1) return inc1()
+        return inc2()
+    }
+}
+
+var alias = aliasTest()
+assert_wrap(alias(1) == 1, "33.1: Alias inc1 first")
+assert_wrap(alias(2) == 3, "33.2: Alias inc2")
+assert_wrap(alias(1) == 4, "33.3: Alias inc1 second")
+assert_wrap(alias(2) == 6, "33.4: Alias inc2 second")
+
+
+// ============================================================================
+// SECTION 34: MIXED FUNCTION TYPES IN SINGLE SCOPE
+// ============================================================================
+print("--- [34] Mixed Function Types ---")
+
+var mixed_results = []
+
+func mixedScope() {
+    func named(x) {
+        return x * 2
+    }
+
+    var anon = func (x) {
+        return x * 3
+    }
+
+    var arrow = (x) => x * 4
+
+    var r1 = named(5)
+    var r2 = anon(5)
+    var r3 = arrow(5)
+
+    if (r1 == 10) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 34.1: Named function")
+        print("")
+    }
+
+    if (r2 == 15) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 34.2: Anonymous function")
+        print("")
+    }
+
+    if (r3 == 20) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 34.3: Arrow function")
+        print("")
+    }
+}
+
+mixedScope()
+
+
+// ============================================================================
+// SECTION 35: CLOSURE FACTORIES WITH OVERLOADING
+// ============================================================================
+print("--- [35] Closure Factories with Overloading ---")
+
+func makeCalculator() {
+    var memory = 0
+
+    func calc(x) {
+        memory = x
+        return memory
+    }
+
+    func calc(x, y) {
+        memory = x + y
+        return memory
+    }
+
+    func calc(x, y, z) {
+        memory = x + y + z
+        return memory
+    }
+
+    return func (a, b, c) {
+        if (c > 0) return calc(a, b, c)
+        if (b > 0) return calc(a, b)
+        return calc(a)
+    }
+}
+
+var calculator = makeCalculator()
+assert_wrap(calculator(10, 0, 0) == 10, "35.1: Calculator 1 arg")
+assert_wrap(calculator(5, 7, 0) == 12, "35.2: Calculator 2 args")
+assert_wrap(calculator(1, 2, 3) == 6, "35.3: Calculator 3 args")
+
+
+// ============================================================================
+// SECTION 36: MULTIPLE INDEPENDENT CLOSURES
+// ============================================================================
+print("--- [36] Multiple Independent Closures ---")
+
+var closure_results = []
+
+func createMultipleClosures() {
+    var c1
+    var c2
+    var c3
+
+    var i = 1
+    c1 = func () { return i }
+
+    i = 2
+    c2 = func () { return i }
+
+    i = 3
+    c3 = func () { return i }
+
+    // All closures share the same 'i', so all return 3
+    var r1 = c1()
+    var r2 = c2()
+    var r3 = c3()
+
+    if (r1 == 3) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 36.1: Shared closure c1")
+        print("")
+    }
+
+    if (r2 == 3) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 36.2: Shared closure c2")
+        print("")
+    }
+
+    if (r3 == 3) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 36.3: Shared closure c3")
+        print("")
+    }
+}
+
+createMultipleClosures()
+
+
+// ============================================================================
+// SECTION 37: RETURNING MULTIPLE CLOSURES
+// ============================================================================
+print("--- [37] Returning Multiple Closures ---")
+
+var getter37
+var setter37
+
+func setupGetterSetter() {
+    var value = 42
+
+    getter37 = func () {
+        return value
+    }
+
+    setter37 = func (v) {
+        value = v
+    }
+}
+
+setupGetterSetter()
+assert_wrap(getter37() == 42, "37.1: Getter initial")
+setter37(100)
+assert_wrap(getter37() == 100, "37.2: Getter after set")
+
+
+// ============================================================================
+// SECTION 38: DEEPLY NESTED WITH MIXED TYPES
+// ============================================================================
+print("--- [38] Deeply Nested Mixed Function Types ---")
+
+func deepMixed() {
+    var a = 1
+
+    var f1 = func () {
+        var b = 2
+
+        return (x) => {
+            var c = 3
+
+            func inner() {
+                return a + b + c + x
+            }
+
+            return inner
+        }
+    }
+
+    return f1
+}
+
+var dm1 = deepMixed()
+var dm2 = dm1()
+var dm3 = dm2(4)
+assert_wrap(dm3() == 10, "38.1: Deeply nested mixed (1+2+3+4)")
+
+
+// ============================================================================
+// SECTION 39: CLOSURE WITH CONDITIONAL LOGIC
+// ============================================================================
+print("--- [39] Closure with Conditional Logic ---")
+
+func makeConditionalClosure(threshold) {
+    var count = 0
+
+    return func (value) {
+        count = count + 1
+        if (value > threshold) {
+            return count
+        }
+        return 0
+    }
+}
+
+var conditional = makeConditionalClosure(10)
+assert_wrap(conditional(5) == 0, "39.1: Conditional below threshold")
+assert_wrap(conditional(15) == 2, "39.2: Conditional above threshold count 2")
+assert_wrap(conditional(8) == 0, "39.3: Conditional below threshold again")
+assert_wrap(conditional(20) == 4, "39.4: Conditional above threshold count 4")
+
+
+// ============================================================================
+// SECTION 40: FINAL COMPREHENSIVE TEST
+// ============================================================================
+print("--- [40] Final Comprehensive Test ---")
+
+var final_test = comprehensive(5)
+assert_wrap(final_test() == 10, "40.1: Comprehensive overload 1 arg")
+
+func comprehensive(x) {
+    var captured = x
+    return func () {
+        captured = captured + 5
+        return captured
+    }
+}
+
+func comprehensive(x, y) {
+    var captured = x + y
+    return (z) => {
+        captured = captured * z
+        return captured
+    }
+}
+
+var final_test2 = comprehensive(3, 4)
+assert_wrap(final_test2(2) == 14, "40.2: Comprehensive overload 2 args (7*2)")
+
+
+// ============================================================================
+// SECTION 41: OVERLOADED CLOSURE FACTORIES (PROPER PATTERN)
+// ============================================================================
+print("--- [41] Overloaded Closure Factories ---")
+
+func makeGreeter() {
+    var greeting = "Hello"
+    func greet(name) {
+        return greeting + ", " + name
+    }
+    return greet
+}
+
+func makeGreeter(customGreeting) {
+    var greeting = customGreeting
+    func greet(name) {
+        return greeting + ", " + name
+    }
+    return greet
+}
+
+var defaultGreeter = makeGreeter()
+var customGreeter = makeGreeter("Howdy")
+
+assert_wrap(defaultGreeter("World") == "Hello, World", "41.1: Default greeter")
+assert_wrap(customGreeter("Partner") == "Howdy, Partner", "41.2: Custom greeter")
+
+
+// ============================================================================
+// SECTION 42: HOISTED OVERLOADED CLOSURE FACTORIES
+// ============================================================================
+print("--- [42] Hoisted Overloaded Closure Factories ---")
+
+var hoist_g1 = hoistedGreeterFactory()
+var hoist_g2 = hoistedGreeterFactory("Greetings")
+
+assert_wrap(hoist_g1("Alice") == "Hi, Alice", "42.1: Hoisted greeter default")
+assert_wrap(hoist_g2("Bob") == "Greetings, Bob", "42.2: Hoisted greeter custom")
+
+func hoistedGreeterFactory() {
+    var msg = "Hi"
+    func doGreet(name) {
+        return msg + ", " + name
+    }
+    return doGreet
+}
+
+func hoistedGreeterFactory(message) {
+    var msg = message
+    func doGreet(name) {
+        return msg + ", " + name
+    }
+    return doGreet
+}
+
+
+// ============================================================================
+// SECTION 43: CLOSURE FACTORY RETURNING MULTIPLE CLOSURES VIA GLOBALS
+// ============================================================================
+print("--- [43] Multiple Closures via Global Assignment ---")
+
+var reader43
+var writer43
+var counter43
+
+func setupMultiClosures(initial) {
+    var value = initial
+    var count = 0
+
+    reader43 = func () {
+        return value
+    }
+
+    writer43 = func (v) {
+        value = v
+        count = count + 1
+    }
+
+    counter43 = func () {
+        return count
+    }
+}
+
+setupMultiClosures(1000)
+assert_wrap(reader43() == 1000, "43.1: Multi closure reader")
+writer43(2000)
+assert_wrap(reader43() == 2000, "43.2: Multi closure after write")
+assert_wrap(counter43() == 1, "43.3: Multi closure counter")
+
+
+// ============================================================================
+// SECTION 44: CLOSURE WITH MULTIPLE OVERLOADED NESTED FUNCTIONS
+// ============================================================================
+print("--- [44] Multiple Overloaded Functions in Closure ---")
+
+func complexFactory(base) {
+    func add() {
+        return base
+    }
+
+    func add(x) {
+        return base + x
+    }
+
+    func multiply() {
+        return base
+    }
+
+    func multiply(x) {
+        return base * x
+    }
+
+    return func (operation, arg) {
+        if (operation == "add") {
+            if (arg == 0) return add()
+            return add(arg)
+        }
+        if (arg == 0) return multiply()
+        return multiply(arg)
+    }
+}
+
+var cf = complexFactory(10)
+assert_wrap(cf("add", 0) == 10, "44.1: Complex factory add 0")
+assert_wrap(cf("add", 5) == 15, "44.2: Complex factory add 5")
+assert_wrap(cf("multiply", 0) == 10, "44.3: Complex factory multiply 0")
+assert_wrap(cf("multiply", 3) == 30, "44.4: Complex factory multiply 3")
+
+
+// ============================================================================
+// SECTION 45: DEEPLY NESTED CLOSURES WITH OVERLOADING
+// ============================================================================
+print("--- [45] Deeply Nested with Overloading ---")
+
+func level1Factory() {
+    var l1 = 1
+
+    func level2Factory() {
+        var l2 = 10
+
+        func level3Factory() {
+            var l3 = 100
+
+            func compute() {
+                return l1 + l2 + l3
+            }
+
+            func compute(x) {
+                return l1 + l2 + l3 + x
+            }
+
+            return func (value) {
+                if (value == 0) return compute()
+                return compute(value)
+            }
+        }
+
+        return level3Factory
+    }
+
+    return level2Factory
+}
+
+var lf1 = level1Factory()
+var lf2 = lf1()
+var lf3 = lf2()
+assert_wrap(lf3(0) == 111, "45.1: Deep nested overload 0")
+assert_wrap(lf3(9) == 120, "45.2: Deep nested overload 9")
+
+
+// ============================================================================
+// SECTION 46: CLOSURE CAPTURING OVERLOADED FUNCTION RESULTS
+// ============================================================================
+print("--- [46] Closure Capturing Overloaded Results ---")
+
+func provider() {
+    return 100
+}
+
+func provider(x) {
+    return 100 + x
+}
+
+func provider(x, y) {
+    return 100 + x + y
+}
+
+func captureResults() {
+    var r0 = provider()
+    var r1 = provider(10)
+    var r2 = provider(5, 15)
+
+    return func (which) {
+        if (which == 0) return r0
+        if (which == 1) return r1
+        return r2
+    }
+}
+
+var results = captureResults()
+assert_wrap(results(0) == 100, "46.1: Captured result 0 args")
+assert_wrap(results(1) == 110, "46.2: Captured result 1 arg")
+assert_wrap(results(2) == 120, "46.3: Captured result 2 args")
+
+
+// ============================================================================
+// SECTION 47: ANONYMOUS OVERLOADED FACTORIES
+// ============================================================================
+print("--- [47] Anonymous Overloaded Factory Pattern ---")
+
+var anonFactory0 = func () {
+    var state = "zero"
+    return func () { return state }
+}
+
+var anonFactory1 = func (s) {
+    var state = s
+    return func () { return state }
+}
+
+var af0 = anonFactory0()
+var af1 = anonFactory1("custom")
+assert_wrap(af0() == "zero", "47.1: Anonymous factory 0")
+assert_wrap(af1() == "custom", "47.2: Anonymous factory 1")
+
+
+// ============================================================================
+// SECTION 48: MIXED HOISTING, OVERLOADING, CLOSURES IN NESTED SCOPE
+// ============================================================================
+print("--- [48] Mixed Features in Nested Scope ---")
+
+var nested_mixed_results = []
+
+func nestedMixed() {
+    var nc1 = nestedClosure()
+    var nc2 = nestedClosure(50)
+
+    var r1 = nc1()
+    var r2 = nc2()
+
+    func nestedClosure() {
+        var value = 10
+        return func () {
+            value = value + 5
+            return value
+        }
+    }
+
+    func nestedClosure(start) {
+        var value = start
+        return func () {
+            value = value + 5
+            return value
+        }
+    }
+
+    var r3 = nc1()
+    var r4 = nc2()
+
+    if (r1 == 15) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 48.1: Nested mixed first nc1")
+        print("")
+    }
+
+    if (r2 == 55) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 48.2: Nested mixed first nc2")
+        print("")
+    }
+
+    if (r3 == 20) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 48.3: Nested mixed second nc1")
+        print("")
+    }
+
+    if (r4 == 60) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: 48.4: Nested mixed second nc2")
+        print("")
+    }
+}
+
+nestedMixed()
+
+
+// ============================================================================
+// SECTION 49: CLOSURE CHAIN WITH OVERLOADED INTERMEDIATES
+// ============================================================================
+print("--- [49] Closure Chain with Overloaded Steps ---")
+
+func chainStart() {
+    var a = 1
+
+    func chainMiddle() {
+        var b = 10
+
+        func chainEnd() {
+            return a + b
+        }
+
+        func chainEnd(x) {
+            return a + b + x
+        }
+
+        return func (value) {
+            if (value == 0) return chainEnd()
+            return chainEnd(value)
+        }
+    }
+
+    func chainMiddle(offset) {
+        var b = 10 + offset
+
+        func chainEnd() {
+            return a + b
+        }
+
+        func chainEnd(x) {
+            return a + b + x
+        }
+
+        return func (value) {
+            if (value == 0) return chainEnd()
+            return chainEnd(value)
+        }
+    }
+
+    return chainMiddle
+}
+
+var cs = chainStart()
+var cm1 = cs()
+var cm2 = cs(5)
+assert_wrap(cm1(0) == 11, "49.1: Chain 0 offset, 0 arg")
+assert_wrap(cm1(100) == 111, "49.2: Chain 0 offset, 100 arg")
+assert_wrap(cm2(0) == 16, "49.3: Chain 5 offset, 0 arg")
+assert_wrap(cm2(100) == 116, "49.4: Chain 5 offset, 100 arg")
+
+
+// ============================================================================
+// SECTION 50: ULTIMATE COMPREHENSIVE TEST
+// ============================================================================
+print("--- [50] Ultimate Comprehensive Integration ---")
+
+var ultimate1 = ultimateFactory(10)
+var ultimate2 = ultimateFactory(20, 30)
+
+assert_wrap(ultimate1("get") == 10, "50.1: Ultimate 1 arg get")
+assert_wrap(ultimate1("double") == 20, "50.2: Ultimate 1 arg double")
+assert_wrap(ultimate2("get") == 50, "50.3: Ultimate 2 args get")
+assert_wrap(ultimate2("add") == 80, "50.4: Ultimate 2 args add")
+
+func ultimateFactory(x) {
+    var state = x
+
+    func transform() {
+        return state
+    }
+
+    func transform(op) {
+        if (op == "double") return state * 2
+        return state
+    }
+
+    return func (cmd) {
+        if (cmd == "get") return transform()
+        return transform(cmd)
+    }
+}
+
+func ultimateFactory(x, y) {
+    var state = x + y
+
+    func transform() {
+        return state
+    }
+
+    func transform(op) {
+        if (op == "add") return state + y
+        return state
+    }
+
+    return func (cmd) {
+        if (cmd == "get") return transform()
+        return transform(cmd)
+    }
+}
+
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

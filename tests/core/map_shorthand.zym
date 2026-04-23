@@ -1,0 +1,124 @@
+// ============================================================================
+// MAP SHORTHAND SYNTAX TESTS
+// Tests: { x } → { x: x } shorthand for identifier keys
+// ============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+        print("")
+    }
+}
+
+print("=== MAP SHORTHAND SYNTAX TESTS ===")
+print("")
+
+// --- 1. Basic shorthand ---
+print("--- [1] Basic Shorthand ---")
+
+var x = 10
+var y = 20
+var m1 = { x, y }
+assert_wrap(m1.x == 10, "1.1: Single shorthand key x")
+assert_wrap(m1.y == 20, "1.2: Single shorthand key y")
+
+// --- 2. Single shorthand entry ---
+print("--- [2] Single Entry ---")
+
+var name = "Zym"
+var m2 = { name }
+assert_wrap(m2.name == "Zym", "2.1: Single shorthand entry")
+
+// --- 3. Mixed shorthand and explicit ---
+print("--- [3] Mixed Shorthand and Explicit ---")
+
+var a = 1
+var b = 2
+var m3 = { a, b, c: 3 }
+assert_wrap(m3.a == 1, "3.1: Shorthand a in mixed map")
+assert_wrap(m3.b == 2, "3.2: Shorthand b in mixed map")
+assert_wrap(m3.c == 3, "3.3: Explicit c in mixed map")
+
+var m4 = { c: 3, a, b }
+assert_wrap(m4.c == 3, "3.4: Explicit c before shorthands")
+assert_wrap(m4.a == 1, "3.5: Shorthand a after explicit")
+assert_wrap(m4.b == 2, "3.6: Shorthand b after explicit")
+
+var m5 = { a, c: 3, b }
+assert_wrap(m5.a == 1, "3.7: Shorthand-explicit-shorthand a")
+assert_wrap(m5.c == 3, "3.8: Shorthand-explicit-shorthand c")
+assert_wrap(m5.b == 2, "3.9: Shorthand-explicit-shorthand b")
+
+// --- 4. Functions as shorthand values ---
+print("--- [4] Function Shorthands ---")
+
+func add(x, y) { return x + y }
+func mul(x, y) { return x * y }
+
+var math = { add, mul }
+assert_wrap(math.add(2, 3) == 5, "4.1: Shorthand function add")
+assert_wrap(math.mul(4, 5) == 20, "4.2: Shorthand function mul")
+
+// --- 5. Closure pattern (module-like return) ---
+print("--- [5] Closure / Module Pattern ---")
+
+func createCounter() {
+    var count = 0
+    func increment() { count = count + 1 }
+    func getCount() { return count }
+    return { increment, getCount }
+}
+
+var counter = createCounter()
+counter.increment()
+counter.increment()
+counter.increment()
+assert_wrap(counter.getCount() == 3, "5.1: Closure shorthand pattern")
+
+// --- 6. Mixed with spread ---
+print("--- [6] Mixed with Spread ---")
+
+var base = { x: 100, y: 200 }
+var z = 300
+var m6 = { ...base, z }
+assert_wrap(m6.x == 100, "6.1: Spread + shorthand x from spread")
+assert_wrap(m6.y == 200, "6.2: Spread + shorthand y from spread")
+assert_wrap(m6.z == 300, "6.3: Spread + shorthand z")
+
+// --- 7. Trailing comma ---
+print("--- [7] Trailing Comma ---")
+
+var p = 1
+var q = 2
+var m7 = { p, q, }
+assert_wrap(m7.p == 1, "7.1: Trailing comma p")
+assert_wrap(m7.q == 2, "7.2: Trailing comma q")
+
+// --- 8. String values via shorthand ---
+print("--- [8] Various Types ---")
+
+var greeting = "hello"
+var count = 42
+var flag = true
+var m8 = { greeting, count, flag }
+assert_wrap(m8.greeting == "hello", "8.1: String shorthand")
+assert_wrap(m8.count == 42, "8.2: Number shorthand")
+assert_wrap(m8.flag == true, "8.3: Boolean shorthand")
+
+// --- Results ---
+print("")
+print("=== MAP SHORTHAND RESULTS ===")
+print("Passed: " + str(testsPassed))
+print("Failed: " + str(testsFailed))
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED")
+} else {
+    print("SOME TESTS FAILED")
+}

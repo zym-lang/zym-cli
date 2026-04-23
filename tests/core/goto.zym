@@ -1,0 +1,587 @@
+// ============================================================================
+// COMPREHENSIVE GOTO/LABEL TEST FILE
+// Tests: goto/label with scope safety, forward/backward jumps, cleanup
+// ============================================================================
+
+// Test helper functions
+var testsPassed = 0;
+var testsFailed = 0;
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+        print("")
+    }
+}
+
+print("=== STARTING COMPREHENSIVE GOTO/LABEL TESTS ===");
+print("");
+
+// ============================================================================
+// SECTION 1: BASIC FORWARD JUMPS
+// ============================================================================
+print("--- [1] Basic Forward Jumps ---");
+
+// Test 1.1: Simple forward jump
+var test1_executed = 0;
+goto skip1;
+test1_executed = 1;
+skip1:
+assert_wrap(test1_executed == 0, "1.1: Forward goto skips code");
+
+// Test 1.2: Forward jump with intermediate code
+var sum1 = 0;
+sum1 = sum1 + 1;
+goto skip2;
+sum1 = sum1 + 100;
+skip2:
+sum1 = sum1 + 2;
+assert_wrap(sum1 == 3, "1.2: Forward goto skips intermediate code (1 + 2)");
+
+// Test 1.3: Multiple forward jumps to same label
+var counter1 = 0;
+if (true) {
+    goto target1;
+}
+counter1 = counter1 + 1;
+target1:
+if (false) {
+    goto target1;
+}
+counter1 = counter1 + 10;
+assert_wrap(counter1 == 10, "1.3: Multiple gotos to same label");
+
+// Test 1.4: Forward jump (removed skipped declarations to comply with goto rules)
+var before1 = 5;
+goto skip_decls1;
+before1 = 999;
+skip_decls1:
+var after1 = 10;
+assert_wrap(before1 == 5, "1.4: Variable before goto preserved");
+assert_wrap(after1 == 10, "1.4: Variable after label accessible");
+
+// ============================================================================
+// SECTION 2: BASIC BACKWARD JUMPS
+// ============================================================================
+print("--- [2] Basic Backward Jumps ---");
+
+// Test 2.1: Simple backward jump (loop)
+var count2 = 0;
+loop_start1:
+count2 = count2 + 1;
+if (count2 < 3) goto loop_start1;
+assert_wrap(count2 == 3, "2.1: Backward goto creates loop (count = 3)");
+
+// Test 2.2: Backward jump with accumulation
+var sum2 = 0;
+var i2 = 0;
+loop_start2:
+sum2 = sum2 + i2;
+i2 = i2 + 1;
+if (i2 < 5) goto loop_start2;
+assert_wrap(sum2 == 10, "2.2: Backward goto loop with accumulation (0+1+2+3+4)");
+
+// Test 2.3: Backward jump with conditional exit
+var count3 = 0;
+loop_start3:
+count3 = count3 + 1;
+if (count3 >= 10) goto exit3;
+if (count3 < 20) goto loop_start3;
+count3 = 999;
+exit3:
+assert_wrap(count3 == 10, "2.3: Backward goto with conditional exit");
+
+// Test 2.4: Nested backward jumps (loop in loop simulation)
+var outer_count = 0;
+var inner_sum = 0;
+outer_loop:
+var inner_count = 0;
+inner_loop:
+inner_sum = inner_sum + 1;
+inner_count = inner_count + 1;
+if (inner_count < 3) goto inner_loop;
+outer_count = outer_count + 1;
+if (outer_count < 3) goto outer_loop;
+assert_wrap(inner_sum == 9, "2.4: Nested backward gotos (3 * 3 = 9)");
+
+// ============================================================================
+// SECTION 3: SAME-SCOPE JUMPS
+// ============================================================================
+print("--- [3] Same-Scope Jumps ---");
+
+// Test 3.1: Jump within same scope (forward)
+{
+    var scope_var1 = 10;
+    goto same_scope1;
+    scope_var1 = 999;
+    same_scope1:
+    scope_var1 = scope_var1 + 5;
+    assert_wrap(scope_var1 == 15, "3.1: Same-scope forward jump");
+}
+
+// Test 3.2: Jump within same scope (backward)
+{
+    var count_same = 0;
+    same_loop:
+    count_same = count_same + 1;
+    if (count_same < 4) goto same_loop;
+    assert_wrap(count_same == 4, "3.2: Same-scope backward jump loop");
+}
+
+// Test 3.3: Jump within function scope
+func test_func_jump() {
+    var result = 0;
+    goto func_label;
+    result = 100;
+    func_label:
+    result = result + 50;
+    return result;
+}
+assert_wrap(test_func_jump() == 50, "3.3: Goto within function scope");
+
+// Test 3.4: Multiple labels in same scope
+{
+    var path = 0;
+    goto label_a;
+    path = 1;
+    label_a:
+    path = path + 10;
+    goto label_b;
+    path = path + 100;
+    label_b:
+    path = path + 1;
+    assert_wrap(path == 11, "3.4: Multiple labels in same scope (10 + 1)");
+}
+
+// ============================================================================
+// SECTION 4: OUTWARD SCOPE JUMPS (with cleanup)
+// ============================================================================
+print("--- [4] Outward Scope Jumps ---");
+
+// Test 4.1: Jump from inner to outer scope
+{
+    var outer_val = 10;
+    {
+        var inner_val = 20;
+        outer_val = outer_val + inner_val;
+        goto outer_label1;
+        outer_val = 999;
+    }
+    outer_val = 888;
+    outer_label1:
+    outer_val = outer_val + 1;
+    assert_wrap(outer_val == 31, "4.1: Jump from inner to outer scope (10+20+1)");
+}
+
+// Test 4.2: Jump across multiple scope levels
+{
+    var level0 = 1;
+    {
+        var level1 = 2;
+        {
+            var level2 = 3;
+            level0 = level0 + level1 + level2;
+            goto escape_all;
+            level0 = 999;
+        }
+        level0 = 888;
+    }
+    level0 = 777;
+    escape_all:
+    level0 = level0 + 100;
+    assert_wrap(level0 == 106, "4.2: Jump across multiple scopes (1+2+3+100)");
+}
+
+// Test 4.3: Jump out of nested scopes with variables
+{
+    var sum_outer = 0;
+    {
+        sum_outer = sum_outer + 10;
+        {
+            sum_outer = sum_outer + 20;
+            {
+                sum_outer = sum_outer + 30;
+                goto outer_target3;
+            }
+            sum_outer = sum_outer + 40;
+        }
+        sum_outer = sum_outer + 50;
+    }
+    sum_outer = sum_outer + 60;
+    outer_target3:
+    sum_outer = sum_outer + 1;
+    assert_wrap(sum_outer == 61, "4.3: Jump from deep nesting (10+20+30+1)");
+}
+
+// Test 4.4: Jump to parent scope from conditional
+{
+    var check = 5;
+    {
+        if (check > 3) {
+            check = check + 10;
+            goto parent_scope;
+        }
+        check = check + 100;
+    }
+    check = check + 200;
+    parent_scope:
+    check = check + 1;
+    assert_wrap(check == 16, "4.4: Jump to parent from conditional (5+10+1)");
+}
+
+// ============================================================================
+// SECTION 5: GOTO WITH CONTROL FLOW
+// ============================================================================
+print("--- [5] Goto with Control Flow ---");
+
+// Test 5.1: Goto inside while loop
+var loop_sum1 = 0;
+var loop_i1 = 0;
+while (loop_i1 < 5) {
+    loop_i1 = loop_i1 + 1;
+    if (loop_i1 == 3) goto skip_add1;
+    loop_sum1 = loop_sum1 + loop_i1;
+    skip_add1:
+    var dummy1 = 0;
+}
+assert_wrap(loop_sum1 == 12, "5.1: Goto inside while loop (1+2+4+5)");
+
+// Test 5.2: Goto to exit loop early
+var early_sum = 0;
+var early_i = 0;
+while (early_i < 10) {
+    early_sum = early_sum + early_i;
+    early_i = early_i + 1;
+    if (early_i == 5) goto exit_early;
+}
+early_sum = 999;
+exit_early:
+assert_wrap(early_sum == 10, "5.2: Goto exits loop early (0+1+2+3+4)");
+
+// Test 5.3: Goto inside for loop
+var for_sum1 = 0;
+for (var for_i = 0; for_i < 5; for_i = for_i + 1) {
+    if (for_i == 2) goto skip_for;
+    for_sum1 = for_sum1 + for_i;
+    skip_for:
+    var dummy2 = 0;
+}
+assert_wrap(for_sum1 == 8, "5.3: Goto inside for loop (0+1+3+4)");
+
+// Test 5.4: Goto inside do-while loop
+var do_sum = 0;
+var do_i = 0;
+do {
+    do_i = do_i + 1;
+    if (do_i == 3) goto skip_do;
+    do_sum = do_sum + do_i;
+    skip_do:
+    var dummy3 = 0;
+} while (do_i < 5);
+assert_wrap(do_sum == 12, "5.4: Goto inside do-while (1+2+4+5)");
+
+// Test 5.5: Break loop with goto to outer scope
+{
+    var break_sum = 0;
+    var break_i = 0;
+    while (break_i < 10) {
+        break_sum = break_sum + break_i;
+        break_i = break_i + 1;
+        if (break_i == 4) goto break_out;
+    }
+    break_sum = 999;
+    break_out:
+    assert_wrap(break_sum == 6, "5.5: Goto breaks out of loop (0+1+2+3)");
+}
+
+// ============================================================================
+// SECTION 6: GOTO WITH FUNCTIONS
+// ============================================================================
+print("--- [6] Goto with Functions ---");
+
+// Test 6.1: Simple goto in function
+func func_with_goto1() {
+    var v = 10;
+    goto func_skip;
+    v = 999;
+    func_skip:
+    return v;
+}
+assert_wrap(func_with_goto1() == 10, "6.1: Simple goto in function");
+
+// Test 6.2: Backward goto in function (loop)
+func func_with_loop() {
+    var count = 0;
+    func_loop:
+    count = count + 1;
+    if (count < 5) goto func_loop;
+    return count;
+}
+assert_wrap(func_with_loop() == 5, "6.2: Backward goto loop in function");
+
+// Test 6.3: Goto to skip return
+func func_skip_return() {
+    var v = 5;
+    goto skip_ret;
+    return 999;
+    skip_ret:
+    v = v + 10;
+    return v;
+}
+assert_wrap(func_skip_return() == 15, "6.3: Goto skips early return");
+
+// Test 6.4: Multiple gotos in function
+func func_multi_goto() {
+    var result = 0;
+    if (true) goto add_ten;
+    result = result + 1;
+    add_ten:
+    result = result + 10;
+    if (result < 20) goto add_five;
+    result = result + 2;
+    add_five:
+    result = result + 5;
+    return result;
+}
+assert_wrap(func_multi_goto() == 15, "6.4: Multiple gotos in function (10+5)");
+
+// Test 6.5: Goto with nested scopes in function
+func func_nested_goto() {
+    var total = 0;
+    {
+        total = total + 10;
+        {
+            total = total + 20;
+            goto func_outer;
+            total = total + 30;
+        }
+        total = total + 40;
+    }
+    total = total + 50;
+    func_outer:
+    return total;
+}
+assert_wrap(func_nested_goto() == 30, "6.5: Goto in nested scopes in function (10+20)");
+
+// ============================================================================
+// SECTION 7: COMPLEX GOTO PATTERNS
+// ============================================================================
+print("--- [7] Complex Goto Patterns ---");
+
+// Test 7.1: State machine simulation with goto
+var state = 0;
+var state_result = 0;
+state_idle:
+state_result = state_result + 1;
+if (state == 0) {
+    state = 1;
+    goto state_running;
+}
+goto state_done;
+
+state_running:
+state_result = state_result + 10;
+if (state == 1) {
+    state = 2;
+    goto state_error;
+}
+goto state_done;
+
+state_error:
+state_result = state_result + 100;
+goto state_done;
+
+state_done:
+state_result = state_result + 1000;
+assert_wrap(state_result == 1111, "7.1: State machine with goto (1+10+100+1000)");
+
+// Test 7.2: Jump table pattern
+var choice = 2;
+var jump_result = 0;
+if (choice == 1) goto case_one;
+if (choice == 2) goto case_two;
+if (choice == 3) goto case_three;
+goto case_default;
+
+case_one:
+jump_result = 100;
+goto case_end;
+
+case_two:
+jump_result = 200;
+goto case_end;
+
+case_three:
+jump_result = 300;
+goto case_end;
+
+case_default:
+jump_result = 999;
+goto case_end;
+
+case_end:
+assert_wrap(jump_result == 200, "7.2: Jump table pattern (case 2)");
+
+// Test 7.3: Error handling pattern with goto
+func divide_safe(a, b) {
+    var result = 0;
+    if (b == 0) goto error_div;
+    result = a / b;
+    goto success_div;
+
+    error_div:
+    return -1;
+
+    success_div:
+    return result;
+}
+assert_wrap(divide_safe(10, 2) == 5, "7.3: Goto error handling - success case");
+assert_wrap(divide_safe(10, 0) == -1, "7.3: Goto error handling - error case");
+
+// Test 7.4: Cleanup pattern with multiple exit points
+func cleanup_pattern(flag) {
+    var resource = 100;
+
+    if (flag == 1) goto cleanup;
+    resource = resource + 10;
+
+    if (flag == 2) goto cleanup;
+    resource = resource + 20;
+
+    if (flag == 3) goto cleanup;
+    resource = resource + 30;
+
+    cleanup:
+    resource = resource + 1;
+    return resource;
+}
+assert_wrap(cleanup_pattern(1) == 101, "7.4: Cleanup pattern - early exit 1");
+assert_wrap(cleanup_pattern(2) == 111, "7.4: Cleanup pattern - early exit 2 (100+10+1)");
+assert_wrap(cleanup_pattern(3) == 131, "7.4: Cleanup pattern - early exit 3 (100+10+20+1)");
+assert_wrap(cleanup_pattern(4) == 161, "7.4: Cleanup pattern - normal exit (100+10+20+30+1)");
+
+// ============================================================================
+// SECTION 8: EDGE CASES
+// ============================================================================
+print("--- [8] Edge Cases ---");
+
+// Test 8.1: Label immediately before goto
+label_before:
+var edge1 = 5;
+goto label_after;
+edge1 = 999;
+label_after:
+assert_wrap(edge1 == 5, "8.1: Label immediately before goto");
+
+// Test 8.2: Multiple consecutive labels
+var multi_label = 0;
+goto jump_to_multi;
+multi_label = 999;
+jump_to_multi:
+label_a2:
+label_b2:
+label_c2:
+multi_label = 42;
+assert_wrap(multi_label == 42, "8.2: Multiple consecutive labels");
+
+// Test 8.3: Goto to label at end of scope
+{
+    var end_v = 10;
+    goto end_label;
+    end_v = 999;
+    end_label:
+}
+assert_wrap(true, "8.3: Goto to label at end of scope");
+
+// Test 8.4: Backward goto to start of function
+func backward_to_start() {
+    var count = 0;
+    start_func:
+    count = count + 1;
+    if (count < 3) goto start_func;
+    return count;
+}
+assert_wrap(backward_to_start() == 3, "8.4: Backward goto to start of function");
+
+// Test 8.5: Goto over statements (removed declarations to comply with goto rules)
+var before_many = 1;
+goto skip_many;
+before_many = 10;
+before_many = 20;
+before_many = 30;
+before_many = 40;
+skip_many:
+var after_many = 2;
+assert_wrap(before_many + after_many == 3, "8.5: Goto over statements (1+2)");
+
+// ============================================================================
+// SECTION 9: GOTO WITH EXPRESSIONS AND OPERATIONS
+// ============================================================================
+print("--- [9] Goto with Expressions ---");
+
+// Test 9.1: Goto with arithmetic operations
+var arith_val = 5;
+arith_val = arith_val * 2;
+goto arith_skip;
+arith_val = arith_val * 100;
+arith_skip:
+arith_val = arith_val + 3;
+assert_wrap(arith_val == 13, "9.1: Goto with arithmetic (5*2+3)");
+
+// Test 9.2: Goto with logical operations
+var logic_val = true;
+if (logic_val && true) goto logic_target;
+logic_val = false;
+logic_target:
+assert_wrap(logic_val == true, "9.2: Goto with logical operations");
+
+// Test 9.3: Goto with function calls
+var call_count = 0;
+func increment_count() {
+    call_count = call_count + 1;
+    return call_count;
+}
+var temp1 = increment_count();
+goto skip_call;
+call_count = increment_count();
+skip_call:
+var temp3 = increment_count();
+assert_wrap(call_count == 2, "9.3: Goto skips function call");
+
+// Test 9.4: Goto with list operations
+var list_test = [1, 2, 3];
+var sum_list = list_test[0];
+goto skip_list_op;
+sum_list = sum_list + list_test[1];
+skip_list_op:
+sum_list = sum_list + list_test[2];
+assert_wrap(sum_list == 4, "9.4: Goto with list operations (1+3)");
+
+// Test 9.5: Goto with map operations
+var map_test = { "a": 10, "b": 20 };
+var map_sum = map_test["a"];
+goto skip_map_op;
+map_sum = map_sum + map_test["b"];
+skip_map_op:
+map_sum = map_sum + 5;
+assert_wrap(map_sum == 15, "9.5: Goto with map operations (10+5)");
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

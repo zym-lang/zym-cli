@@ -1,0 +1,107 @@
+// ============================================================================
+// COMPREHENSIVE SPREAD OPERATION TEST SUITE
+// This test covers the "...[list]", "...{map}", and "...Struct{}" syntax
+// ============================================================================
+
+// Test helper function
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: %s", message)
+    }
+}
+
+print("==========================================================")
+print("COMPREHENSIVE SPREAD OPERATION TEST SUITE")
+print("==========================================================")
+print("")
+
+// ============================================================================
+// SECTION 1: LIST SPREAD
+// ============================================================================
+print("=== SECTION 1: List Spread ===")
+
+var list_a = [1, 2]
+var list_b = [3, 4]
+var list_combined = [...list_a, ...list_b, 5]
+
+assert_wrap(list_combined[0] == 1, "1.1: First element from list_a")
+assert_wrap(list_combined[1] == 2, "1.2: Second element from list_a")
+assert_wrap(list_combined[2] == 3, "1.3: First element from list_b")
+assert_wrap(list_combined[3] == 4, "1.4: Second element from list_b")
+assert_wrap(list_combined[4] == 5, "1.5: Final literal element")
+assert_wrap(length(list_combined) == 5, "1.6: Combined list length")
+
+var list_empty = []
+var list_with_empty = [0, ...list_empty, 1]
+assert_wrap(length(list_with_empty) == 2, "1.7: Spreading empty list adds nothing")
+assert_wrap(list_with_empty[0] == 0 && list_with_empty[1] == 1, "1.8: Elements preserved around empty spread")
+
+// Nested spread
+var list_nested = [0, ...[1, ...[2, 3]], 4]
+assert_wrap(length(list_nested) == 5, "1.9: Nested spread length")
+assert_wrap(list_nested[2] == 2 && list_nested[3] == 3, "1.10: Deeply nested elements reached")
+
+// ============================================================================
+// SECTION 2: MAP SPREAD
+// ============================================================================
+print("=== SECTION 2: Map Spread ===")
+
+var map_a = { "a": 1, "b": 2 }
+var map_b = { "b": 3, "c": 4 }
+var map_combined = { ...map_a, ...map_b, "d": 5 }
+
+assert_wrap(map_combined["a"] == 1, "2.1: Key 'a' from map_a")
+assert_wrap(map_combined["b"] == 3, "2.2: Key 'b' overridden by map_b")
+assert_wrap(map_combined["c"] == 4, "2.3: Key 'c' from map_b")
+assert_wrap(map_combined["d"] == 5, "2.4: Key 'd' from literal")
+
+var map_with_override = { "a": 100, ...map_a }
+assert_wrap(map_with_override["a"] == 1, "2.5: Literal 'a' overridden by spread 'a'")
+
+var map_before_override = { ...map_a, "a": 999 }
+assert_wrap(map_before_override["a"] == 999, "2.6: Spread 'a' overridden by literal 'a'")
+
+// ============================================================================
+// SECTION 3: STRUCT SPREAD
+// ============================================================================
+print("=== SECTION 3: Struct Spread ===")
+
+struct Point { x; y; z }
+
+var p1 = Point { .x = 1, .y = 2, .z = 3 }
+var p2 = Point { ...p1, .z = 10 }
+
+assert_wrap(p2.x == 1, "3.1: Field 'x' copied from p1")
+assert_wrap(p2.y == 2, "3.2: Field 'y' copied from p1")
+assert_wrap(p2.z == 10, "3.3: Field 'z' overridden by literal")
+
+var p3 = Point { .x = 0, ...p1 }
+assert_wrap(p3.x == 1, "3.4: Field 'x' overridden by spread")
+
+// Multiple struct spread
+struct Meta { id; name; tags }
+var m1 = Meta { .id = 1, .name = "original", .tags = ["old"] }
+var m2 = Meta { ...m1, .name = "updated" }
+assert_wrap(m2.id == 1 && m2.name == "updated", "3.5: Partial update via spread")
+
+// ============================================================================
+// SUMMARY
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST SUMMARY")
+print("Tests Passed: %n", testsPassed)
+print("Tests Failed: %n", testsFailed)
+print("==========================================================")
+
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED")
+} else {
+    print("SOME TESTS FAILED")
+}

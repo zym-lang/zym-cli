@@ -1,0 +1,530 @@
+// ============================================================================
+// COMPREHENSIVE MAP TEST SUITE
+// Tests all aspects of map usage including:
+// - Basic creation (empty and initialized)
+// - String keys, number keys, identifier keys, expression keys
+// - Bracket notation and dot notation access/assignment
+// - Value updates and deletion (null assignment)
+// - Mixed value types (strings, numbers, booleans, lists, nested maps)
+// - Dynamic key evaluation and string concatenation
+// - Accessing non-existent keys
+// - Edge cases and corner cases
+// ============================================================================
+
+print("==========================================================")
+print("COMPREHENSIVE MAP TEST SUITE")
+print("==========================================================")
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+// ============================================================================
+// SECTION 1: BASIC MAP CREATION
+// ============================================================================
+print("")
+print("=== SECTION 1: Basic Map Creation ===")
+
+// 1.1: Empty map
+var emptyMap = {}
+assert_wrap(emptyMap != null, "1.1: Empty map creation")
+
+// 1.2: Map with string keys
+var stringMap = {"name": "Alice", "age": 30}
+assert_wrap(stringMap["name"] == "Alice", "1.2a: String key initialization - name")
+assert_wrap(stringMap["age"] == 30, "1.2b: String key initialization - age")
+
+// 1.3: Map with number keys (coerced to strings)
+var numKeyMap = {1: "one", 2: "two", 3: "three"}
+assert_wrap(numKeyMap[1] == "one", "1.3a: Number key initialization - 1")
+assert_wrap(numKeyMap[3] == "three", "1.3b: Number key initialization - 3")
+
+// 1.4: Map with identifier keys (no quotes)
+var identMap = {name: "Bob", age: 25}
+assert_wrap(identMap["name"] == "Bob", "1.4a: Identifier key initialization - name")
+assert_wrap(identMap["age"] == 25, "1.4b: Identifier key initialization - age")
+
+// 1.5: Map with expression keys
+var exprMap = {(1 + 2): "three", (2 * 5): "ten"}
+assert_wrap(exprMap[3] == "three", "1.5a: Expression key - 1+2")
+assert_wrap(exprMap[10] == "ten", "1.5b: Expression key - 2*5")
+
+// ============================================================================
+// SECTION 2: MAP ACCESS - BRACKET NOTATION
+// ============================================================================
+print("=== SECTION 2: Map Access - Bracket Notation ===")
+
+// 2.1: Access with string keys
+var m1 = {"x": 10, "y": 20}
+assert_wrap(m1["x"] == 10, "2.1a: Bracket access string key - x")
+assert_wrap(m1["y"] == 20, "2.1b: Bracket access string key - y")
+
+// 2.2: Access with number keys (coerced)
+var m2 = {1: "a", 2: "b"}
+assert_wrap(m2[1] == "a", "2.2a: Bracket access number key - 1")
+assert_wrap(m2[2] == "b", "2.2b: Bracket access number key - 2")
+
+// 2.3: Access with dynamic keys
+var m3 = {"key1": "value1"}
+var k = "key1"
+assert_wrap(m3[k] == "value1", "2.3: Bracket access dynamic key")
+
+// 2.4: Access with expression keys
+var m4 = {5: "five"}
+assert_wrap(m4[2 + 3] == "five", "2.4: Bracket access expression key")
+
+// 2.5: Access non-existent key returns null
+var m5 = {"a": 1}
+assert_wrap(m5["b"] == null, "2.5: Non-existent key returns null")
+
+// ============================================================================
+// SECTION 3: MAP ACCESS - DOT NOTATION
+// ============================================================================
+print("=== SECTION 3: Map Access - Dot Notation ===")
+
+// 3.1: Dot notation access
+var m6 = {name: "Alice", age: 30, active: true}
+assert_wrap(m6.name == "Alice", "3.1a: Dot notation - name")
+assert_wrap(m6.age == 30, "3.1b: Dot notation - age")
+assert_wrap(m6.active == true, "3.1c: Dot notation - boolean")
+
+// 3.2: Dot notation with string keys
+var m7 = {"city": "Boston", "country": "USA"}
+assert_wrap(m7.city == "Boston", "3.2a: Dot notation string key - city")
+assert_wrap(m7.country == "USA", "3.2b: Dot notation string key - country")
+
+// 3.3: Dot notation non-existent key returns null
+var m8 = {x: 1}
+assert_wrap(m8.y == null, "3.3: Dot notation non-existent key returns null")
+
+// ============================================================================
+// SECTION 4: MAP ASSIGNMENT - BRACKET NOTATION
+// ============================================================================
+print("=== SECTION 4: Map Assignment - Bracket Notation ===")
+
+// 4.1: Set new key-value pair
+var m9 = {}
+m9["a"] = 10
+m9["b"] = 20
+assert_wrap(m9["a"] == 10, "4.1a: Bracket set new key - a")
+assert_wrap(m9["b"] == 20, "4.1b: Bracket set new key - b")
+
+// 4.2: Update existing key
+var m10 = {"x": 1}
+m10["x"] = 2
+assert_wrap(m10["x"] == 2, "4.2: Bracket update existing key")
+
+// 4.3: Set with dynamic key
+var m11 = {}
+var key = "dynamic"
+m11[key] = "value"
+assert_wrap(m11["dynamic"] == "value", "4.3: Bracket set dynamic key")
+
+// 4.4: Set with expression key
+var m12 = {}
+m12[1 + 1] = "two"
+assert_wrap(m12[2] == "two", "4.4: Bracket set expression key")
+
+// 4.5: Set with string concatenation key
+var m13 = {}
+var prefix = "key_"
+m13[prefix + "1"] = "val1"
+assert_wrap(m13["key_1"] == "val1", "4.5: Bracket set concatenated key")
+
+// ============================================================================
+// SECTION 5: MAP ASSIGNMENT - DOT NOTATION
+// ============================================================================
+print("=== SECTION 5: Map Assignment - Dot Notation ===")
+
+// 5.1: Set new key-value pair
+var m14 = {}
+m14.name = "Alice"
+m14.age = 30
+assert_wrap(m14.name == "Alice", "5.1a: Dot set new key - name")
+assert_wrap(m14.age == 30, "5.1b: Dot set new key - age")
+
+// 5.2: Update existing key
+var m15 = {count: 0}
+m15.count = 1
+m15.count = 2
+assert_wrap(m15.count == 2, "5.2: Dot update existing key")
+
+// 5.3: Mixed bracket and dot access
+var m16 = {}
+m16["x"] = 10
+m16.y = 20
+assert_wrap(m16["x"] == 10 and m16.y == 20, "5.3: Mixed bracket and dot assignment")
+
+// ============================================================================
+// SECTION 6: MAP DELETION (NULL ASSIGNMENT)
+// ============================================================================
+print("=== SECTION 6: Map Deletion (Null Assignment) ===")
+
+// 6.1: Delete with bracket notation
+var m17 = {"a": 1, "b": 2, "c": 3}
+m17["b"] = null
+assert_wrap(m17["a"] == 1, "6.1a: After deletion - key a still exists")
+assert_wrap(m17["b"] == null, "6.1b: After deletion - key b returns null")
+assert_wrap(m17["c"] == 3, "6.1c: After deletion - key c still exists")
+
+// 6.2: Delete with dot notation
+var m18 = {x: 10, y: 20, z: 30}
+m18.y = null
+assert_wrap(m18.x == 10, "6.2a: After dot deletion - x still exists")
+assert_wrap(m18.y == null, "6.2b: After dot deletion - y returns null")
+assert_wrap(m18.z == 30, "6.2c: After dot deletion - z still exists")
+
+// 6.3: Delete and re-add
+var m19 = {key: "value"}
+m19.key = null
+m19.key = "newvalue"
+assert_wrap(m19.key == "newvalue", "6.3: Delete and re-add key")
+
+// ============================================================================
+// SECTION 7: MIXED VALUE TYPES
+// ============================================================================
+print("=== SECTION 7: Mixed Value Types ===")
+
+// 7.1: Map with different value types
+var m20 = {
+    str: "hello",
+    num: 42,
+    bool: true,
+    nullVal: null
+}
+assert_wrap(m20.str == "hello", "7.1a: Mixed types - string")
+assert_wrap(m20.num == 42, "7.1b: Mixed types - number")
+assert_wrap(m20.bool == true, "7.1c: Mixed types - boolean")
+assert_wrap(m20.nullVal == null, "7.1d: Mixed types - null value")
+
+// 7.2: Map with list values
+var m21 = {
+    fruits: ["apple", "banana"],
+    numbers: [1, 2, 3]
+}
+assert_wrap(m21.fruits[0] == "apple", "7.2a: Map with list - first fruit")
+assert_wrap(m21.numbers[2] == 3, "7.2b: Map with list - third number")
+
+// 7.3: Map with map values (nested)
+var m22 = {
+    person: {name: "Bob", age: 25},
+    address: {city: "Boston"}
+}
+assert_wrap(m22.person.name == "Bob", "7.3a: Nested map - person.name")
+assert_wrap(m22.address.city == "Boston", "7.3b: Nested map - address.city")
+
+// 7.4: Accessing nested list in map
+var m23 = {data: [[1, 2], [3, 4]]}
+assert_wrap(m23.data[0][0] == 1, "7.4a: Nested list in map - [0][0]")
+assert_wrap(m23.data[1][1] == 4, "7.4b: Nested list in map - [1][1]")
+
+// ============================================================================
+// SECTION 8: NESTED MAPS
+// ============================================================================
+print("=== SECTION 8: Nested Maps ===")
+
+// 8.1: Two-level nesting
+var m24 = {
+    outer: {
+        inner: "value"
+    }
+}
+assert_wrap(m24.outer.inner == "value", "8.1: Two-level nested map access")
+
+// 8.2: Three-level nesting
+var m25 = {
+    level1: {
+        level2: {
+            level3: "deep"
+        }
+    }
+}
+assert_wrap(m25.level1.level2.level3 == "deep", "8.2: Three-level nested map access")
+
+// 8.3: Modifying nested map
+var m26 = {outer: {inner: 1}}
+m26.outer.inner = 2
+assert_wrap(m26.outer.inner == 2, "8.3: Modifying nested map value")
+
+// 8.4: Adding to nested map
+var m27 = {outer: {a: 1}}
+m27.outer.b = 2
+assert_wrap(m27.outer.a == 1 and m27.outer.b == 2, "8.4: Adding to nested map")
+
+// 8.5: Mixed bracket and dot in nested access
+var m28 = {level1: {level2: {level3: "value"}}}
+assert_wrap(m28["level1"]["level2"].level3 == "value", "8.5: Mixed bracket/dot nested access")
+
+// ============================================================================
+// SECTION 9: DYNAMIC KEY OPERATIONS
+// ============================================================================
+print("=== SECTION 9: Dynamic Key Operations ===")
+
+// 9.1: Variable as key
+var m29 = {}
+var k1 = "myKey"
+m29[k1] = "myValue"
+assert_wrap(m29["myKey"] == "myValue", "9.1: Variable as key")
+
+// 9.2: Expression as key
+var m30 = {}
+var base = 5
+m30[base * 2] = "ten"
+assert_wrap(m30[10] == "ten", "9.2: Expression as key")
+
+// 9.3: String concatenation as key
+var m31 = {}
+var prefix = "user_"
+var suffix = "123"
+m31[prefix + suffix] = "data"
+assert_wrap(m31["user_123"] == "data", "9.3: String concatenation as key")
+
+// 9.4: Function return value as key
+func getKey() { return "funcKey" }
+var m32 = {}
+m32[getKey()] = "funcValue"
+assert_wrap(m32["funcKey"] == "funcValue", "9.4: Function return as key")
+
+// ============================================================================
+// SECTION 10: MAP UPDATES
+// ============================================================================
+print("=== SECTION 10: Map Updates ===")
+
+// 10.1: Update with bracket notation
+var m33 = {count: 0}
+m33["count"] = 1
+m33["count"] = m33["count"] + 1
+assert_wrap(m33["count"] == 2, "10.1: Update with bracket notation")
+
+// 10.2: Update with dot notation
+var m34 = {value: 10}
+m34.value = 20
+m34.value = m34.value * 2
+assert_wrap(m34.value == 40, "10.2: Update with dot notation")
+
+// 10.3: Update multiple keys
+var m35 = {a: 1, b: 2, c: 3}
+m35.a = 10
+m35["b"] = 20
+m35.c = 30
+assert_wrap(m35.a == 10 and m35.b == 20 and m35.c == 30, "10.3: Update multiple keys")
+
+// 10.4: Chained updates
+var m36 = {x: 1, y: 2}
+m36.x = m36.y = 5
+assert_wrap(m36.x == 5 and m36.y == 5, "10.4: Chained updates")
+
+// ============================================================================
+// SECTION 11: MAP EDGE CASES
+// ============================================================================
+print("=== SECTION 11: Map Edge Cases ===")
+
+// 11.1: Empty map stays empty
+var m37 = {}
+assert_wrap(m37["anything"] == null, "11.1: Empty map access returns null")
+
+// 11.2: Map with single key-value
+var m38 = {solo: "value"}
+assert_wrap(m38.solo == "value", "11.2: Single key-value map")
+
+// 11.3: Overwriting key multiple times
+var m39 = {key: 1}
+m39.key = 2
+m39.key = 3
+m39.key = 4
+assert_wrap(m39.key == 4, "11.3: Multiple overwrites")
+
+// 11.4: Setting null value (not deletion in initialization)
+var m40 = {a: null}
+assert_wrap(m40.a == null, "11.4: Null value in initialization")
+
+// 11.5: Mixed key types in one map
+var m41 = {
+    str: "string",
+    1: "number",
+    ident: "identifier"
+}
+assert_wrap(m41.str == "string", "11.5a: Mixed keys - string")
+assert_wrap(m41[1] == "number", "11.5b: Mixed keys - number")
+assert_wrap(m41.ident == "identifier", "11.5c: Mixed keys - identifier")
+
+// ============================================================================
+// SECTION 12: MAP IN EXPRESSIONS
+// ============================================================================
+print("=== SECTION 12: Map in Expressions ===")
+
+// 12.1: Map access in arithmetic
+var m42 = {x: 10, y: 20}
+var sum = m42.x + m42.y
+assert_wrap(sum == 30, "12.1: Map access in arithmetic")
+
+// 12.2: Map access in comparison
+var m43 = {value: 15}
+assert_wrap(m43.value > 10, "12.2a: Map access in comparison - greater")
+assert_wrap(m43.value < 20, "12.2b: Map access in comparison - less")
+
+// 12.3: Map access in logical expressions
+var m44 = {flag1: true, flag2: false}
+assert_wrap(m44.flag1 and !m44.flag2, "12.3: Map access in logical expressions")
+
+// 12.4: Map in ternary
+var m45 = {score: 85}
+var grade = m45.score >= 90 ? "A" : "B"
+assert_wrap(grade == "B", "12.4: Map access in ternary")
+
+// ============================================================================
+// SECTION 13: MAP ASSIGNMENTS IN EXPRESSIONS
+// ============================================================================
+print("=== SECTION 13: Map Assignments in Expressions ===")
+
+// 13.1: Assignment returns value
+var m46 = {}
+var result = (m46.x = 42)
+assert_wrap(result == 42 and m46.x == 42, "13.1: Assignment returns value")
+
+// 13.2: Chained assignment
+var m47 = {}
+var m48 = {}
+m47.v = m48.v = 10
+assert_wrap(m47.v == 10 and m48.v == 10, "13.2: Chained assignment across maps")
+
+// 13.3: Assignment in conditional
+var m49 = {}
+if ((m49.x = 5) == 5) {
+    m49.y = 10
+}
+assert_wrap(m49.x == 5 and m49.y == 10, "13.3: Assignment in conditional")
+
+// ============================================================================
+// SECTION 14: MAPS AS FUNCTION PARAMETERS
+// ============================================================================
+print("=== SECTION 14: Maps as Function Parameters ===")
+
+// 14.1: Map passed to function (reference semantics)
+func modifyMap(m) {
+    m.modified = true
+}
+var m50 = {original: true}
+modifyMap(m50)
+assert_wrap(m50.modified == true, "14.1: Map modified in function")
+
+// 14.2: Returning map from function
+func createMap() {
+    return {created: true}
+}
+var m51 = createMap()
+assert_wrap(m51.created == true, "14.2: Map returned from function")
+
+// 14.3: Nested map modification in function
+func modifyNested(m) {
+    m.nested.value = 99
+}
+var m52 = {nested: {value: 1}}
+modifyNested(m52)
+assert_wrap(m52.nested.value == 99, "14.3: Nested map modified in function")
+
+// ============================================================================
+// SECTION 15: MAPS IN LOOPS
+// ============================================================================
+print("=== SECTION 15: Maps in Loops ===")
+
+// 15.1: Building map in loop
+var m53 = {}
+for (var i = 0; i < 3; i = i + 1) {
+    m53[i] = i * 10
+}
+assert_wrap(m53[0] == 0 and m53[1] == 10 and m53[2] == 20, "15.1: Building map in loop")
+
+// 15.2: Updating map values in loop
+var m54 = {a: 1, b: 2, c: 3}
+var keys = ["a", "b", "c"]
+for (var i = 0; i < 3; i = i + 1) {
+    m54[keys[i]] = m54[keys[i]] * 2
+}
+assert_wrap(m54.a == 2 and m54.b == 4 and m54.c == 6, "15.2: Updating map in loop")
+
+// ============================================================================
+// SECTION 16: COMPLEX NESTED STRUCTURES
+// ============================================================================
+print("=== SECTION 16: Complex Nested Structures ===")
+
+// 16.1: Map of lists of maps
+var m55 = {
+    groups: [
+        {name: "A", value: 1},
+        {name: "B", value: 2}
+    ]
+}
+assert_wrap(m55.groups[0].name == "A", "16.1a: Map->list->map - first name")
+assert_wrap(m55.groups[1].value == 2, "16.1b: Map->list->map - second value")
+
+// 16.2: List of maps of lists
+var m56 = [
+    {items: [1, 2, 3]},
+    {items: [4, 5, 6]}
+]
+assert_wrap(m56[0].items[0] == 1, "16.2a: List->map->list - [0][0]")
+assert_wrap(m56[1].items[2] == 6, "16.2b: List->map->list - [1][2]")
+
+// 16.3: Deep nested mixed structure
+var m57 = {
+    level1: {
+        level2: [
+            {level3: {level4: "deep"}}
+        ]
+    }
+}
+assert_wrap(m57.level1.level2[0].level3.level4 == "deep", "16.3: Deep mixed nesting")
+
+// ============================================================================
+// SECTION 17: MAP CORNER CASES
+// ============================================================================
+print("=== SECTION 17: Map Corner Cases ===")
+
+// 17.1: Accessing same key multiple times
+var m58 = {key: "value"}
+var v1 = m58.key
+var v2 = m58.key
+assert_wrap(v1 == "value" and v2 == "value", "17.1: Multiple access same key")
+
+// 17.2: Map assigned to another variable (reference)
+var m59 = {x: 10}
+var m60 = m59
+m60.x = 20
+assert_wrap(m59.x == 20, "17.2: Map assignment creates reference")
+
+// 17.3: Empty string as key
+var m61 = {}
+m61[""] = "empty"
+assert_wrap(m61[""] == "empty", "17.3: Empty string as key")
+
+// 17.4: Key with special characters
+var m62 = {}
+m62["key-with-dashes"] = "value"
+m62["key_with_underscores"] = "value2"
+assert_wrap(m62["key-with-dashes"] == "value", "17.4a: Key with dashes")
+assert_wrap(m62["key_with_underscores"] == "value2", "17.4b: Key with underscores")
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

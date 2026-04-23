@@ -1,0 +1,464 @@
+// ============================================================================
+// COMPREHENSIVE DISPATCHER TESTS
+// Tests runtime overload resolution when returning overloaded functions
+// ============================================================================
+
+// Test helper function
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+print("=== DISPATCHER COMPREHENSIVE TESTS ===")
+print("")
+
+// ============================================================================
+// TEST 1: Basic Two-Overload Dispatcher
+// ============================================================================
+print("--- [1] Basic Two-Overload Dispatcher ---")
+
+func makeAdder() {
+    func add(x) {
+        return x + 10
+    }
+
+    func add(x, y) {
+        return x + y
+    }
+
+    return add
+}
+
+var adder = makeAdder()
+assert_wrap(adder(5) == 15, "1.1: Basic two-overload dispatcher - single arg")
+assert_wrap(adder(5, 3) == 8, "1.2: Basic two-overload dispatcher - two args")
+
+// ============================================================================
+// TEST 2: Three-Overload Dispatcher
+// ============================================================================
+print("--- [2] Three-Overload Dispatcher ---")
+
+func makeCalculator() {
+    func calc() {
+        return 0
+    }
+
+    func calc(x) {
+        return x * 2
+    }
+
+    func calc(x, y) {
+        return x * y
+    }
+
+    return calc
+}
+
+var calculator = makeCalculator()
+assert_wrap(calculator() == 0, "2.1: Three-overload dispatcher - zero args")
+assert_wrap(calculator(7) == 14, "2.2: Three-overload dispatcher - one arg")
+assert_wrap(calculator(3, 4) == 12, "2.3: Three-overload dispatcher - two args")
+
+// ============================================================================
+// TEST 3: Dispatcher with Closures (Captured Variables)
+// ============================================================================
+print("--- [3] Dispatcher with Closures ---")
+
+func makeCounter(start) {
+    var count = start
+
+    func increment() {
+        count = count + 1
+        return count
+    }
+
+    func increment(n) {
+        count = count + n
+        return count
+    }
+
+    return increment
+}
+
+var counter = makeCounter(100)
+assert_wrap(counter() == 101, "3.1: Dispatcher with closures - first increment")
+assert_wrap(counter() == 102, "3.2: Dispatcher with closures - second increment")
+assert_wrap(counter(10) == 112, "3.3: Dispatcher with closures - increment by 10")
+assert_wrap(counter() == 113, "3.4: Dispatcher with closures - continues after 10")
+
+// ============================================================================
+// TEST 4: Multiple Dispatchers from Same Factory
+// ============================================================================
+print("--- [4] Multiple Independent Dispatchers ---")
+
+func multiplyFactory() {
+    func multiply(x) {
+        return x * 2
+    }
+
+    func multiply(x, y) {
+        return x * y
+    }
+
+    return multiply
+}
+
+var mult1 = multiplyFactory()
+var mult2 = multiplyFactory()
+
+assert_wrap(mult1(5) == 10, "4.1: Multiple dispatchers - mult1 single arg")
+assert_wrap(mult2(3, 4) == 12, "4.2: Multiple dispatchers - mult2 two args")
+assert_wrap(mult1(2, 6) == 12, "4.3: Multiple dispatchers - mult1 two args")
+assert_wrap(mult2(8) == 16, "4.4: Multiple dispatchers - mult2 single arg")
+
+// ============================================================================
+// TEST 5: Dispatcher with Different Return Types
+// ============================================================================
+print("--- [5] Dispatcher with Various Return Types ---")
+
+func makeFormatter() {
+    func format() {
+        return 0
+    }
+
+    func format(x) {
+        return x
+    }
+
+    func format(x, y) {
+        return x + y
+    }
+
+    return format
+}
+
+var formatter = makeFormatter()
+assert_wrap(formatter() == 0, "5.1: Dispatcher various return types - zero args")
+assert_wrap(formatter(42) == 42, "5.2: Dispatcher various return types - one arg")
+assert_wrap(formatter(10, 32) == 42, "5.3: Dispatcher various return types - two args")
+
+// ============================================================================
+// TEST 6: Nested Dispatcher Creation
+// ============================================================================
+print("--- [6] Nested Dispatcher Creation ---")
+
+func outerFactory() {
+    func inner() {
+        func process() {
+            return 1
+        }
+
+        func process(x) {
+            return x + 1
+        }
+
+        return process
+    }
+
+    return inner()
+}
+
+var nested = outerFactory()
+assert_wrap(nested() == 1, "6.1: Nested dispatcher creation - zero args")
+assert_wrap(nested(5) == 6, "6.2: Nested dispatcher creation - one arg")
+
+// ============================================================================
+// TEST 7: Dispatcher Chain (Dispatcher Returning Dispatcher)
+// ============================================================================
+print("--- [7] Dispatcher Returning Another Dispatcher ---")
+
+func chainedFactory() {
+    func stage1() {
+        func stage2() {
+            return 100
+        }
+
+        func stage2(x) {
+            return 100 + x
+        }
+
+        return stage2
+    }
+
+    func stage1(x) {
+        func stage2() {
+            return x
+        }
+
+        func stage2(y) {
+            return x + y
+        }
+
+        return stage2
+    }
+
+    return stage1
+}
+
+var chained = chainedFactory()
+var s1 = chained()
+var s2 = chained(50)
+
+assert_wrap(s1() == 100, "7.1: Dispatcher chain - s1 zero args")
+assert_wrap(s1(5) == 105, "7.2: Dispatcher chain - s1 one arg")
+assert_wrap(s2() == 50, "7.3: Dispatcher chain - s2 zero args")
+assert_wrap(s2(25) == 75, "7.4: Dispatcher chain - s2 one arg")
+
+// ============================================================================
+// TEST 8: Dispatcher with Recursive Functions
+// ============================================================================
+print("--- [8] Dispatcher with Recursive Functions ---")
+
+func makeRecursive() {
+    func factorial(n) {
+        if (n <= 1) return 1
+        return n * factorial(n - 1)
+    }
+
+    func factorial(n, acc) {
+        if (n <= 1) return acc
+        return factorial(n - 1, n * acc)
+    }
+
+    return factorial
+}
+
+var fact = makeRecursive()
+assert_wrap(fact(5) == 120, "8.1: Dispatcher with recursion - factorial")
+assert_wrap(fact(5, 1) == 120, "8.2: Dispatcher with recursion - accumulator factorial")
+
+// ============================================================================
+// TEST 9: Dispatcher with Complex Closure Capture
+// ============================================================================
+print("--- [9] Dispatcher with Complex Closures ---")
+
+func makeComplex(a, b) {
+    var state1 = a
+    var state2 = b
+
+    func operate() {
+        return state1 + state2
+    }
+
+    func operate(x) {
+        return state1 + state2 + x
+    }
+
+    func operate(x, y) {
+        return state1 + state2 + x + y
+    }
+
+    return operate
+}
+
+var complex = makeComplex(10, 20)
+assert_wrap(complex() == 30, "9.1: Dispatcher complex closures - zero args")
+assert_wrap(complex(5) == 35, "9.2: Dispatcher complex closures - one arg")
+assert_wrap(complex(5, 3) == 38, "9.3: Dispatcher complex closures - two args")
+
+// ============================================================================
+// TEST 10: High-Arity Dispatcher (Testing Limits)
+// ============================================================================
+print("--- [10] High-Arity Dispatcher ---")
+
+func makeHighArity() {
+    func sum() {
+        return 0
+    }
+
+    func sum(a) {
+        return a
+    }
+
+    func sum(a, b) {
+        return a + b
+    }
+
+    func sum(a, b, c) {
+        return a + b + c
+    }
+
+    func sum(a, b, c, d) {
+        return a + b + c + d
+    }
+
+    func sum(a, b, c, d, e) {
+        return a + b + c + d + e
+    }
+
+    return sum
+}
+
+var highSum = makeHighArity()
+assert_wrap(highSum() == 0, "10.1: High-arity dispatcher - zero args")
+assert_wrap(highSum(1) == 1, "10.2: High-arity dispatcher - one arg")
+assert_wrap(highSum(1, 2) == 3, "10.3: High-arity dispatcher - two args")
+assert_wrap(highSum(1, 2, 3) == 6, "10.4: High-arity dispatcher - three args")
+assert_wrap(highSum(1, 2, 3, 4) == 10, "10.5: High-arity dispatcher - four args")
+assert_wrap(highSum(1, 2, 3, 4, 5) == 15, "10.6: High-arity dispatcher - five args")
+
+// ============================================================================
+// TEST 11: Dispatcher in Data Structures
+// ============================================================================
+print("--- [11] Dispatcher in Lists and Maps ---")
+
+func makeOp() {
+    func op(x) {
+        return x * 2
+    }
+
+    func op(x, y) {
+        return x + y
+    }
+
+    return op
+}
+
+var ops = [makeOp(), makeOp()]
+assert_wrap(ops[0](5) == 10, "11.1: Dispatcher in list - ops[0]")
+assert_wrap(ops[1](3, 7) == 10, "11.2: Dispatcher in list - ops[1]")
+
+var opMap = { "first": makeOp(), "second": makeOp() }
+assert_wrap(opMap["first"](4) == 8, "11.3: Dispatcher in map - first")
+assert_wrap(opMap["second"](5, 5) == 10, "11.4: Dispatcher in map - second")
+
+// ============================================================================
+// TEST 12: Dispatcher Passed as Argument
+// ============================================================================
+print("--- [12] Dispatcher as Function Argument ---")
+
+func applyFunc(f, x) {
+    return f(x)
+}
+
+func applyFunc2(f, x, y) {
+    return f(x, y)
+}
+
+func makeFunc() {
+    func fn(x) {
+        return x + 100
+    }
+
+    func fn(x, y) {
+        return x + y + 100
+    }
+
+    return fn
+}
+
+var fn = makeFunc()
+assert_wrap(applyFunc(fn, 5) == 105, "12.1: Dispatcher as argument - single arg")
+assert_wrap(applyFunc2(fn, 10, 20) == 130, "12.2: Dispatcher as argument - two args")
+
+// ============================================================================
+// TEST 13: Dispatcher Assigned to Variables Multiple Times
+// ============================================================================
+print("--- [13] Dispatcher Reassignment ---")
+
+func makeSimple() {
+    func simple(x) {
+        return x
+    }
+
+    func simple(x, y) {
+        return x + y
+    }
+
+    return simple
+}
+
+var s = makeSimple()
+var s2 = s
+var s3 = s2
+
+assert_wrap(s(10) == 10, "13.1: Dispatcher reassignment - s")
+assert_wrap(s2(5, 5) == 10, "13.2: Dispatcher reassignment - s2")
+assert_wrap(s3(7) == 7, "13.3: Dispatcher reassignment - s3 one arg")
+assert_wrap(s3(3, 4) == 7, "13.4: Dispatcher reassignment - s3 two args")
+
+// ============================================================================
+// TEST 14: Dispatcher with Early Returns
+// ============================================================================
+print("--- [14] Dispatcher with Early Returns ---")
+
+func makeConditional() {
+    func check(x) {
+        if (x < 0) return 0
+        if (x > 100) return 100
+        return x
+    }
+
+    func check(x, y) {
+        if (x < y) return x
+        return y
+    }
+
+    return check
+}
+
+var checker = makeConditional()
+assert_wrap(checker(-5) == 0, "14.1: Dispatcher early returns - negative")
+assert_wrap(checker(50) == 50, "14.2: Dispatcher early returns - middle")
+assert_wrap(checker(150) == 100, "14.3: Dispatcher early returns - over 100")
+assert_wrap(checker(10, 20) == 10, "14.4: Dispatcher early returns - min 10,20")
+assert_wrap(checker(30, 15) == 15, "14.5: Dispatcher early returns - min 30,15")
+
+// ============================================================================
+// TEST 15: Stress Test - Many Dispatchers
+// ============================================================================
+print("--- [15] Stress Test - Multiple Dispatchers ---")
+
+func makeMany(id) {
+    func fn(x) {
+        return id + x
+    }
+
+    func fn(x, y) {
+        return id + x + y
+    }
+
+    return fn
+}
+
+var d1 = makeMany(100)
+var d2 = makeMany(200)
+var d3 = makeMany(300)
+var d4 = makeMany(400)
+var d5 = makeMany(500)
+
+assert_wrap(d1(1) == 101, "15.1: Stress test - d1 single arg")
+assert_wrap(d2(2) == 202, "15.2: Stress test - d2 single arg")
+assert_wrap(d3(3) == 303, "15.3: Stress test - d3 single arg")
+assert_wrap(d4(4) == 404, "15.4: Stress test - d4 single arg")
+assert_wrap(d5(5) == 505, "15.5: Stress test - d5 single arg")
+
+assert_wrap(d1(1, 2) == 103, "15.6: Stress test - d1 two args")
+assert_wrap(d2(2, 3) == 205, "15.7: Stress test - d2 two args")
+assert_wrap(d3(3, 4) == 307, "15.8: Stress test - d3 two args")
+assert_wrap(d4(4, 5) == 409, "15.9: Stress test - d4 two args")
+assert_wrap(d5(5, 6) == 511, "15.10: Stress test - d5 two args")
+
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

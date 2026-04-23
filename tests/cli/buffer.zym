@@ -1,0 +1,388 @@
+// ============================================================================
+// COMPREHENSIVE Buffer NATIVE TEST SUITE
+// Exercises the `Buffer` global: constructors, size/state, element access,
+// ordering & search, slicing & composition, text conversion, and every
+// integer/float decode/encode pair.
+// ============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+print("==========================================================")
+print("Buffer NATIVE TEST SUITE")
+print("==========================================================")
+
+
+// ============================================================================
+// SECTION 1: CONSTRUCTION
+// ============================================================================
+print("--- [1] Construction ---")
+
+var b1 = Buffer.new(0)
+assert_wrap(b1.size() == 0, "1.1: Buffer.new(0) size")
+assert_wrap(b1.isEmpty(), "1.2: Buffer.new(0) isEmpty")
+
+var b2 = Buffer.new(8)
+assert_wrap(b2.size() == 8, "1.3: Buffer.new(8) size")
+assert_wrap(b2.isEmpty() == false, "1.4: Buffer.new(8) not empty")
+assert_wrap(b2.get(0) == 0, "1.5: Buffer.new(8) zero-filled byte 0")
+assert_wrap(b2.get(7) == 0, "1.6: Buffer.new(8) zero-filled byte 7")
+
+var bHex = Buffer.fromHex("cafebabe")
+assert_wrap(bHex.size() == 4, "1.7: Buffer.fromHex size")
+assert_wrap(bHex.get(0) == 202, "1.8: Buffer.fromHex byte 0 (0xCA)")
+assert_wrap(bHex.get(1) == 254, "1.9: Buffer.fromHex byte 1 (0xFE)")
+assert_wrap(bHex.get(2) == 186, "1.10: Buffer.fromHex byte 2 (0xBA)")
+assert_wrap(bHex.get(3) == 190, "1.11: Buffer.fromHex byte 3 (0xBE)")
+
+var bHexUpper = Buffer.fromHex("DEADBEEF")
+assert_wrap(bHexUpper.size() == 4, "1.12: Buffer.fromHex upper-case size")
+assert_wrap(bHexUpper.get(0) == 222, "1.13: Buffer.fromHex upper byte 0")
+
+var bStr = Buffer.fromString("hi")
+assert_wrap(bStr.size() == 2, "1.14: Buffer.fromString size")
+assert_wrap(bStr.get(0) == 104, "1.15: Buffer.fromString 'h'")
+assert_wrap(bStr.get(1) == 105, "1.16: Buffer.fromString 'i'")
+
+var bStrEmpty = Buffer.fromString("")
+assert_wrap(bStrEmpty.size() == 0, "1.17: Buffer.fromString('') empty")
+
+var bList = Buffer.fromList([1, 2, 3, 255])
+assert_wrap(bList.size() == 4, "1.18: Buffer.fromList size")
+assert_wrap(bList.get(0) == 1, "1.19: Buffer.fromList [0]")
+assert_wrap(bList.get(3) == 255, "1.20: Buffer.fromList [3]")
+
+var bListEmpty = Buffer.fromList([])
+assert_wrap(bListEmpty.size() == 0, "1.21: Buffer.fromList([]) empty")
+
+
+// ============================================================================
+// SECTION 2: VALUE SEMANTICS (Buffer.fromBytes / duplicate)
+// ============================================================================
+print("--- [2] Value Semantics ---")
+
+var src = Buffer.fromList([10, 20, 30])
+var copyA = Buffer.fromBytes(src)
+copyA.set(0, 99)
+assert_wrap(src.get(0) == 10, "2.1: fromBytes is an independent copy (src unchanged)")
+assert_wrap(copyA.get(0) == 99, "2.2: fromBytes mutation visible on copy")
+
+var copyB = src.duplicate()
+copyB.set(1, 88)
+assert_wrap(src.get(1) == 20, "2.3: duplicate is independent (src unchanged)")
+assert_wrap(copyB.get(1) == 88, "2.4: duplicate mutation visible on copy")
+
+// Plain assignment aliases the buffer handle (like any map); use
+// `duplicate()` / `fromBytes()` to obtain an independent copy.
+var aliased = src
+aliased.set(2, 77)
+assert_wrap(aliased.get(2) == 77, "2.5: assignment mutation visible on alias")
+assert_wrap(src.get(2) == 77, "2.6: assignment aliases the source buffer")
+
+
+// ============================================================================
+// SECTION 3: SIZE & STATE
+// ============================================================================
+print("--- [3] Size & State ---")
+
+var s = Buffer.fromList([1, 2, 3, 4, 5])
+assert_wrap(s.size() == 5, "3.1: size()")
+assert_wrap(s.isEmpty() == false, "3.2: isEmpty() false")
+
+s.resize(3)
+assert_wrap(s.size() == 3, "3.3: resize(3) shrinks")
+assert_wrap(s.get(0) == 1, "3.4: resize preserves head")
+assert_wrap(s.get(2) == 3, "3.5: resize preserves tail byte at new end")
+
+s.resize(6)
+assert_wrap(s.size() == 6, "3.6: resize(6) grows")
+// Grown bytes are not guaranteed to be pre-zeroed by resize.
+s.fill(0)
+assert_wrap(s.get(3) == 0, "3.7: fill(0) clears byte 3")
+assert_wrap(s.get(5) == 0, "3.8: fill(0) clears last byte")
+
+s.fill(0xAB)
+assert_wrap(s.get(0) == 0xAB, "3.9: fill byte 0")
+assert_wrap(s.get(5) == 0xAB, "3.10: fill byte end")
+
+s.fill(0x1FF) // masked to 0xFF
+assert_wrap(s.get(0) == 0xFF, "3.11: fill masks to 8 bits")
+
+s.clear()
+assert_wrap(s.size() == 0, "3.12: clear() empties buffer")
+assert_wrap(s.isEmpty(), "3.13: clear() -> isEmpty")
+
+
+// ============================================================================
+// SECTION 4: ELEMENT ACCESS (get/set/append/pushBack/insert/removeAt/erase)
+// ============================================================================
+print("--- [4] Element Access ---")
+
+var e = Buffer.new(4)
+e.set(0, 10)
+e.set(1, 20)
+e.set(2, 30)
+e.set(3, 40)
+assert_wrap(e.get(0) == 10, "4.1: set/get byte 0")
+assert_wrap(e.get(3) == 40, "4.2: set/get byte 3")
+
+e.set(0, 0x1AA) // masked
+assert_wrap(e.get(0) == 0xAA, "4.3: set masks to 8 bits")
+
+e.append(50)
+assert_wrap(e.size() == 5, "4.4: append grows size")
+assert_wrap(e.get(4) == 50, "4.5: append places byte")
+
+e.pushBack(60)
+assert_wrap(e.size() == 6, "4.6: pushBack grows size")
+assert_wrap(e.get(5) == 60, "4.7: pushBack places byte")
+
+e.insert(0, 1)
+assert_wrap(e.size() == 7, "4.8: insert at 0 grows size")
+assert_wrap(e.get(0) == 1, "4.9: insert at 0 places byte")
+assert_wrap(e.get(1) == 0xAA, "4.10: insert shifts existing bytes right")
+
+e.removeAt(0)
+assert_wrap(e.size() == 6, "4.11: removeAt shrinks size")
+assert_wrap(e.get(0) == 0xAA, "4.12: removeAt shifts bytes left")
+
+var er = Buffer.fromList([5, 7, 5, 9, 5])
+var foundErase = er.erase(5)
+assert_wrap(foundErase, "4.13: erase returns true on match")
+assert_wrap(er.size() == 4, "4.14: erase shrinks by one")
+assert_wrap(er.get(0) == 7, "4.15: erase removes first occurrence only")
+assert_wrap(er.get(2) == 9, "4.16: erase preserves later bytes")
+
+var noErase = er.erase(123)
+assert_wrap(noErase == false, "4.17: erase returns false when absent")
+assert_wrap(er.size() == 4, "4.18: erase miss leaves size alone")
+
+
+// ============================================================================
+// SECTION 5: ORDERING & SEARCH
+// ============================================================================
+print("--- [5] Ordering & Search ---")
+
+var r = Buffer.fromList([1, 2, 3, 4, 5])
+r.reverse()
+assert_wrap(r.get(0) == 5, "5.1: reverse byte 0")
+assert_wrap(r.get(4) == 1, "5.2: reverse byte last")
+
+var so = Buffer.fromList([3, 1, 4, 1, 5, 9, 2, 6])
+so.sort()
+assert_wrap(so.get(0) == 1, "5.3: sort ascending first")
+assert_wrap(so.get(1) == 1, "5.4: sort keeps duplicates")
+assert_wrap(so.get(7) == 9, "5.5: sort ascending last")
+
+var h = Buffer.fromList([10, 20, 30, 20, 40])
+assert_wrap(h.has(20), "5.6: has true")
+assert_wrap(h.has(99) == false, "5.7: has false")
+
+assert_wrap(h.find(20, 0) == 1, "5.8: find from 0")
+assert_wrap(h.find(20, 2) == 3, "5.9: find from later offset")
+assert_wrap(h.find(99, 0) == -1, "5.10: find missing -> -1")
+
+assert_wrap(h.rfind(20, -1) == 3, "5.11: rfind from end")
+assert_wrap(h.rfind(20, 2) == 1, "5.12: rfind bounded")
+assert_wrap(h.rfind(99, -1) == -1, "5.13: rfind missing -> -1")
+
+assert_wrap(h.count(20) == 2, "5.14: count matches")
+assert_wrap(h.count(77) == 0, "5.15: count none")
+
+var bs = Buffer.fromList([1, 3, 3, 5, 7])
+assert_wrap(bs.bsearch(3, true) == 1, "5.16: bsearch lower bound of 3")
+assert_wrap(bs.bsearch(3, false) == 3, "5.17: bsearch upper bound of 3")
+assert_wrap(bs.bsearch(0, true) == 0, "5.18: bsearch below min")
+assert_wrap(bs.bsearch(9, true) == 5, "5.19: bsearch above max")
+
+
+// ============================================================================
+// SECTION 6: SLICING & COMPOSITION
+// ============================================================================
+print("--- [6] Slicing & Composition ---")
+
+var sl = Buffer.fromList([0, 1, 2, 3, 4, 5])
+var mid = sl.slice(1, 4)
+assert_wrap(mid.size() == 3, "6.1: slice size")
+assert_wrap(mid.get(0) == 1, "6.2: slice begin byte")
+assert_wrap(mid.get(2) == 3, "6.3: slice last byte")
+
+var tail = sl.slice(-2, 6)
+assert_wrap(tail.size() == 2, "6.4: slice negative begin size")
+assert_wrap(tail.get(0) == 4, "6.5: slice negative begin first byte")
+assert_wrap(tail.get(1) == 5, "6.6: slice negative begin last byte")
+
+// original untouched by slice
+assert_wrap(sl.size() == 6, "6.7: slice does not mutate source")
+assert_wrap(sl.get(0) == 0, "6.8: slice source intact")
+
+var eqA = Buffer.fromList([1, 2, 3])
+var eqB = Buffer.fromList([1, 2, 3])
+var eqC = Buffer.fromList([1, 2, 4])
+var eqD = Buffer.fromList([1, 2])
+assert_wrap(eqA.equals(eqB), "6.9: equals true (same bytes)")
+assert_wrap(eqA.equals(eqC) == false, "6.10: equals false (different byte)")
+assert_wrap(eqA.equals(eqD) == false, "6.11: equals false (different size)")
+
+var left = Buffer.fromList([1, 2, 3])
+var right = Buffer.fromList([4, 5])
+var joined = left.concat(right)
+assert_wrap(joined.size() == 5, "6.12: concat size")
+assert_wrap(joined.get(0) == 1, "6.13: concat head")
+assert_wrap(joined.get(4) == 5, "6.14: concat tail")
+assert_wrap(left.size() == 3, "6.15: concat leaves left alone")
+assert_wrap(right.size() == 2, "6.16: concat leaves right alone")
+
+
+// ============================================================================
+// SECTION 7: TEXT CONVERSION
+// ============================================================================
+print("--- [7] Text Conversion ---")
+
+var tx = Buffer.fromList([0xCA, 0xFE, 0xBA, 0xBE])
+assert_wrap(tx.hex() == "cafebabe", "7.1: hex() lower-case encoding")
+
+var emptyHex = Buffer.new(0).hex()
+assert_wrap(emptyHex == "", "7.2: hex() of empty is empty string")
+
+var hiBuf = Buffer.fromString("hi")
+assert_wrap(hiBuf.toUtf8() == "hi", "7.3: toUtf8 round-trip ASCII")
+assert_wrap(hiBuf.toAscii() == "hi", "7.4: toAscii round-trip ASCII")
+
+var roundHex = Buffer.fromHex("4869")
+assert_wrap(roundHex.toAscii() == "Hi", "7.5: fromHex -> toAscii round-trip")
+
+
+// ============================================================================
+// SECTION 8: UNSIGNED INTEGER DECODE/ENCODE
+// ============================================================================
+print("--- [8] Unsigned Int Codec ---")
+
+var u = Buffer.new(8)
+
+u.encodeU8(0, 0xAB)
+assert_wrap(u.decodeU8(0) == 0xAB, "8.1: U8 round-trip")
+assert_wrap(u.get(0) == 0xAB, "8.2: U8 byte layout")
+
+u.encodeU16(0, 0xBEEF)
+assert_wrap(u.decodeU16(0) == 0xBEEF, "8.3: U16 round-trip")
+assert_wrap(u.get(0) == 0xEF, "8.4: U16 little-endian byte 0")
+assert_wrap(u.get(1) == 0xBE, "8.5: U16 little-endian byte 1")
+
+u.encodeU32(0, 0xDEADBEEF)
+assert_wrap(u.decodeU32(0) == 0xDEADBEEF, "8.6: U32 round-trip")
+assert_wrap(u.get(0) == 0xEF, "8.7: U32 little-endian byte 0")
+assert_wrap(u.get(3) == 0xDE, "8.8: U32 little-endian byte 3")
+
+// Values stay under 2^53 so they round-trip exactly through a double.
+u.encodeU64(0, 0x0011223344556677)
+assert_wrap(u.decodeU64(0) == 0x0011223344556677, "8.9: U64 round-trip")
+assert_wrap(u.get(0) == 0x77, "8.10: U64 little-endian byte 0")
+assert_wrap(u.get(6) == 0x11, "8.11: U64 little-endian byte 6")
+assert_wrap(u.get(7) == 0x00, "8.12: U64 little-endian byte 7 (top)")
+
+
+// ============================================================================
+// SECTION 9: SIGNED INTEGER DECODE/ENCODE
+// ============================================================================
+print("--- [9] Signed Int Codec ---")
+
+var si = Buffer.new(8)
+
+si.encodeI8(0, -1)
+assert_wrap(si.decodeI8(0) == -1, "9.1: I8 round-trip -1")
+assert_wrap(si.get(0) == 0xFF, "9.2: I8 two's complement")
+
+si.encodeI8(0, 127)
+assert_wrap(si.decodeI8(0) == 127, "9.3: I8 round-trip max positive")
+
+si.encodeI16(0, -2)
+assert_wrap(si.decodeI16(0) == -2, "9.4: I16 round-trip -2")
+
+si.encodeI32(0, -123456789)
+assert_wrap(si.decodeI32(0) == -123456789, "9.5: I32 round-trip negative")
+si.encodeI32(0, 123456789)
+assert_wrap(si.decodeI32(0) == 123456789, "9.6: I32 round-trip positive")
+
+si.encodeI64(0, -42)
+assert_wrap(si.decodeI64(0) == -42, "9.7: I64 round-trip small negative")
+
+// Contrast: U8 vs I8 reading the same 0xFF byte
+var mix = Buffer.new(1)
+mix.encodeU8(0, 0xFF)
+assert_wrap(mix.decodeU8(0) == 255, "9.8: U8 reads 0xFF as 255")
+assert_wrap(mix.decodeI8(0) == -1, "9.9: I8 reads 0xFF as -1")
+
+
+// ============================================================================
+// SECTION 10: FLOAT DECODE/ENCODE
+// ============================================================================
+print("--- [10] Float Codec ---")
+
+var fb = Buffer.new(8)
+
+fb.encodeFloat(0, 1.5)
+assert_wrap(fb.decodeFloat(0) == 1.5, "10.1: float (f32) round-trip 1.5")
+
+fb.encodeFloat(0, -0.25)
+assert_wrap(fb.decodeFloat(0) == -0.25, "10.2: float (f32) round-trip -0.25")
+
+fb.encodeDouble(0, 3.141592653589793)
+assert_wrap(fb.decodeDouble(0) == 3.141592653589793, "10.3: double round-trip pi")
+
+fb.encodeDouble(0, -1234567890.125)
+assert_wrap(fb.decodeDouble(0) == -1234567890.125, "10.4: double round-trip large negative")
+
+fb.encodeHalf(0, 1.0)
+assert_wrap(fb.decodeHalf(0) == 1.0, "10.5: half round-trip 1.0")
+
+fb.encodeHalf(0, -2.0)
+assert_wrap(fb.decodeHalf(0) == -2.0, "10.6: half round-trip -2.0")
+
+
+// ============================================================================
+// SECTION 11: CODEC AT OFFSETS
+// ============================================================================
+print("--- [11] Codec at offsets ---")
+
+var off = Buffer.new(16)
+off.encodeU32(0, 0xAAAAAAAA)
+off.encodeU32(4, 0xBBBBBBBB)
+off.encodeU32(8, 0xCCCCCCCC)
+off.encodeU32(12, 0xDDDDDDDD)
+
+assert_wrap(off.decodeU32(0)  == 0xAAAAAAAA, "11.1: offset  0")
+assert_wrap(off.decodeU32(4)  == 0xBBBBBBBB, "11.2: offset  4")
+assert_wrap(off.decodeU32(8)  == 0xCCCCCCCC, "11.3: offset  8")
+assert_wrap(off.decodeU32(12) == 0xDDDDDDDD, "11.4: offset 12")
+
+// Overwrites stay local
+off.encodeU16(6, 0x1234)
+assert_wrap(off.decodeU16(6) == 0x1234, "11.5: U16 at offset 6")
+assert_wrap(off.decodeU32(0) == 0xAAAAAAAA, "11.6: U16 overwrite does not touch offset 0")
+
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

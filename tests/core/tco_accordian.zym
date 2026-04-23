@@ -1,0 +1,42 @@
+// Global verification variable
+var max_depth = 0
+
+func ping(n) {
+    if (n == 0) return "Success"
+
+    // Debug print to trace flow
+    // print "Ping: " + n
+
+    // TAIL CALL to a LARGER frame
+    // 'ping' has almost no locals. 'pong' has many.
+    @tco aggressive
+    return pong(n - 1)
+}
+
+func pong(n) {
+    // 1. Stack Bloat: Define many locals to force a large frame size.
+    // These take up stack slots R1 through R10
+    var a = 1 var b = 2 var c = 3 var d = 4
+    var e = 5 var f = 6 var g = 7 var h = 8
+    var i = 9 var j = 10
+
+    // 2. Memory Integrity Check
+    // If the frame didn't grow properly, these values might be
+    // garbage or overwritten by the call overhead.
+    var sum = a + b + c + d + e + f + g + h + i + j
+
+    if (sum != 55) {
+        print("MEMORY CORRUPTION DETECTED!")
+        print("Expected 55, got %v", sum)
+        return "Fail"
+    }
+
+    // 3. TAIL CALL to a SMALLER frame
+    // logic: frame is already big enough, so it should just reuse it.
+    @tco aggressive
+    return ping(n - 1)
+}
+
+print("Starting Accordion Test...")
+var result = ping(1000000)
+print("Final Result: " + result)

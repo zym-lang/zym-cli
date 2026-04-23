@@ -55,6 +55,7 @@ set(ZYM_NATIVE_SOURCES
         src/natives/natives.cpp
         src/natives/print.cpp
         src/natives/time.cpp
+        src/natives/buffer.cpp
 )
 
 add_executable(zym ${APP_SOURCES} ${ZYM_NATIVE_SOURCES})

@@ -1,0 +1,131 @@
+// ============================================================================
+// CORE MATH AND NUMBERS TEST SUITE
+// This test covers features implemented directly in the VM and runtime
+// ============================================================================
+
+// Test helper function
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: %s", message)
+    }
+}
+
+print("==========================================================")
+print("CORE MATH AND NUMBERS TEST SUITE")
+print("==========================================================")
+print("")
+
+// ============================================================================
+// SECTION 1: BASIC ARITHMETIC (CORE OPCODES)
+// ============================================================================
+print("=== SECTION 1: Basic Arithmetic ===")
+
+assert_wrap(1 + 2 == 3, "1.1: Addition (1 + 2)")
+assert_wrap(10 - 4 == 6, "1.2: Subtraction (10 - 4)")
+assert_wrap(3 * 4 == 12, "1.3: Multiplication (3 * 4)")
+assert_wrap(20 / 5 == 4, "1.4: Division (20 / 5)")
+assert_wrap(10 % 3 == 1, "1.5: Modulo (10 % 3)")
+assert_wrap(-5 + 10 == 5, "1.6: Unary minus and addition")
+assert_wrap(2 * (3 + 4) == 14, "1.7: Parentheses and precedence")
+assert_wrap(10 / 4 == 2.5, "1.8: Floating point division")
+assert_wrap(10 % 3.5 == 3, "1.9: Floating point modulo (fmod)")
+
+// ============================================================================
+// SECTION 2: BITWISE OPERATORS (32-BIT INTEGER CAST)
+// ============================================================================
+print("=== SECTION 2: Bitwise Operators ===")
+
+assert_wrap((5 & 3) == 1, "2.1: Bitwise AND (5 & 3)")
+assert_wrap((5 | 3) == 7, "2.2: Bitwise OR (5 | 3)")
+assert_wrap((5 ^ 3) == 6, "2.3: Bitwise XOR (5 ^ 3)")
+assert_wrap((1 << 3) == 8, "2.4: Left shift (1 << 3)")
+assert_wrap((16 >> 2) == 4, "2.5: Right shift (16 >> 2)")
+assert_wrap(~0 == -1, "2.6: Bitwise NOT (~0)")
+assert_wrap(((-1) >>> 1) == 2147483647, "2.7: Unsigned right shift (>>>)")
+assert_wrap((0x80000000 >> 1) == -1073741824, "2.8: Signed right shift (>>) preserves sign")
+
+// ============================================================================
+// SECTION 3: NUMBER LITERALS & REPRESENTATION
+// ============================================================================
+print("=== SECTION 3: Number Literals ===")
+
+assert_wrap(0xFF == 255, "3.1: Hex literal (0xFF)")
+assert_wrap(0b1010 == 10, "3.2: Binary literal (0b1010)")
+assert_wrap(1_000_000 == 1000000, "3.3: Underscore separator (1_000_000)")
+assert_wrap(0xAB_CD == 43981, "3.4: Hex with underscore")
+// Standard IEEE 754 precision test
+var float_err = (0.1 + 0.2) - 0.3
+assert_wrap(float_err < 0.0000000000001, "3.5: Floating point precision check")
+
+// ============================================================================
+// SECTION 4: INCREMENT AND DECREMENT
+// ============================================================================
+print("=== SECTION 4: Increment and Decrement ===")
+
+var a = 10
+assert_wrap(++a == 11, "4.1: Prefix increment")
+assert_wrap(a++ == 11, "4.2: Postfix increment (returns old value)")
+assert_wrap(a == 12, "4.3: Postfix increment (side effect)")
+assert_wrap(--a == 11, "4.4: Prefix decrement")
+assert_wrap(a-- == 11, "4.5: Postfix decrement (returns old value)")
+assert_wrap(a == 10, "4.6: Postfix decrement (side effect)")
+
+// ============================================================================
+// SECTION 5: EDGE CASES (INF/FINITE)
+// ============================================================================
+print("=== SECTION 5: Edge Cases ===")
+
+var inf = 1 / 0
+var negInf = -1 / 0
+assert_wrap(inf > 1000000, "5.1: Infinity is greater than large numbers")
+assert_wrap(negInf < -1000000, "5.2: Negative Infinity is smaller than large negative numbers")
+assert_wrap(inf + 1 == inf, "5.3: Inf + 1 is still Inf")
+assert_wrap(1 / inf == 0, "5.4: 1 / Inf is 0")
+
+// Note: NaN behavior (from 0/0) is currently atypical in ZYM due to NaN-boxing 
+// tag overlap. NaNs are treated as unknown types rather than numbers.
+
+// ============================================================================
+// SECTION 6: COMPOUND ASSIGNMENT
+// ============================================================================
+print("=== SECTION 6: Compound Assignment ===")
+
+var x = 10
+x += 5
+assert_wrap(x == 15, "6.1: x += 5")
+x -= 3
+assert_wrap(x == 12, "6.2: x -= 3")
+x *= 2
+assert_wrap(x == 24, "6.3: x *= 2")
+x /= 4
+assert_wrap(x == 6, "6.4: x /= 4")
+x %= 4
+assert_wrap(x == 2, "6.5: x %= 4")
+
+var y = 0xF0
+y &= 0x0F
+assert_wrap(y == 0, "6.6: y &= 0x0F")
+y |= 0x55
+assert_wrap(y == 0x55, "6.7: y |= 0x55")
+
+// ============================================================================
+// SUMMARY
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST SUMMARY")
+print("Tests Passed: %n", testsPassed)
+print("Tests Failed: %n", testsFailed)
+print("==========================================================")
+
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED")
+} else {
+    print("SOME TESTS FAILED")
+}

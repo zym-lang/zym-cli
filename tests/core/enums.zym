@@ -1,0 +1,543 @@
+// ============================================================================
+// COMPREHENSIVE ENUM TEST SUITE
+// Tests all aspects of enum usage including:
+// - Basic declaration and value access
+// - Comparison and equality
+// - Type safety enforcement
+// - Scoping, shadowing, and forward references
+// - Collections (lists, maps)
+// - Closures and upvalues
+// - Interaction with structs
+// - Edge cases and corner cases
+// ============================================================================
+
+print("==========================================================")
+print("COMPREHENSIVE ENUM TEST SUITE")
+print("==========================================================")
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+// ============================================================================
+// SECTION 1: BASIC ENUM DECLARATION AND ACCESS
+// ============================================================================
+print("")
+print("=== SECTION 1: Basic Enum Declaration and Access ===")
+
+// 1.1: Simple enum declaration
+enum Color { RED, GREEN, BLUE }
+var c1 = Color.RED
+var c2 = Color.GREEN
+var c3 = Color.BLUE
+assert_wrap(c1 == Color.RED, "1.1a: Basic enum value assignment - RED")
+assert_wrap(c2 == Color.GREEN, "1.1b: Basic enum value assignment - GREEN")
+assert_wrap(c3 == Color.BLUE, "1.1c: Basic enum value assignment - BLUE")
+
+// 1.2: Enum with many variants
+enum Days { MON, TUE, WED, THU, FRI, SAT, SUN }
+var d1 = Days.MON
+var d7 = Days.SUN
+assert_wrap(d1 == Days.MON, "1.2a: Multi-variant enum - first")
+assert_wrap(d7 == Days.SUN, "1.2b: Multi-variant enum - last")
+
+// 1.3: Enum with single variant
+enum Single { ONLY }
+var s1 = Single.ONLY
+assert_wrap(s1 == Single.ONLY, "1.3: Single variant enum")
+
+// 1.4: Multiple enums
+enum Status { ACTIVE, INACTIVE }
+enum Priority { LOW, MEDIUM, HIGH }
+var st = Status.ACTIVE
+var pr = Priority.HIGH
+assert_wrap(st == Status.ACTIVE, "1.4a: Multiple enums - Status")
+assert_wrap(pr == Priority.HIGH, "1.4b: Multiple enums - Priority")
+
+// ============================================================================
+// SECTION 2: ENUM COMPARISON AND EQUALITY
+// ============================================================================
+print("=== SECTION 2: Enum Comparison and Equality ===")
+
+// 2.1: Same enum, same value
+var ca = Color.RED
+var cb = Color.RED
+assert_wrap(ca == cb, "2.1: Same enum same value equality")
+
+// 2.2: Same enum, different value
+var cc = Color.RED
+var cd = Color.BLUE
+assert_wrap(cc != cd, "2.2: Same enum different value inequality")
+
+// 2.3: Enum assigned to another variable
+var ce = Color.GREEN
+var cf = ce
+assert_wrap(ce == cf, "2.3: Enum variable assignment equality")
+
+// 2.4: Enum in expressions
+var result = (Color.RED == Color.RED) and (Color.BLUE != Color.GREEN)
+assert_wrap(result == true, "2.4: Enum in boolean expressions")
+
+// ============================================================================
+// SECTION 3: ENUM TYPE SAFETY
+// ============================================================================
+print("=== SECTION 3: Enum Type Safety ===")
+
+// 3.1: Different enum types cannot be compared (tested via error handling)
+enum Animal { DOG, CAT, BIRD }
+enum Vehicle { CAR, BIKE, PLANE }
+var animal = Animal.DOG
+var vehicle = Vehicle.CAR
+// Note: Direct comparison would error at runtime, so we test they're different types by existence
+assert_wrap(animal == Animal.DOG, "3.1a: Animal enum value valid")
+assert_wrap(vehicle == Vehicle.CAR, "3.1b: Vehicle enum value valid")
+
+// 3.2: Enum values maintain their type
+var testEnum = Color.RED
+assert_wrap(testEnum == Color.RED, "3.2: Enum value type persistence")
+
+// ============================================================================
+// SECTION 4: ENUM SCOPING AND FORWARD REFERENCES
+// ============================================================================
+print("=== SECTION 4: Enum Scoping and Forward References ===")
+
+// 4.1: Global enum used in function
+func useGlobalEnum() {
+    var local = Color.BLUE
+    return local == Color.BLUE
+}
+assert_wrap(useGlobalEnum() == true, "4.1: Global enum in function")
+
+// 4.2: Enum defined in function scope
+func testLocalEnum() {
+    enum LocalColor { CYAN, MAGENTA, YELLOW }
+    var lc = LocalColor.CYAN
+    return lc == LocalColor.CYAN
+}
+assert_wrap(testLocalEnum() == true, "4.2: Function-scoped enum")
+
+// 4.3: Enum value escapes function scope
+func returnEnumValue() {
+    return Color.GREEN
+}
+var escapedEnum = returnEnumValue()
+assert_wrap(escapedEnum == Color.GREEN, "4.3: Enum value escapes function scope")
+
+// 4.4: Enum shadowing
+enum Shadow { A, B, C }
+func testEnumShadow() {
+    enum Shadow { X, Y, Z }
+    return Shadow.X
+}
+var outerShadow = Shadow.A
+var innerShadow = testEnumShadow()
+assert_wrap(outerShadow == Shadow.A, "4.4a: Outer enum unaffected by shadow")
+assert_wrap(innerShadow == testEnumShadow(), "4.4b: Inner shadowed enum accessible")
+
+// 4.5: Forward reference (using enum before declaration in same scope)
+var forwardRef = ForwardEnum.VALUE1
+enum ForwardEnum { VALUE1, VALUE2, VALUE3 }
+assert_wrap(forwardRef == ForwardEnum.VALUE1, "4.5: Forward reference works")
+
+// ============================================================================
+// SECTION 5: ENUMS AS FUNCTION PARAMETERS (NORMAL)
+// ============================================================================
+print("=== SECTION 5: Enums as Function Parameters (Normal) ===")
+
+// 5.1: Normal parameter
+func checkColor(c) {
+    return c == Color.RED
+}
+assert_wrap(checkColor(Color.RED) == true, "5.1a: Normal param - true case")
+assert_wrap(checkColor(Color.BLUE) == false, "5.1b: Normal param - false case")
+
+// 5.2: Multiple enum parameters
+func compareColors(c1, c2) {
+    return c1 == c2
+}
+assert_wrap(compareColors(Color.RED, Color.RED) == true, "5.2a: Multiple params equal")
+assert_wrap(compareColors(Color.RED, Color.BLUE) == false, "5.2b: Multiple params not equal")
+
+// 5.3: Enum as return value
+func getDefaultColor() {
+    return Color.GREEN
+}
+assert_wrap(getDefaultColor() == Color.GREEN, "5.3: Enum return value")
+
+// 5.4: Function returning enum based on condition
+func selectColor(flag) {
+    if (flag) {
+        return Color.RED
+    } else {
+        return Color.BLUE
+    }
+}
+assert_wrap(selectColor(true) == Color.RED, "5.4a: Conditional enum return - true")
+assert_wrap(selectColor(false) == Color.BLUE, "5.4b: Conditional enum return - false")
+
+// ============================================================================
+// SECTION 10: ENUMS IN COLLECTIONS
+// ============================================================================
+print("=== SECTION 10: Enums in Collections ===")
+
+// 10.1: Enum in list
+var colorList = [Color.RED, Color.GREEN, Color.BLUE]
+assert_wrap(colorList[0] == Color.RED, "10.1a: Enum in list - first")
+assert_wrap(colorList[1] == Color.GREEN, "10.1b: Enum in list - second")
+assert_wrap(colorList[2] == Color.BLUE, "10.1c: Enum in list - third")
+
+// 10.2: Modifying enum in list
+colorList[1] = Color.RED
+assert_wrap(colorList[1] == Color.RED, "10.2: Modifying enum in list")
+
+// 10.3: Enum in map
+var colorMap = {"primary": Color.RED, "secondary": Color.GREEN}
+assert_wrap(colorMap["primary"] == Color.RED, "10.3a: Enum in map - first")
+assert_wrap(colorMap["secondary"] == Color.GREEN, "10.3b: Enum in map - second")
+
+// 10.4: Modifying enum in map
+colorMap["primary"] = Color.BLUE
+assert_wrap(colorMap["primary"] == Color.BLUE, "10.4: Modifying enum in map")
+
+// 10.5: Mixed list with enums and other types
+var mixedList = [Color.RED, 42, "text", Color.BLUE]
+assert_wrap(mixedList[0] == Color.RED, "10.5a: Mixed list - enum first")
+assert_wrap(mixedList[3] == Color.BLUE, "10.5b: Mixed list - enum last")
+
+// 10.6: Nested list with enums
+var nestedList = [[Color.RED, Color.GREEN], [Color.BLUE, Color.RED]]
+assert_wrap(nestedList[0][0] == Color.RED, "10.6a: Nested list - [0][0]")
+assert_wrap(nestedList[1][0] == Color.BLUE, "10.6b: Nested list - [1][0]")
+
+// ============================================================================
+// SECTION 11: ENUMS WITH CLOSURES AND UPVALUES
+// ============================================================================
+print("=== SECTION 11: Enums with Closures and Upvalues ===")
+
+// 11.1: Enum as upvalue
+func makeColorGetter() {
+    var color = Color.RED
+    func getColor() {
+        return color
+    }
+    return getColor
+}
+var getter1 = makeColorGetter()
+assert_wrap(getter1() == Color.RED, "11.1: Enum as upvalue")
+
+// 11.2: Modifying enum upvalue
+func makeColorChanger() {
+    var color = Color.RED
+    func changeColor(newColor) {
+        color = newColor
+    }
+    func getColor() {
+        return color
+    }
+    return {"change": changeColor, "get": getColor}
+}
+var colorController = makeColorChanger()
+assert_wrap(colorController["get"]() == Color.RED, "11.2a: Initial upvalue")
+colorController["change"](Color.BLUE)
+assert_wrap(colorController["get"]() == Color.BLUE, "11.2b: Modified upvalue")
+
+// 11.3: Multiple closures sharing enum upvalue
+func makeSharedEnum() {
+    var shared = Color.GREEN
+    func setter(c) { shared = c }
+    func getter() { return shared }
+    return {"set": setter, "get": getter}
+}
+var shared1 = makeSharedEnum()
+var shared2 = makeSharedEnum()
+shared1["set"](Color.RED)
+assert_wrap(shared1["get"]() == Color.RED, "11.3a: First closure modified")
+assert_wrap(shared2["get"]() == Color.GREEN, "11.3b: Second closure independent")
+
+// 11.4: Nested closures with enum upvalues
+func makeNestedEnum() {
+    var outer = Color.RED
+    func makeInner() {
+        var inner = Color.BLUE
+        func access() {
+            return outer == Color.RED and inner == Color.BLUE
+        }
+        return access
+    }
+    return makeInner()
+}
+var nestedAccess = makeNestedEnum()
+assert_wrap(nestedAccess() == true, "11.4: Nested closures with enum upvalues")
+
+// ============================================================================
+// SECTION 12: ENUMS WITH STRUCTS
+// ============================================================================
+print("=== SECTION 12: Enums with Structs ===")
+
+// 12.1: Enum as struct field
+struct Node { value; status }
+var node1 = Node{.value = 42, .status = Status.ACTIVE}
+assert_wrap(node1.status == Status.ACTIVE, "12.1: Enum as struct field")
+
+// 12.2: Modifying enum field in struct
+node1.status = Status.INACTIVE
+assert_wrap(node1.status == Status.INACTIVE, "12.2: Modifying enum field in struct")
+
+// 12.3: Struct with multiple enum fields
+struct Task { priority; status; color }
+var task1 = Task{
+    .priority = Priority.HIGH,
+    .status = Status.ACTIVE,
+    .color = Color.RED
+}
+assert_wrap(task1.priority == Priority.HIGH, "12.3a: Multiple enum fields - priority")
+assert_wrap(task1.status == Status.ACTIVE, "12.3b: Multiple enum fields - status")
+assert_wrap(task1.color == Color.RED, "12.3c: Multiple enum fields - color")
+
+// 12.4: List of structs with enums
+var tasks = [
+    Task{.priority = Priority.HIGH, .status = Status.ACTIVE, .color = Color.RED},
+    Task{.priority = Priority.LOW, .status = Status.INACTIVE, .color = Color.BLUE}
+]
+assert_wrap(tasks[0].priority == Priority.HIGH, "12.4a: List of structs - first priority")
+assert_wrap(tasks[1].priority == Priority.LOW, "12.4b: List of structs - second priority")
+
+// 12.5: Struct containing list of enums
+struct ColorPalette { colors; name }
+var palette = ColorPalette{
+    .colors = [Color.RED, Color.GREEN, Color.BLUE],
+    .name = "RGB"
+}
+assert_wrap(palette.colors[0] == Color.RED, "12.5: Struct with enum list field")
+
+// ============================================================================
+// SECTION 13: ENUMS IN LOOPS
+// ============================================================================
+print("=== SECTION 13: Enums in Loops ===")
+
+// 13.1: Creating enum list in loop
+var loopColors = [null, null, null]
+var loopIdx = 0
+for (var i = 0; i < 3; i = i + 1) {
+    if (i == 0) loopColors[i] = Color.RED
+    if (i == 1) loopColors[i] = Color.GREEN
+    if (i == 2) loopColors[i] = Color.BLUE
+}
+assert_wrap(loopColors[0] == Color.RED, "13.1a: Loop creation - first")
+assert_wrap(loopColors[2] == Color.BLUE, "13.1b: Loop creation - last")
+
+// 13.2: Modifying enums in loop
+for (var i = 0; i < 3; i = i + 1) {
+    loopColors[i] = Color.BLUE
+}
+assert_wrap(loopColors[0] == Color.BLUE and loopColors[2] == Color.BLUE, "13.2: Loop modification")
+
+// 13.3: Counting matching enums in loop
+var countList = [Color.RED, Color.BLUE, Color.RED, Color.GREEN, Color.RED]
+var redCount = 0
+for (var i = 0; i < 5; i = i + 1) {
+    if (countList[i] == Color.RED) {
+        redCount = redCount + 1
+    }
+}
+assert_wrap(redCount == 3, "13.3: Counting enums in loop")
+
+// ============================================================================
+// SECTION 14: ENUMS WITH RECURSION
+// ============================================================================
+print("=== SECTION 14: Enums with Recursion ===")
+
+// 14.1: Recursive function with enum parameter
+func countDown(color, n) {
+    if (n == 0) {
+        return color
+    }
+    return countDown(color, n - 1)
+}
+var recResult = countDown(Color.GREEN, 3)
+assert_wrap(recResult == Color.GREEN, "14.1: Recursive function with enum")
+
+// ============================================================================
+// SECTION 15: ENUM EDGE CASES
+// ============================================================================
+print("=== SECTION 15: Enum Edge Cases ===")
+
+// 15.1: Enum assigned to itself
+var selfAssign = Color.RED
+selfAssign = selfAssign
+assert_wrap(selfAssign == Color.RED, "15.1: Self assignment")
+
+// 15.2: Enum in conditional expression
+var condEnum = true ? Color.RED : Color.BLUE
+assert_wrap(condEnum == Color.RED, "15.2a: Conditional expression - true")
+var condEnum2 = false ? Color.RED : Color.BLUE
+assert_wrap(condEnum2 == Color.BLUE, "15.2b: Conditional expression - false")
+
+// 15.3: Enum comparison chain
+var chainResult = (Color.RED == Color.RED) and (Color.GREEN == Color.GREEN) and (Color.BLUE == Color.BLUE)
+assert_wrap(chainResult == true, "15.3: Comparison chain")
+
+// 15.4: Enum in while loop condition
+var whileColor = Color.RED
+var whileCount = 0
+while (whileColor == Color.RED and whileCount < 3) {
+    whileCount = whileCount + 1
+    if (whileCount == 3) {
+        whileColor = Color.BLUE
+    }
+}
+assert_wrap(whileCount == 3, "15.4: Enum in while loop")
+
+// 15.5: Multiple assignment with enums
+var ma1 = Color.RED
+var ma2 = ma1
+var ma3 = ma2
+assert_wrap(ma3 == Color.RED, "15.5: Multiple assignment chain")
+
+// ============================================================================
+// SECTION 16: ENUMS WITH DISPATCHERS (OVERLOADED FUNCTIONS)
+// ============================================================================
+print("=== SECTION 16: Enums with Dispatchers ===")
+
+// 16.1: Overloaded function with enum parameter
+func process(color) {
+    return color == Color.RED
+}
+func process(color, flag) {
+    return color == Color.RED and flag
+}
+assert_wrap(process(Color.RED) == true, "16.1a: Dispatcher - single param")
+assert_wrap(process(Color.RED, true) == true, "16.1b: Dispatcher - two params true")
+assert_wrap(process(Color.RED, false) == false, "16.1c: Dispatcher - two params false")
+
+// ============================================================================
+// SECTION 17: COMPLEX ENUM SCENARIOS
+// ============================================================================
+print("=== SECTION 17: Complex Enum Scenarios ===")
+
+// 17.2: Enum as map key
+var enumKeyMap = {}
+enumKeyMap["RED"] = Color.RED
+enumKeyMap["BLUE"] = Color.BLUE
+assert_wrap(enumKeyMap["RED"] == Color.RED, "17.2: Enum as map value with string key")
+
+// 17.3: Function returning different enum types
+func getColorOrStatus(flag) {
+    if (flag) {
+        return Color.RED
+    } else {
+        return Status.ACTIVE
+    }
+}
+var dynResult1 = getColorOrStatus(true)
+var dynResult2 = getColorOrStatus(false)
+assert_wrap(dynResult1 == Color.RED, "17.3a: Dynamic enum type return - Color")
+assert_wrap(dynResult2 == Status.ACTIVE, "17.3b: Dynamic enum type return - Status")
+
+// 17.4: Nested function with enum return
+func outerFunc() {
+    func innerFunc() {
+        return Color.GREEN
+    }
+    return innerFunc()
+}
+assert_wrap(outerFunc() == Color.GREEN, "17.4: Nested function enum return")
+
+// 17.5: Enum with callback
+func withCallback(color, callback) {
+    return callback(color)
+}
+var callbackResult = withCallback(Color.RED, func(c) {
+    return c == Color.RED
+})
+assert_wrap(callbackResult == true, "17.5: Enum with callback")
+
+// ============================================================================
+// SECTION 18: ENUM PRINTING AND REPRESENTATION
+// ============================================================================
+print("=== SECTION 18: Enum Printing and Representation ===")
+
+// 18.1: Print enum values (visual verification)
+print("18.1: Printing enum values:")
+print(Color.RED)
+print(Color.GREEN)
+print(Color.BLUE)
+assert_wrap(true, "18.1: Enum printing completed")
+
+// 18.2: Enum in string concatenation context
+print("18.2: Current color is:")
+print(Color.RED)
+assert_wrap(true, "18.2: Enum in print context")
+
+// ============================================================================
+// SECTION 19: STRESS TESTS
+// ============================================================================
+print("=== SECTION 19: Stress Tests ===")
+
+// 19.1: Large enum
+enum LargeEnum { V01, V02, V03, V04, V05, V06, V07, V08, V09, V10 }
+var le1 = LargeEnum.V01
+var le10 = LargeEnum.V10
+assert_wrap(le1 == LargeEnum.V01, "19.1a: Large enum - first variant")
+assert_wrap(le10 == LargeEnum.V10, "19.1b: Large enum - last variant")
+
+// 19.2: Many enum instances
+var manyEnums = [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]
+for (var i = 0; i < 20; i = i + 1) {
+    if (i < 10) {
+        manyEnums[i] = Color.RED
+    } else {
+        manyEnums[i] = Color.BLUE
+    }
+}
+assert_wrap(manyEnums[5] == Color.RED, "19.2a: Many enums - first half")
+assert_wrap(manyEnums[15] == Color.BLUE, "19.2b: Many enums - second half")
+
+// 19.3: Deep nesting with enums
+func level1() {
+    func level2() {
+        func level3() {
+            return Color.GREEN
+        }
+        return level3()
+    }
+    return level2()
+}
+assert_wrap(level1() == Color.GREEN, "19.3: Deep nesting")
+
+// 19.4: Many different enums
+enum E1 { A1, B1 }
+enum E2 { A2, B2 }
+enum E3 { A3, B3 }
+enum E4 { A4, B4 }
+enum E5 { A5, B5 }
+var e1 = E1.A1
+var e2 = E2.A2
+var e3 = E3.A3
+var e4 = E4.A4
+var e5 = E5.A5
+assert_wrap(e1 == E1.A1 and e3 == E3.A3 and e5 == E5.A5, "19.4: Many different enums")
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

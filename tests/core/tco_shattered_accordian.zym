@@ -1,0 +1,35 @@
+// Global check for depth
+var max_depth = 0
+
+func alpha(n, x) {
+    if (n <= 0) return x
+    
+    // Tiny frame: 2 args, 0 locals
+    @tco aggressive
+    return beta(n - 1, x + 1, "extra_junk")
+}
+
+func beta(n, x, junk) {
+    // Medium frame: 3 args, 2 locals
+    var val1 = x * 2
+    var val2 = n + 1
+    
+    @tco aggressive
+    return gamma(n - 1, val1, val2, "more_junk", 42)
+}
+
+func gamma(n, a, b, c, d) {
+    // Large frame: 5 args, 4 locals
+    var l1 = 1 var l2 = 2 var l3 = 3 var l4 = 4
+    var check = a + b + l1 + l2 + l3 + l4 
+    
+    // If we've reached 1,000,000 we stop
+    if (n <= 0) return "Success"
+
+    @tco aggressive
+    return alpha(n - 1, a / 2)
+}
+
+print("Running Shattered Accordion...")
+var final = alpha(1000000, 1)
+print("Result: " + final)

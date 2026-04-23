@@ -1,0 +1,32 @@
+// 1. Create a fixed-size container (assuming array literal or constructor)
+var history = [null, null, null, null, null]
+
+func tortureTest(n, index, list) {
+    // Base case: Stop when we hit 0 or run out of space
+    if (n == 0) return list
+
+    // 2. The Trap
+    // 'snap' captures 'n'.
+    // Internally: capture points to Stack Slot R1 (where n lives)
+    func snap() {
+        return n
+    }
+
+    // 3. Store the closure in the fixed list
+    list[index] = snap
+
+    // 4. The Recursion (The Danger Zone)
+    // We are passing:
+    //   n - 1      (New Arg 1)
+    //   index + 1  (New Arg 2)
+    //   list       (New Arg 3)
+    @tco aggressive
+    return tortureTest(n - 1, index + 1, list)
+}
+
+// Run it: 5 iterations -> 5, 4, 3, 2, 1
+tortureTest(5, 0, history)
+
+// 5. Verification
+print("Index 0 (should be 5): %v", history[0]())
+print("Index 4 (should be 1): %v", history[4]())

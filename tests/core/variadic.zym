@@ -1,0 +1,980 @@
+// ============================================================================
+// FULL COVERAGE VARIADIC FUNCTION TEST FILE
+// Tests: Rest params, overload fallback, closures, lambdas, arrows, dispatch
+// ============================================================================
+
+// Test helper function
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+        print("")
+    }
+}
+
+print("=== STARTING FULL COVERAGE VARIADIC FUNCTION TESTS ===")
+print("")
+
+// ============================================================================
+// SECTION 1: PURE VARIADIC - BASIC
+// ============================================================================
+print("--- [1] Pure Variadic Basic ---")
+
+func collect(...args) {
+    return args
+}
+
+var r1 = collect(1, 2, 3)
+assert_wrap(length(r1) == 3, "1.1: Variadic collects 3 args")
+assert_wrap(r1[0] == 1, "1.2: First arg is 1")
+assert_wrap(r1[1] == 2, "1.3: Second arg is 2")
+assert_wrap(r1[2] == 3, "1.4: Third arg is 3")
+
+// ============================================================================
+// SECTION 2: PURE VARIADIC - NO ARGS
+// ============================================================================
+print("--- [2] Pure Variadic No Args ---")
+
+var r2 = collect()
+assert_wrap(length(r2) == 0, "2.1: Variadic with no args gives empty list")
+
+// ============================================================================
+// SECTION 3: PURE VARIADIC - SINGLE ARG
+// ============================================================================
+print("--- [3] Pure Variadic Single Arg ---")
+
+var r3 = collect(42)
+assert_wrap(length(r3) == 1, "3.1: Variadic with single arg")
+assert_wrap(r3[0] == 42, "3.2: Single arg value correct")
+
+// ============================================================================
+// SECTION 4: PURE VARIADIC - MANY ARGS
+// ============================================================================
+print("--- [4] Pure Variadic Many Args ---")
+
+var r4 = collect(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+assert_wrap(length(r4) == 10, "4.1: Variadic collects 10 args")
+assert_wrap(r4[0] == 1, "4.2: First of 10")
+assert_wrap(r4[9] == 10, "4.3: Last of 10")
+
+// ============================================================================
+// SECTION 5: PURE VARIADIC - MIXED TYPES
+// ============================================================================
+print("--- [5] Pure Variadic Mixed Types ---")
+
+var r5 = collect(1, "hello", true, null, 3.14)
+assert_wrap(length(r5) == 5, "5.1: Variadic collects mixed types")
+assert_wrap(r5[0] == 1, "5.2: Number arg")
+assert_wrap(r5[1] == "hello", "5.3: String arg")
+assert_wrap(r5[2] == true, "5.4: Bool arg")
+assert_wrap(r5[3] == null, "5.5: Null arg")
+assert_wrap(r5[4] == 3.14, "5.6: Float arg")
+
+// ============================================================================
+// SECTION 6: FIXED + REST PARAMS - BASIC
+// ============================================================================
+print("--- [6] Fixed + Rest Params Basic ---")
+
+func fixedRest(a, ...rest) {
+    return rest
+}
+
+var r6 = fixedRest(1, 2, 3, 4)
+assert_wrap(length(r6) == 3, "6.1: Rest captures extra args")
+assert_wrap(r6[0] == 2, "6.2: First rest arg")
+assert_wrap(r6[1] == 3, "6.3: Second rest arg")
+assert_wrap(r6[2] == 4, "6.4: Third rest arg")
+
+// ============================================================================
+// SECTION 7: FIXED + REST PARAMS - EMPTY REST
+// ============================================================================
+print("--- [7] Fixed + Rest Params Empty Rest ---")
+
+var r7 = fixedRest(99)
+assert_wrap(length(r7) == 0, "7.1: Rest is empty when only fixed args provided")
+
+// ============================================================================
+// SECTION 8: MULTIPLE FIXED + REST
+// ============================================================================
+print("--- [8] Multiple Fixed + Rest ---")
+
+func multiFixed(a, b, c, ...rest) {
+    return rest
+}
+
+var r8 = multiFixed(1, 2, 3, 4, 5, 6)
+assert_wrap(length(r8) == 3, "8.1: Rest after 3 fixed params")
+assert_wrap(r8[0] == 4, "8.2: First rest after 3 fixed")
+assert_wrap(r8[2] == 6, "8.3: Last rest after 3 fixed")
+
+// Empty rest with multiple fixed
+var r8b = multiFixed(1, 2, 3)
+assert_wrap(length(r8b) == 0, "8.4: Empty rest with exactly 3 fixed args")
+
+// ============================================================================
+// SECTION 9: FIXED PARAMS ACCESSIBLE WITH REST
+// ============================================================================
+print("--- [9] Fixed Params Accessible With Rest ---")
+
+func fixedAndRest(a, b, ...rest) {
+    return a + b + length(rest)
+}
+
+assert_wrap(fixedAndRest(10, 20) == 30, "9.1: Fixed params + empty rest")
+assert_wrap(fixedAndRest(10, 20, 1) == 31, "9.2: Fixed params + 1 rest")
+assert_wrap(fixedAndRest(10, 20, 1, 2, 3) == 33, "9.3: Fixed params + 3 rest")
+
+// ============================================================================
+// SECTION 10: OVERLOAD + VARIADIC FALLBACK - BASIC
+// ============================================================================
+print("--- [10] Overload + Variadic Fallback Basic ---")
+
+func overloaded(a) { return "one" }
+func overloaded(a, b) { return "two" }
+func overloaded(...args) { return "variadic:" + str(length(args)) }
+
+assert_wrap(overloaded(1) == "one", "10.1: Exact match 1 arg")
+assert_wrap(overloaded(1, 2) == "two", "10.2: Exact match 2 args")
+assert_wrap(overloaded() == "variadic:0", "10.3: Variadic fallback 0 args")
+assert_wrap(overloaded(1, 2, 3) == "variadic:3", "10.4: Variadic fallback 3 args")
+assert_wrap(overloaded(1, 2, 3, 4) == "variadic:4", "10.5: Variadic fallback 4 args")
+
+// ============================================================================
+// SECTION 11: OVERLOAD + VARIADIC - NUMERIC SUM
+// ============================================================================
+print("--- [11] Overload + Variadic Numeric Sum ---")
+
+func adder(a) { return a }
+func adder(a, b) { return a + b }
+func adder(...args) {
+    var total = 0
+    for (var i = 0; i < length(args); i++) {
+        total = total + args[i]
+    }
+    return total
+}
+
+assert_wrap(adder(10) == 10, "11.1: Exact match single")
+assert_wrap(adder(10, 20) == 30, "11.2: Exact match double")
+assert_wrap(adder(1, 2, 3) == 6, "11.3: Variadic sum 3")
+assert_wrap(adder(1, 2, 3, 4) == 10, "11.4: Variadic sum 4")
+assert_wrap(adder() == 0, "11.5: Variadic sum 0 args")
+assert_wrap(adder(1, 2, 3, 4, 5) == 15, "11.6: Variadic sum 5")
+
+// ============================================================================
+// SECTION 12: OVERLOAD + VARIADIC WITH FIXED PARAMS
+// ============================================================================
+print("--- [12] Overload + Variadic with Fixed Params ---")
+
+func mixed(a) { return a * 10 }
+func mixed(a, ...rest) {
+    var total = a
+    for (var i = 0; i < length(rest); i++) {
+        total = total + rest[i]
+    }
+    return total
+}
+
+assert_wrap(mixed(5) == 50, "12.1: Exact match 1 arg over variadic")
+assert_wrap(mixed(5, 10) == 15, "12.2: Variadic with fixed catches 2 args")
+assert_wrap(mixed(5, 10, 20) == 35, "12.3: Variadic with fixed catches 3 args")
+
+// ============================================================================
+// SECTION 13: VARIADIC FUNC EXPRESSION
+// ============================================================================
+print("--- [13] Variadic Func Expression ---")
+
+var gather = func(...things) {
+    return things
+}
+
+var r13 = gather(10, 20, 30)
+assert_wrap(length(r13) == 3, "13.1: Func expr variadic length")
+assert_wrap(r13[0] == 10, "13.2: Func expr variadic first")
+assert_wrap(r13[2] == 30, "13.3: Func expr variadic last")
+
+// ============================================================================
+// SECTION 14: VARIADIC FUNC EXPRESSION - FIXED + REST
+// ============================================================================
+print("--- [14] Func Expression Fixed + Rest ---")
+
+var fexpr = func(a, b, ...rest) {
+    return rest
+}
+
+var r14 = fexpr(1, 2, 3, 4, 5)
+assert_wrap(length(r14) == 3, "14.1: Func expr fixed+rest length")
+assert_wrap(r14[0] == 3, "14.2: Func expr rest first")
+assert_wrap(r14[2] == 5, "14.3: Func expr rest last")
+
+// ============================================================================
+// SECTION 15: VARIADIC ARROW FUNCTION - BLOCK BODY
+// ============================================================================
+print("--- [15] Variadic Arrow Block Body ---")
+
+var arrowBlock = (...items) => {
+    return items
+}
+
+var r15 = arrowBlock("a", "b", "c")
+assert_wrap(length(r15) == 3, "15.1: Arrow block variadic length")
+assert_wrap(r15[0] == "a", "15.2: Arrow block first")
+assert_wrap(r15[2] == "c", "15.3: Arrow block last")
+
+// ============================================================================
+// SECTION 16: VARIADIC ARROW - FIXED + REST
+// ============================================================================
+print("--- [16] Arrow Fixed + Rest ---")
+
+var arrowMixed = (a, b, ...rest) => {
+    return rest
+}
+
+var r16 = arrowMixed(1, 2, 3, 4, 5)
+assert_wrap(length(r16) == 3, "16.1: Arrow fixed+rest length")
+assert_wrap(r16[0] == 3, "16.2: Arrow fixed+rest first")
+assert_wrap(r16[2] == 5, "16.3: Arrow fixed+rest last")
+
+// Empty rest
+var r16b = arrowMixed(1, 2)
+assert_wrap(length(r16b) == 0, "16.4: Arrow fixed+rest empty rest")
+
+// ============================================================================
+// SECTION 17: VARIADIC ARROW - DIRECT RETURN
+// ============================================================================
+print("--- [17] Variadic Arrow Direct Return ---")
+
+var arrowDirect = (...args) => args
+var r17 = arrowDirect(1, 2, 3)
+assert_wrap(length(r17) == 3, "17.1: Arrow direct return variadic length")
+assert_wrap(r17[0] == 1, "17.2: Arrow direct return first")
+
+// ============================================================================
+// SECTION 18: VARIADIC WITH CLOSURES - CAPTURE OUTER VAR
+// ============================================================================
+print("--- [18] Variadic Closure Capture ---")
+
+func makeCollector(prefix) {
+    func collect(...items) {
+        return prefix + ":" + str(length(items))
+    }
+    return collect
+}
+
+var collector = makeCollector("test")
+assert_wrap(collector() == "test:0", "18.1: Variadic closure 0 args")
+assert_wrap(collector(1) == "test:1", "18.2: Variadic closure 1 arg")
+assert_wrap(collector(1, 2, 3) == "test:3", "18.3: Variadic closure 3 args")
+
+// ============================================================================
+// SECTION 19: VARIADIC WITH CLOSURES - MUTATING STATE
+// ============================================================================
+print("--- [19] Variadic Closure Mutating State ---")
+
+func makeAccumulator() {
+    var total = 0
+    func addAll(...nums) {
+        for (var i = 0; i < length(nums); i++) {
+            total = total + nums[i]
+        }
+        return total
+    }
+    return addAll
+}
+
+var acc = makeAccumulator()
+assert_wrap(acc(1, 2, 3) == 6, "19.1: Accumulator first call")
+assert_wrap(acc(4, 5) == 15, "19.2: Accumulator second call")
+assert_wrap(acc(10) == 25, "19.3: Accumulator third call")
+assert_wrap(acc() == 25, "19.4: Accumulator no args unchanged")
+
+// ============================================================================
+// SECTION 20: VARIADIC IN NESTED CLOSURES
+// ============================================================================
+print("--- [20] Variadic in Nested Closures ---")
+
+func outerNested(x) {
+    func middleNested(y) {
+        func innerVariadic(...args) {
+            var sum = x + y
+            for (var i = 0; i < length(args); i++) {
+                sum = sum + args[i]
+            }
+            return sum
+        }
+        return innerVariadic
+    }
+    return middleNested
+}
+
+var n1 = outerNested(10)
+var n2 = n1(20)
+assert_wrap(n2() == 30, "20.1: Nested variadic no extra args")
+assert_wrap(n2(5) == 35, "20.2: Nested variadic 1 extra arg")
+assert_wrap(n2(1, 2, 3) == 36, "20.3: Nested variadic 3 extra args")
+
+// ============================================================================
+// SECTION 21: VARIADIC + OVERLOAD IN NESTED SCOPE
+// ============================================================================
+print("--- [21] Variadic + Overload in Nested Scope ---")
+
+func nestedOverloadScope() {
+    func handler(x) { return x * 2 }
+    func handler(x, y) { return x + y }
+    func handler(...args) {
+        var total = 0
+        for (var i = 0; i < length(args); i++) {
+            total = total + args[i]
+        }
+        return total * 10
+    }
+
+    var r1 = handler(5)
+    var r2 = handler(3, 7)
+    var r3 = handler(1, 2, 3)
+    var r4 = handler()
+
+    if (r1 == 10) { testsPassed = testsPassed + 1
+    } else { testsFailed = testsFailed + 1; print("FAILED: 21.1: Nested exact 1 arg"); print("") }
+
+    if (r2 == 10) { testsPassed = testsPassed + 1
+    } else { testsFailed = testsFailed + 1; print("FAILED: 21.2: Nested exact 2 args"); print("") }
+
+    if (r3 == 60) { testsPassed = testsPassed + 1
+    } else { testsFailed = testsFailed + 1; print("FAILED: 21.3: Nested variadic 3 args"); print("") }
+
+    if (r4 == 0) { testsPassed = testsPassed + 1
+    } else { testsFailed = testsFailed + 1; print("FAILED: 21.4: Nested variadic 0 args"); print("") }
+}
+
+nestedOverloadScope()
+
+// ============================================================================
+// SECTION 22: HOISTED VARIADIC FUNCTIONS
+// ============================================================================
+print("--- [22] Hoisted Variadic Functions ---")
+
+var h22 = hoistedVariadic(1, 2, 3)
+assert_wrap(length(h22) == 3, "22.1: Hoisted variadic captures args")
+assert_wrap(h22[0] == 1, "22.2: Hoisted variadic first arg")
+
+func hoistedVariadic(...args) {
+    return args
+}
+
+// ============================================================================
+// SECTION 23: HOISTED VARIADIC WITH OVERLOADS
+// ============================================================================
+print("--- [23] Hoisted Variadic with Overloads ---")
+
+assert_wrap(hoistedMix(5) == 50, "23.1: Hoisted exact 1 arg")
+assert_wrap(hoistedMix(1, 2, 3) == 6, "23.2: Hoisted variadic fallback")
+
+func hoistedMix(a) { return a * 10 }
+func hoistedMix(...args) {
+    var t = 0
+    for (var i = 0; i < length(args); i++) {
+        t = t + args[i]
+    }
+    return t
+}
+
+// ============================================================================
+// SECTION 24: HOISTED FIXED + REST
+// ============================================================================
+print("--- [24] Hoisted Fixed + Rest ---")
+
+var h24 = hoistedFixedRest(10, 20, 30)
+assert_wrap(length(h24) == 2, "24.1: Hoisted fixed+rest length")
+assert_wrap(h24[0] == 20, "24.2: Hoisted fixed+rest first")
+
+func hoistedFixedRest(a, ...rest) {
+    return rest
+}
+
+// ============================================================================
+// SECTION 25: DISPATCHER RETURNING VARIADIC
+// ============================================================================
+print("--- [25] Dispatcher Returning Variadic ---")
+
+func makeVariadicDispatcher() {
+    func handler(x) { return x * 2 }
+    func handler(x, y) { return x + y }
+    func handler(...args) { return length(args) * 100 }
+    return handler
+}
+
+var disp = makeVariadicDispatcher()
+assert_wrap(disp(5) == 10, "25.1: Dispatcher exact 1 arg")
+assert_wrap(disp(3, 7) == 10, "25.2: Dispatcher exact 2 args")
+assert_wrap(disp() == 0, "25.3: Dispatcher variadic 0 args")
+assert_wrap(disp(1, 2, 3) == 300, "25.4: Dispatcher variadic 3 args")
+assert_wrap(disp(1, 2, 3, 4) == 400, "25.5: Dispatcher variadic 4 args")
+
+// ============================================================================
+// SECTION 26: DISPATCHER VARIADIC WITH CLOSURES
+// ============================================================================
+print("--- [26] Dispatcher Variadic with Closures ---")
+
+func makeStatefulDispatcher(base) {
+    var count = 0
+
+    func op() {
+        count = count + 1
+        return base + count
+    }
+
+    func op(x) {
+        count = count + x
+        return base + count
+    }
+
+    func op(...args) {
+        for (var i = 0; i < length(args); i++) {
+            count = count + args[i]
+        }
+        return base + count
+    }
+
+    return op
+}
+
+var sd = makeStatefulDispatcher(100)
+assert_wrap(sd() == 101, "26.1: Stateful dispatcher 0 args")
+assert_wrap(sd(5) == 106, "26.2: Stateful dispatcher 1 arg")
+assert_wrap(sd(1, 2, 3) == 112, "26.3: Stateful dispatcher variadic")
+assert_wrap(sd() == 113, "26.4: Stateful dispatcher state persists")
+
+// ============================================================================
+// SECTION 27: MULTIPLE DISPATCHERS WITH VARIADIC
+// ============================================================================
+print("--- [27] Multiple Independent Variadic Dispatchers ---")
+
+var sd1 = makeStatefulDispatcher(0)
+var sd2 = makeStatefulDispatcher(1000)
+
+assert_wrap(sd1(10) == 10, "27.1: Independent dispatcher 1")
+assert_wrap(sd2(10) == 1010, "27.2: Independent dispatcher 2")
+assert_wrap(sd1(1, 2) == 13, "27.3: Dispatcher 1 variadic")
+assert_wrap(sd2(1, 2) == 1013, "27.4: Dispatcher 2 variadic")
+
+// ============================================================================
+// SECTION 28: VARIADIC WITH DIFFERENT VALUE TYPES
+// ============================================================================
+print("--- [28] Variadic with Different Value Types ---")
+
+func typeCollect(...args) {
+    return args
+}
+
+var r28 = typeCollect("str", 42, true, false, null, [1, 2], {"a": 1})
+assert_wrap(length(r28) == 7, "28.1: Collect mixed types count")
+assert_wrap(r28[0] == "str", "28.2: String in variadic")
+assert_wrap(r28[1] == 42, "28.3: Number in variadic")
+assert_wrap(r28[2] == true, "28.4: True in variadic")
+assert_wrap(r28[3] == false, "28.5: False in variadic")
+assert_wrap(r28[4] == null, "28.6: Null in variadic")
+
+// ============================================================================
+// SECTION 29: VARIADIC ITERATION PATTERNS
+// ============================================================================
+print("--- [29] Variadic Iteration Patterns ---")
+
+func sumAll(...nums) {
+    var total = 0
+    for (var i = 0; i < length(nums); i++) {
+        total = total + nums[i]
+    }
+    return total
+}
+
+assert_wrap(sumAll() == 0, "29.1: Sum empty")
+assert_wrap(sumAll(5) == 5, "29.2: Sum single")
+assert_wrap(sumAll(1, 2, 3, 4, 5) == 15, "29.3: Sum many")
+
+func findMax(...nums) {
+    var max = nums[0]
+    for (var i = 1; i < length(nums); i++) {
+        if (nums[i] > max) {
+            max = nums[i]
+        }
+    }
+    return max
+}
+
+assert_wrap(findMax(3, 1, 4, 1, 5, 9) == 9, "29.4: Find max")
+assert_wrap(findMax(42) == 42, "29.5: Find max single")
+
+// ============================================================================
+// SECTION 30: VARIADIC PASSED AS ARGUMENT
+// ============================================================================
+print("--- [30] Variadic Function Passed as Argument ---")
+
+func applyVariadic(f) {
+    return f(1, 2, 3)
+}
+
+var applied = applyVariadic(func(...args) {
+    var total = 0
+    for (var i = 0; i < length(args); i++) {
+        total = total + args[i]
+    }
+    return total
+})
+
+assert_wrap(applied == 6, "30.1: Variadic func expr as argument")
+
+// ============================================================================
+// SECTION 31: VARIADIC IN DATA STRUCTURES
+// ============================================================================
+print("--- [31] Variadic Functions in Data Structures ---")
+
+var fns = [
+    func(...a) { return length(a) },
+    func(...a) { return length(a) * 10 }
+]
+
+assert_wrap(fns[0](1, 2) == 2, "31.1: Variadic in list - first")
+assert_wrap(fns[1](1, 2, 3) == 30, "31.2: Variadic in list - second")
+
+var fnMap = {
+    "count": func(...a) { return length(a) },
+    "double": func(...a) { return length(a) * 2 }
+}
+
+assert_wrap(fnMap["count"](1, 2, 3) == 3, "31.3: Variadic in map - count")
+assert_wrap(fnMap["double"](1, 2) == 4, "31.4: Variadic in map - double")
+
+// ============================================================================
+// SECTION 32: VARIADIC LAMBDA CLOSURES
+// ============================================================================
+print("--- [32] Variadic Lambda Closures ---")
+
+func makeVarLambda(multiplier) {
+    return func(...args) {
+        var total = 0
+        for (var i = 0; i < length(args); i++) {
+            total = total + args[i]
+        }
+        return total * multiplier
+    }
+}
+
+var vl2 = makeVarLambda(2)
+var vl3 = makeVarLambda(3)
+assert_wrap(vl2(1, 2, 3) == 12, "32.1: Variadic lambda closure x2")
+assert_wrap(vl3(1, 2, 3) == 18, "32.2: Variadic lambda closure x3")
+assert_wrap(vl2(10) == 20, "32.3: Variadic lambda closure single arg")
+
+// ============================================================================
+// SECTION 33: VARIADIC ARROW CLOSURES
+// ============================================================================
+print("--- [33] Variadic Arrow Closures ---")
+
+func makeArrowVar(offset) {
+    return (...args) => {
+        var total = offset
+        for (var i = 0; i < length(args); i++) {
+            total = total + args[i]
+        }
+        return total
+    }
+}
+
+var av1 = makeArrowVar(100)
+assert_wrap(av1() == 100, "33.1: Arrow closure no args")
+assert_wrap(av1(1, 2, 3) == 106, "33.2: Arrow closure with args")
+
+// ============================================================================
+// SECTION 34: RECURSIVE VARIADIC
+// ============================================================================
+print("--- [34] Recursive with Variadic ---")
+
+func recursiveSum(...args) {
+    if (length(args) == 0) return 0
+    if (length(args) == 1) return args[0]
+    return args[0] + recursiveSum(args[1])
+}
+
+assert_wrap(recursiveSum() == 0, "34.1: Recursive variadic empty")
+assert_wrap(recursiveSum(5) == 5, "34.2: Recursive variadic single")
+assert_wrap(recursiveSum(3, 7) == 10, "34.3: Recursive variadic two")
+
+// ============================================================================
+// SECTION 35: VARIADIC RETURNING VARIADIC
+// ============================================================================
+print("--- [35] Variadic Returning Variadic ---")
+
+func wrapInVariadic() {
+    func inner(...args) {
+        return args
+    }
+    return inner
+}
+
+var wrapped = wrapInVariadic()
+var r35 = wrapped(1, 2, 3)
+assert_wrap(length(r35) == 3, "35.1: Wrapped variadic length")
+assert_wrap(r35[0] == 1, "35.2: Wrapped variadic first")
+
+// ============================================================================
+// SECTION 36: VARIADIC WITH EARLY RETURN
+// ============================================================================
+print("--- [36] Variadic with Early Return ---")
+
+func earlyReturn(...args) {
+    if (length(args) == 0) return "empty"
+    if (length(args) == 1) return "single"
+    if (length(args) > 5) return "too many"
+    return "normal"
+}
+
+assert_wrap(earlyReturn() == "empty", "36.1: Early return empty")
+assert_wrap(earlyReturn(1) == "single", "36.2: Early return single")
+assert_wrap(earlyReturn(1, 2) == "normal", "36.3: Early return normal")
+assert_wrap(earlyReturn(1, 2, 3, 4, 5, 6) == "too many", "36.4: Early return too many")
+
+// ============================================================================
+// SECTION 37: VARIADIC OVERLOAD PRIORITY
+// ============================================================================
+print("--- [37] Variadic Overload Priority ---")
+
+func priority() { return "zero" }
+func priority(a) { return "one" }
+func priority(a, b) { return "two" }
+func priority(a, b, c) { return "three" }
+func priority(...args) { return "variadic:" + str(length(args)) }
+
+assert_wrap(priority() == "zero", "37.1: Priority 0 args - exact match wins")
+assert_wrap(priority(1) == "one", "37.2: Priority 1 arg - exact match wins")
+assert_wrap(priority(1, 2) == "two", "37.3: Priority 2 args - exact match wins")
+assert_wrap(priority(1, 2, 3) == "three", "37.4: Priority 3 args - exact match wins")
+assert_wrap(priority(1, 2, 3, 4) == "variadic:4", "37.5: Priority 4 args - variadic")
+assert_wrap(priority(1, 2, 3, 4, 5) == "variadic:5", "37.6: Priority 5 args - variadic")
+
+// ============================================================================
+// SECTION 38: VARIADIC ONLY (NO FIXED OVERLOADS)
+// ============================================================================
+print("--- [38] Variadic Only - No Fixed Overloads ---")
+
+func varOnly(...args) {
+    return length(args)
+}
+
+assert_wrap(varOnly() == 0, "38.1: Variadic only 0 args")
+assert_wrap(varOnly(1) == 1, "38.2: Variadic only 1 arg")
+assert_wrap(varOnly(1, 2) == 2, "38.3: Variadic only 2 args")
+assert_wrap(varOnly(1, 2, 3, 4, 5) == 5, "38.4: Variadic only 5 args")
+
+// ============================================================================
+// SECTION 39: SHARED UPVALUES WITH VARIADIC SIBLING CLOSURES
+// ============================================================================
+print("--- [39] Shared Upvalues with Variadic Siblings ---")
+
+var varGetter
+var varAdder
+
+func setupVarShared() {
+    var total = 0
+
+    varGetter = func() {
+        return total
+    }
+
+    varAdder = func(...nums) {
+        for (var i = 0; i < length(nums); i++) {
+            total = total + nums[i]
+        }
+        return total
+    }
+}
+
+setupVarShared()
+assert_wrap(varGetter() == 0, "39.1: Initial shared state")
+assert_wrap(varAdder(1, 2, 3) == 6, "39.2: Variadic adds to shared")
+assert_wrap(varGetter() == 6, "39.3: Getter sees variadic changes")
+assert_wrap(varAdder(4) == 10, "39.4: Add more")
+assert_wrap(varGetter() == 10, "39.5: Getter confirms")
+
+// ============================================================================
+// SECTION 40: VARIADIC DISPATCHER IN DATA STRUCTURES
+// ============================================================================
+print("--- [40] Variadic Dispatcher in Data Structures ---")
+
+func makeVarDisp() {
+    func fn(x) { return x }
+    func fn(...args) { return length(args) * 100 }
+    return fn
+}
+
+var dispList = [makeVarDisp(), makeVarDisp()]
+assert_wrap(dispList[0](42) == 42, "40.1: Dispatcher in list exact match")
+assert_wrap(dispList[0](1, 2, 3) == 300, "40.2: Dispatcher in list variadic")
+assert_wrap(dispList[1](7) == 7, "40.3: Second dispatcher exact")
+
+// ============================================================================
+// SECTION 41: VARIADIC DISPATCHER PASSED AS ARGUMENT
+// ============================================================================
+print("--- [41] Variadic Dispatcher as Argument ---")
+
+func useDispatcher(f) {
+    var r1 = f(10)
+    var r2 = f(1, 2, 3)
+    return r1 + r2
+}
+
+var dispResult = useDispatcher(makeVarDisp())
+assert_wrap(dispResult == 310, "41.1: Dispatcher as argument (10 + 300)")
+
+// ============================================================================
+// SECTION 42: VARIADIC DISPATCHER REASSIGNMENT
+// ============================================================================
+print("--- [42] Variadic Dispatcher Reassignment ---")
+
+var d42 = makeVarDisp()
+var d42b = d42
+var d42c = d42b
+
+assert_wrap(d42(5) == 5, "42.1: Original dispatcher")
+assert_wrap(d42b(1, 2) == 200, "42.2: First reassignment")
+assert_wrap(d42c(7) == 7, "42.3: Second reassignment exact")
+assert_wrap(d42c(1, 2, 3, 4) == 400, "42.4: Second reassignment variadic")
+
+// ============================================================================
+// SECTION 43: DEEPLY NESTED VARIADIC WITH CLOSURES
+// ============================================================================
+print("--- [43] Deeply Nested Variadic with Closures ---")
+
+func deepVar() {
+    var a = 1
+    func level2() {
+        var b = 10
+        func level3() {
+            var c = 100
+            func varInner(...args) {
+                var sum = a + b + c
+                for (var i = 0; i < length(args); i++) {
+                    sum = sum + args[i]
+                }
+                return sum
+            }
+            return varInner
+        }
+        return level3
+    }
+    return level2
+}
+
+var dv1 = deepVar()
+var dv2 = dv1()
+var dv3 = dv2()
+assert_wrap(dv3() == 111, "43.1: Deep nested variadic no args")
+assert_wrap(dv3(1, 2, 3) == 117, "43.2: Deep nested variadic with args")
+
+// ============================================================================
+// SECTION 44: VARIADIC OVERLOAD FACTORY PATTERN
+// ============================================================================
+print("--- [44] Variadic Overload Factory ---")
+
+func makeProcessor() {
+    var state = 0
+
+    func process() { return state }
+    func process(x) { state = x; return state }
+    func process(...args) {
+        state = 0
+        for (var i = 0; i < length(args); i++) {
+            state = state + args[i]
+        }
+        return state
+    }
+
+    return process
+}
+
+var proc = makeProcessor()
+assert_wrap(proc() == 0, "44.1: Factory initial state")
+assert_wrap(proc(42) == 42, "44.2: Factory set single")
+assert_wrap(proc() == 42, "44.3: Factory get after set")
+assert_wrap(proc(1, 2, 3) == 6, "44.4: Factory variadic set")
+assert_wrap(proc() == 6, "44.5: Factory get after variadic")
+
+// ============================================================================
+// SECTION 45: MIXED FUNCTION TYPES WITH VARIADIC
+// ============================================================================
+print("--- [45] Mixed Function Types with Variadic ---")
+
+func mixedTypes() {
+    func named(...args) { return length(args) * 1 }
+
+    var anon = func(...args) { return length(args) * 10 }
+
+    var arrow = (...args) => { return length(args) * 100 }
+
+    var r1 = named(1, 2)
+    var r2 = anon(1, 2, 3)
+    var r3 = arrow(1, 2, 3, 4)
+
+    if (r1 == 2) { testsPassed = testsPassed + 1
+    } else { testsFailed = testsFailed + 1; print("FAILED: 45.1: Named variadic"); print("") }
+
+    if (r2 == 30) { testsPassed = testsPassed + 1
+    } else { testsFailed = testsFailed + 1; print("FAILED: 45.2: Anon variadic"); print("") }
+
+    if (r3 == 400) { testsPassed = testsPassed + 1
+    } else { testsFailed = testsFailed + 1; print("FAILED: 45.3: Arrow variadic"); print("") }
+}
+
+mixedTypes()
+
+// ============================================================================
+// SECTION 46: VARIADIC WITH CONDITIONAL LOGIC
+// ============================================================================
+print("--- [46] Variadic with Conditional Logic ---")
+
+func classify(...args) {
+    var n = length(args)
+    if (n == 0) return "none"
+    if (n == 1) return "one"
+    if (n == 2) return "pair"
+    if (n <= 5) return "few"
+    return "many"
+}
+
+assert_wrap(classify() == "none", "46.1: Classify none")
+assert_wrap(classify(1) == "one", "46.2: Classify one")
+assert_wrap(classify(1, 2) == "pair", "46.3: Classify pair")
+assert_wrap(classify(1, 2, 3) == "few", "46.4: Classify few")
+assert_wrap(classify(1, 2, 3, 4, 5, 6) == "many", "46.5: Classify many")
+
+// ============================================================================
+// SECTION 47: VARIADIC + STRING OPERATIONS
+// ============================================================================
+print("--- [47] Variadic String Operations ---")
+
+func joinWith(sep, ...parts) {
+    if (length(parts) == 0) return ""
+    var result = str(parts[0])
+    for (var i = 1; i < length(parts); i++) {
+        result = result + sep + str(parts[i])
+    }
+    return result
+}
+
+assert_wrap(joinWith("-", 1, 2, 3) == "1-2-3", "47.1: Join with dash")
+assert_wrap(joinWith(", ", "a", "b") == "a, b", "47.2: Join with comma")
+assert_wrap(joinWith("-") == "", "47.3: Join empty parts")
+
+// ============================================================================
+// SECTION 48: VARIADIC DISPATCHER CHAIN
+// ============================================================================
+print("--- [48] Variadic Dispatcher Chain ---")
+
+func chainFactory() {
+    func stage1() {
+        func inner(x) { return x * 2 }
+        func inner(...args) { return length(args) * 100 }
+        return inner
+    }
+
+    func stage1(offset) {
+        func inner(x) { return x + offset }
+        func inner(...args) { return length(args) + offset }
+        return inner
+    }
+
+    return stage1
+}
+
+var chain = chainFactory()
+var c1 = chain()
+var c2 = chain(50)
+
+assert_wrap(c1(5) == 10, "48.1: Chain stage1() exact")
+assert_wrap(c1(1, 2, 3) == 300, "48.2: Chain stage1() variadic")
+assert_wrap(c2(5) == 55, "48.3: Chain stage1(50) exact")
+assert_wrap(c2(1, 2, 3) == 53, "48.4: Chain stage1(50) variadic")
+
+// ============================================================================
+// SECTION 49: VARIADIC WITH REST PARAM AS LIST OPERATIONS
+// ============================================================================
+print("--- [49] Rest Param List Operations ---")
+
+func firstArg(...args) {
+    if (length(args) == 0) return null
+    return args[0]
+}
+
+func lastArg(...args) {
+    if (length(args) == 0) return null
+    return args[length(args) - 1]
+}
+
+assert_wrap(firstArg(10, 20, 30) == 10, "49.1: First arg")
+assert_wrap(lastArg(10, 20, 30) == 30, "49.2: Last arg")
+assert_wrap(firstArg() == null, "49.3: First arg empty")
+assert_wrap(lastArg() == null, "49.4: Last arg empty")
+
+// ============================================================================
+// SECTION 50: ULTIMATE COMPREHENSIVE VARIADIC TEST
+// ============================================================================
+print("--- [50] Ultimate Comprehensive Variadic Test ---")
+
+var ultGet
+var ultProcess
+
+func setupUltimate(base) {
+    var state = base
+
+    ultGet = func() { return state }
+
+    func processor(x) {
+        state = state + x
+        return state
+    }
+
+    func processor(x, y) {
+        state = state + x * y
+        return state
+    }
+
+    func processor(...args) {
+        for (var i = 0; i < length(args); i++) {
+            state = state + args[i]
+        }
+        return state
+    }
+
+    ultProcess = processor
+}
+
+setupUltimate(100)
+assert_wrap(ultGet() == 100, "50.1: Ultimate initial state")
+assert_wrap(ultProcess(5) == 105, "50.2: Ultimate exact 1 arg")
+assert_wrap(ultProcess(2, 3) == 111, "50.3: Ultimate exact 2 args (105 + 2*3)")
+assert_wrap(ultProcess(1, 2, 3) == 117, "50.4: Ultimate variadic (111 + 1+2+3)")
+assert_wrap(ultGet() == 117, "50.5: Ultimate state check")
+assert_wrap(ultProcess() == 117, "50.6: Ultimate variadic 0 args no change")
+
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

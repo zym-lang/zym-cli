@@ -1,0 +1,637 @@
+// ============================================================================
+// COMPREHENSIVE LOOP TEST FILE
+// Tests: while, do-while, for loops with break, continue, nesting
+// ============================================================================
+
+// Test helper functions
+var testsPassed = 0;
+var testsFailed = 0;
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+print("=== STARTING COMPREHENSIVE LOOP TESTS ===");
+print("");
+
+// ============================================================================
+// SECTION 1: WHILE LOOPS
+// ============================================================================
+print("--- [1] Basic While Loops ---");
+
+// Test 1.1: Simple while loop
+var sum1 = 0;
+var i = 0;
+while (i < 5) {
+    sum1 = sum1 + i;
+    i = i + 1;
+}
+assert_wrap(sum1 == 10, "1.1: Simple while loop sum (0+1+2+3+4)");
+assert_wrap(i == 5, "1.1: While loop counter final value");
+
+// Test 1.2: While loop that never executes
+var executed = false;
+while (false) {
+    executed = true;
+}
+assert_wrap(executed == false, "1.2: While loop with false condition never executes");
+
+// Test 1.3: While loop with break
+var sum2 = 0;
+var j = 0;
+while (true) {
+    if (j >= 3) {
+        break;
+    }
+    sum2 = sum2 + j;
+    j = j + 1;
+}
+assert_wrap(sum2 == 3, "1.3: While loop with break (0+1+2)");
+assert_wrap(j == 3, "1.3: While loop break at correct iteration");
+
+// Test 1.4: While loop with continue
+var sum3 = 0;
+var k = 0;
+while (k < 5) {
+    k = k + 1;
+    if (k == 2 || k == 4) {
+        continue;
+    }
+    sum3 = sum3 + k;
+}
+assert_wrap(sum3 == 9, "1.4: While loop with continue (1+3+5)");
+
+// Test 1.5: While loop with early break
+var count1 = 0;
+var m = 0;
+while (m < 10) {
+    count1 = count1 + 1;
+    if (m == 5) {
+        break;
+    }
+    m = m + 1;
+}
+assert_wrap(count1 == 6, "1.5: While loop early break iteration count");
+assert_wrap(m == 5, "1.5: While loop break at m == 5");
+
+// ============================================================================
+// SECTION 2: DO-WHILE LOOPS
+// ============================================================================
+print("--- [2] Basic Do-While Loops ---");
+
+// Test 2.1: Simple do-while loop
+var sum4 = 0;
+var n = 0;
+do {
+    sum4 = sum4 + n;
+    n = n + 1;
+} while (n < 5);
+assert_wrap(sum4 == 10, "2.1: Simple do-while loop sum (0+1+2+3+4)");
+assert_wrap(n == 5, "2.1: Do-while loop counter final value");
+
+// Test 2.2: Do-while loop executes at least once
+var executed2 = false;
+do {
+    executed2 = true;
+} while (false);
+assert_wrap(executed2 == true, "2.2: Do-while loop executes at least once even with false condition");
+
+// Test 2.3: Do-while loop with break
+var sum5 = 0;
+var p = 0;
+do {
+    if (p >= 3) {
+        break;
+    }
+    sum5 = sum5 + p;
+    p = p + 1;
+} while (true);
+assert_wrap(sum5 == 3, "2.3: Do-while loop with break (0+1+2)");
+assert_wrap(p == 3, "2.3: Do-while loop break at correct iteration");
+
+// Test 2.4: Do-while loop with continue
+var sum6 = 0;
+var q = 0;
+do {
+    q = q + 1;
+    if (q == 2 || q == 4) {
+        continue;
+    }
+    sum6 = sum6 + q;
+} while (q < 5);
+assert_wrap(sum6 == 9, "2.4: Do-while loop with continue (1+3+5)");
+
+// Test 2.5: Do-while loop with immediate break
+var count2 = 0;
+do {
+    count2 = count2 + 1;
+    break;
+} while (true);
+assert_wrap(count2 == 1, "2.5: Do-while loop with immediate break executes once");
+
+// Test 2.6: Do-while loop multiple iterations before break
+var iterations = 0;
+var r = 0;
+do {
+    iterations = iterations + 1;
+    r = r + 1;
+    if (r == 7) {
+        break;
+    }
+} while (r < 10);
+assert_wrap(iterations == 7, "2.6: Do-while loop correct iteration count before break");
+
+// ============================================================================
+// SECTION 3: FOR LOOPS
+// ============================================================================
+print("--- [3] Basic For Loops ---");
+
+// Test 3.1: Simple for loop
+var sum7 = 0;
+for (var s = 0; s < 5; s = s + 1) {
+    sum7 = sum7 + s;
+}
+assert_wrap(sum7 == 10, "3.1: Simple for loop sum (0+1+2+3+4)");
+
+// Test 3.2: For loop with break
+var sum8 = 0;
+for (var t = 0; t < 10; t = t + 1) {
+    if (t >= 3) {
+        break;
+    }
+    sum8 = sum8 + t;
+}
+assert_wrap(sum8 == 3, "3.2: For loop with break (0+1+2)");
+
+// Test 3.3: For loop with continue
+var sum9 = 0;
+for (var u = 0; u < 5; u = u + 1) {
+    if (u == 2 || u == 4) {
+        continue;
+    }
+    sum9 = sum9 + u;
+}
+assert_wrap(sum9 == 4, "3.3: For loop with continue (0+1+3)");
+
+// Test 3.4: For loop with empty initializer
+var v = 0;
+var sum10 = 0;
+for (; v < 4; v = v + 1) {
+    sum10 = sum10 + v;
+}
+assert_wrap(sum10 == 6, "3.4: For loop with empty initializer (0+1+2+3)");
+
+// Test 3.5: Infinite for loop with break
+var count3 = 0;
+for (;;) {
+    count3 = count3 + 1;
+    if (count3 == 5) {
+        break;
+    }
+}
+assert_wrap(count3 == 5, "3.5: Infinite for loop with break");
+
+// ============================================================================
+// SECTION 4: NESTED LOOPS
+// ============================================================================
+print("--- [4] Nested Loops ---");
+
+// Test 4.1: Nested while loops
+var sum11 = 0;
+var outer1 = 0;
+while (outer1 < 3) {
+    var inner1 = 0;
+    while (inner1 < 2) {
+        sum11 = sum11 + 1;
+        inner1 = inner1 + 1;
+    }
+    outer1 = outer1 + 1;
+}
+assert_wrap(sum11 == 6, "4.1: Nested while loops (3 * 2 iterations)");
+
+// Test 4.2: Nested for loops
+var sum12 = 0;
+for (var outer2 = 0; outer2 < 3; outer2 = outer2 + 1) {
+    for (var inner2 = 0; inner2 < 2; inner2 = inner2 + 1) {
+        sum12 = sum12 + outer2 + inner2;
+    }
+}
+assert_wrap(sum12 == 9, "4.2: Nested for loops sum");
+
+// Test 4.3: Nested do-while loops
+var sum13 = 0;
+var outer3 = 0;
+do {
+    var inner3 = 0;
+    do {
+        sum13 = sum13 + 1;
+        inner3 = inner3 + 1;
+    } while (inner3 < 2);
+    outer3 = outer3 + 1;
+} while (outer3 < 3);
+assert_wrap(sum13 == 6, "4.3: Nested do-while loops (3 * 2 iterations)");
+
+// Test 4.4: Mixed nested loops (for inside while)
+var sum14 = 0;
+var outer4 = 0;
+while (outer4 < 2) {
+    for (var inner4 = 0; inner4 < 3; inner4 = inner4 + 1) {
+        sum14 = sum14 + 1;
+    }
+    outer4 = outer4 + 1;
+}
+assert_wrap(sum14 == 6, "4.4: For loop nested inside while loop (2 * 3 iterations)");
+
+// Test 4.5: Mixed nested loops (do-while inside for)
+var sum15 = 0;
+for (var outer5 = 0; outer5 < 2; outer5 = outer5 + 1) {
+    var inner5 = 0;
+    do {
+        sum15 = sum15 + 1;
+        inner5 = inner5 + 1;
+    } while (inner5 < 3);
+}
+assert_wrap(sum15 == 6, "4.5: Do-while loop nested inside for loop (2 * 3 iterations)");
+
+// Test 4.6: Triple nested loops
+var sum16 = 0;
+for (var a = 0; a < 2; a = a + 1) {
+    for (var b = 0; b < 2; b = b + 1) {
+        for (var c = 0; c < 2; c = c + 1) {
+            sum16 = sum16 + 1;
+        }
+    }
+}
+assert_wrap(sum16 == 8, "4.6: Triple nested for loops (2 * 2 * 2 iterations)");
+
+// ============================================================================
+// SECTION 5: BREAK IN NESTED LOOPS
+// ============================================================================
+print("--- [5] Break in Nested Loops ---");
+
+// Test 5.1: Break in inner while loop
+var sum17 = 0;
+var outer6 = 0;
+while (outer6 < 3) {
+    var inner6 = 0;
+    while (inner6 < 5) {
+        sum17 = sum17 + 1;
+        if (inner6 == 2) {
+            break;
+        }
+        inner6 = inner6 + 1;
+    }
+    outer6 = outer6 + 1;
+}
+assert_wrap(sum17 == 9, "5.1: Break in inner while loop (3 * 3 iterations)");
+
+// Test 5.2: Break in outer while loop
+var sum18 = 0;
+var outer7 = 0;
+while (outer7 < 5) {
+    if (outer7 == 2) {
+        break;
+    }
+    var inner7 = 0;
+    while (inner7 < 2) {
+        sum18 = sum18 + 1;
+        inner7 = inner7 + 1;
+    }
+    outer7 = outer7 + 1;
+}
+assert_wrap(sum18 == 4, "5.2: Break in outer while loop (2 * 2 iterations)");
+
+// Test 5.3: Break in inner for loop
+var sum19 = 0;
+for (var outer8 = 0; outer8 < 3; outer8 = outer8 + 1) {
+    for (var inner8 = 0; inner8 < 5; inner8 = inner8 + 1) {
+        sum19 = sum19 + 1;
+        if (inner8 == 2) {
+            break;
+        }
+    }
+}
+assert_wrap(sum19 == 9, "5.3: Break in inner for loop (3 * 3 iterations)");
+
+// Test 5.4: Break in inner do-while loop
+var sum20 = 0;
+var outer9 = 0;
+do {
+    var inner9 = 0;
+    do {
+        sum20 = sum20 + 1;
+        if (inner9 == 2) {
+            break;
+        }
+        inner9 = inner9 + 1;
+    } while (inner9 < 5);
+    outer9 = outer9 + 1;
+} while (outer9 < 3);
+assert_wrap(sum20 == 9, "5.4: Break in inner do-while loop (3 * 3 iterations)");
+
+// ============================================================================
+// SECTION 6: CONTINUE IN NESTED LOOPS
+// ============================================================================
+print("--- [6] Continue in Nested Loops ---");
+
+// Test 6.1: Continue in inner while loop
+var sum21 = 0;
+var outer10 = 0;
+while (outer10 < 3) {
+    var inner10 = 0;
+    while (inner10 < 5) {
+        inner10 = inner10 + 1;
+        if (inner10 == 2 || inner10 == 4) {
+            continue;
+        }
+        sum21 = sum21 + 1;
+    }
+    outer10 = outer10 + 1;
+}
+assert_wrap(sum21 == 9, "6.1: Continue in inner while loop (3 * 3 counted iterations)");
+
+// Test 6.2: Continue in outer while loop
+var sum22 = 0;
+var outer11 = 0;
+while (outer11 < 5) {
+    outer11 = outer11 + 1;
+    if (outer11 == 2 || outer11 == 4) {
+        continue;
+    }
+    var inner11 = 0;
+    while (inner11 < 2) {
+        sum22 = sum22 + 1;
+        inner11 = inner11 + 1;
+    }
+}
+assert_wrap(sum22 == 6, "6.2: Continue in outer while loop (3 * 2 iterations)");
+
+// Test 6.3: Continue in inner for loop
+var sum23 = 0;
+for (var outer12 = 0; outer12 < 3; outer12 = outer12 + 1) {
+    for (var inner12 = 0; inner12 < 5; inner12 = inner12 + 1) {
+        if (inner12 == 1 || inner12 == 3) {
+            continue;
+        }
+        sum23 = sum23 + 1;
+    }
+}
+assert_wrap(sum23 == 9, "6.3: Continue in inner for loop (3 * 3 counted iterations)");
+
+// Test 6.4: Continue in inner do-while loop
+var sum24 = 0;
+var outer13 = 0;
+do {
+    var inner13 = 0;
+    do {
+        inner13 = inner13 + 1;
+        if (inner13 == 2 || inner13 == 4) {
+            continue;
+        }
+        sum24 = sum24 + 1;
+    } while (inner13 < 5);
+    outer13 = outer13 + 1;
+} while (outer13 < 3);
+assert_wrap(sum24 == 9, "6.4: Continue in inner do-while loop (3 * 3 counted iterations)");
+
+// ============================================================================
+// SECTION 7: COMPLEX LOOP SCENARIOS
+// ============================================================================
+print("--- [7] Complex Loop Scenarios ---");
+
+// Test 7.1: Multiple breaks and continues in same loop
+var sum25 = 0;
+for (var w = 0; w < 10; w = w + 1) {
+    if (w == 2 || w == 4) {
+        continue;
+    }
+    if (w == 7) {
+        break;
+    }
+    sum25 = sum25 + w;
+}
+assert_wrap(sum25 == 15, "7.1: Multiple breaks and continues (0+1+3+5+6)");
+
+// Test 7.2: Loop with conditional break and continue
+var sum26 = 0;
+var x = 0;
+while (x < 10) {
+    x = x + 1;
+    if (x < 3) {
+        continue;
+    }
+    if (x > 7) {
+        break;
+    }
+    sum26 = sum26 + x;
+}
+assert_wrap(sum26 == 25, "7.2: Conditional break and continue (3+4+5+6+7)");
+
+// Test 7.3: Do-while with multiple conditions
+var sum27 = 0;
+var y = 0;
+do {
+    y = y + 1;
+    if (y == 1 || y == 3 || y == 5) {
+        continue;
+    }
+    if (y > 8) {
+        break;
+    }
+    sum27 = sum27 + y;
+} while (y < 20);
+assert_wrap(sum27 == 27, "7.3: Do-while with multiple conditions (2+4+6+7+8)");
+
+// Test 7.4: For loop countdown with break
+var sum28 = 0;
+for (var z = 10; z > 0; z = z - 1) {
+    if (z < 5) {
+        break;
+    }
+    sum28 = sum28 + z;
+}
+assert_wrap(sum28 == 45, "7.4: For loop countdown with break (10+9+8+7+6+5)");
+
+// Test 7.5: While loop with nested conditionals and continue
+var sum29 = 0;
+var aa = 0;
+while (aa < 10) {
+    aa = aa + 1;
+    if (aa > 5) {
+        if (aa == 7 || aa == 9) {
+            continue;
+        }
+    }
+    if (aa <= 5) {
+        if (aa == 2 || aa == 4) {
+            continue;
+        }
+    }
+    sum29 = sum29 + aa;
+}
+assert_wrap(sum29 == 33, "7.5: Nested conditionals with continue (1+3+5+6+8+10)");
+
+// ============================================================================
+// SECTION 8: LOOP VARIABLE SCOPING
+// ============================================================================
+print("--- [8] Loop Variable Scoping ---");
+
+// Test 8.1: For loop variable scope
+var outer_var = 100;
+for (var outer_var = 0; outer_var < 3; outer_var = outer_var + 1) {
+    // Inner outer_var shadows outer
+}
+assert_wrap(outer_var == 100, "8.1: For loop variable scope (outer not affected)");
+
+// Test 8.2: Nested for loops with same variable names
+var sum30 = 0;
+for (var i = 0; i < 2; i = i + 1) {
+    for (var i = 0; i < 3; i = i + 1) {
+        sum30 = sum30 + 1;
+    }
+}
+assert_wrap(sum30 == 6, "8.2: Nested for loops with same variable names (2 * 3 iterations)");
+
+// Test 8.3: While loop doesn't create new scope for loop variable
+var while_var = 0;
+while (while_var < 3) {
+    while_var = while_var + 1;
+}
+assert_wrap(while_var == 3, "8.3: While loop variable persists after loop");
+
+// Test 8.4: Do-while loop variable persists
+var do_var = 0;
+do {
+    do_var = do_var + 1;
+} while (do_var < 4);
+assert_wrap(do_var == 4, "8.4: Do-while loop variable persists after loop");
+
+// ============================================================================
+// SECTION 9: EDGE CASES
+// ============================================================================
+print("--- [9] Edge Cases ---");
+
+// Test 9.1: While loop with zero iterations
+var zero_count = 0;
+var bb = 10;
+while (bb < 5) {
+    zero_count = zero_count + 1;
+    bb = bb + 1;
+}
+assert_wrap(zero_count == 0, "9.1: While loop with zero iterations");
+
+// Test 9.2: Do-while loop with one iteration (condition false)
+var one_count = 0;
+var cc = 10;
+do {
+    one_count = one_count + 1;
+    cc = cc + 1;
+} while (cc < 5);
+assert_wrap(one_count == 1, "9.2: Do-while loop with one iteration");
+
+// Test 9.3: For loop with negative increment
+var sum31 = 0;
+for (var dd = 5; dd > 0; dd = dd - 1) {
+    sum31 = sum31 + dd;
+}
+assert_wrap(sum31 == 15, "9.3: For loop with negative increment (5+4+3+2+1)");
+
+// Test 9.4: Empty for loop body
+var side_effect = 0;
+for (var ee = 0; ee < 5; ee = ee + 1) {
+    side_effect = side_effect + 1;
+}
+assert_wrap(side_effect == 5, "9.4: For loop counts side effects");
+
+// Test 9.5: Do-while with immediate continue then break
+var edge_count = 0;
+var ff = 0;
+do {
+    edge_count = edge_count + 1;
+    ff = ff + 1;
+    if (ff == 1) {
+        continue;
+    }
+    if (ff == 2) {
+        break;
+    }
+} while (true);
+assert_wrap(edge_count == 2, "9.5: Do-while with immediate continue then break");
+
+// Test 9.6: Nested loops with all breaks
+var break_count = 0;
+for (var gg = 0; gg < 5; gg = gg + 1) {
+    for (var hh = 0; hh < 5; hh = hh + 1) {
+        break_count = break_count + 1;
+        break;
+    }
+    break;
+}
+assert_wrap(break_count == 1, "9.6: Nested loops with immediate breaks");
+
+// ============================================================================
+// SECTION 10: LOOPS WITH FUNCTION CALLS
+// ============================================================================
+print("--- [10] Loops with Function Calls ---");
+
+// Test 10.1: Function called in while loop condition
+var call_count = 0;
+func increment_counter() {
+    call_count = call_count + 1;
+    return call_count;
+}
+
+var sum32 = 0;
+while (increment_counter() <= 3) {
+    sum32 = sum32 + 1;
+}
+assert_wrap(sum32 == 3, "10.1: While loop with function in condition");
+assert_wrap(call_count == 4, "10.1: Function called correct number of times (including final check)");
+
+// Test 10.2: Function called in do-while loop condition
+call_count = 0;
+var sum33 = 0;
+do {
+    sum33 = sum33 + 1;
+} while (increment_counter() < 3);
+assert_wrap(sum33 == 3, "10.2: Do-while loop with function in condition");
+
+// Test 10.3: Function called in for loop increment
+call_count = 0;
+var sum34 = 0;
+for (var ii = 0; ii < 3; ii = increment_counter() - 1) {
+    sum34 = sum34 + 1;
+}
+assert_wrap(sum34 == 4, "10.3: For loop with function in increment");
+
+// Test 10.4: Function hoisting inside loops
+var sum35 = 0;
+for (var jj = 0; jj < 3; jj = jj + 1) {
+    sum35 = sum35 + helper();
+
+    func helper() {
+        return 10;
+    }
+}
+assert_wrap(sum35 == 30, "10.4: Function hoisting inside for loop (3 * 10)");
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

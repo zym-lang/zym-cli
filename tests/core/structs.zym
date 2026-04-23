@@ -1,0 +1,535 @@
+// ============================================================================
+// COMPREHENSIVE STRUCT TEST SUITE
+// Tests all aspects of struct usage including:
+// - Basic instantiation (named and positional)
+// - Interaction with maps, lists, and primitives
+// - Function parameters (ref/val/slot/normal)
+// - Closures and upvalues
+// - Nested structures
+// - Mutation and assignment
+// - Edge cases and corner cases
+// - Dispatchers (overloaded functions)
+// ============================================================================
+
+print("==========================================================")
+print("COMPREHENSIVE STRUCT TEST SUITE")
+print("==========================================================")
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+// ============================================================================
+// SECTION 1: BASIC STRUCT INSTANTIATION
+// ============================================================================
+print("")
+print("=== SECTION 1: Basic Struct Instantiation ===")
+
+// 1.1: Named initialization (partial)
+struct Point { x; y }
+var p1 = Point{.x = 10, .y = 20}
+assert_wrap(p1.x == 10, "1.1a: Named init - field x")
+assert_wrap(p1.y == 20, "1.1b: Named init - field y")
+
+// 1.2: Positional initialization (all fields required)
+var p2 = Point(30, 40)
+assert_wrap(p2.x == 30, "1.2a: Positional init - field x")
+assert_wrap(p2.y == 40, "1.2b: Positional init - field y")
+
+// 1.3: Mixed field order in named initialization
+var p3 = Point{.y = 100, .x = 50}
+assert_wrap(p3.x == 50, "1.3a: Named init reversed - field x")
+assert_wrap(p3.y == 100, "1.3b: Named init reversed - field y")
+
+// 1.4: Default null fields
+var p4 = Point{.x = 7}
+assert_wrap(p4.x == 7, "1.4a: Partial named init - field x")
+assert_wrap(p4.y == null, "1.4b: Partial named init - field y defaults to null")
+
+// 1.5: Structs with many fields
+struct Color { r; g; b; a }
+var c1 = Color(255, 128, 64, 255)
+assert_wrap(c1.r == 255 and c1.g == 128 and c1.b == 64 and c1.a == 255, "1.5: Multi-field positional init")
+
+var c2 = Color{.b = 100, .a = 200, .r = 50, .g = 75}
+assert_wrap(c2.r == 50 and c2.g == 75 and c2.b == 100 and c2.a == 200, "1.6: Multi-field named init")
+
+// ============================================================================
+// SECTION 2: STRUCT FIELD ACCESS AND MUTATION
+// ============================================================================
+print("=== SECTION 2: Struct Field Access and Mutation ===")
+
+// 2.1: Direct field mutation
+var p5 = Point(1, 2)
+p5.x = 99
+p5.y = 88
+assert_wrap(p5.x == 99, "2.1a: Direct field mutation - x")
+assert_wrap(p5.y == 88, "2.1b: Direct field mutation - y")
+
+// 2.2: Compound assignment
+var p6 = Point(10, 20)
+p6.x = p6.x + 5
+p6.y = p6.y * 2
+assert_wrap(p6.x == 15, "2.2a: Compound assignment - x")
+assert_wrap(p6.y == 40, "2.2b: Compound assignment - y")
+
+// 2.3: Field access in expressions
+var p7 = Point(3, 4)
+var sum = p7.x + p7.y
+var product = p7.x * p7.y
+assert_wrap(sum == 7, "2.3a: Field access in expression - sum")
+assert_wrap(product == 12, "2.3b: Field access in expression - product")
+
+// 2.4: Chained field updates
+var p8 = Point(1, 1)
+p8.x = p8.y = 42
+assert_wrap(p8.x == 42 and p8.y == 42, "2.4: Chained field updates")
+
+// ============================================================================
+// SECTION 3: STRUCTS IN COLLECTIONS
+// ============================================================================
+print("=== SECTION 3: Structs in Collections ===")
+
+// 3.1: Struct in list
+var points = [Point(1, 2), Point(3, 4), Point(5, 6)]
+assert_wrap(points[0].x == 1 and points[0].y == 2, "3.1a: Struct in list - first element")
+assert_wrap(points[1].x == 3 and points[1].y == 4, "3.1b: Struct in list - second element")
+assert_wrap(points[2].x == 5 and points[2].y == 6, "3.1c: Struct in list - third element")
+
+// 3.2: Mutating struct in list
+points[1].x = 99
+assert_wrap(points[1].x == 99, "3.2: Mutating struct in list")
+
+// 3.3: Struct in map
+var namedPoints = {"origin": Point(0, 0), "unit": Point(1, 1)}
+assert_wrap(namedPoints["origin"].x == 0 and namedPoints["origin"].y == 0, "3.3a: Struct in map - origin")
+assert_wrap(namedPoints["unit"].x == 1 and namedPoints["unit"].y == 1, "3.3b: Struct in map - unit")
+
+// 3.4: Mutating struct in map
+namedPoints["unit"].x = 10
+assert_wrap(namedPoints["unit"].x == 10, "3.4: Mutating struct in map")
+
+// 3.5: List of lists with structs
+var grid = [[Point(0, 0), Point(0, 1)], [Point(1, 0), Point(1, 1)]]
+assert_wrap(grid[0][0].x == 0 and grid[0][0].y == 0, "3.5a: Nested list with structs - [0][0]")
+assert_wrap(grid[1][1].x == 1 and grid[1][1].y == 1, "3.5b: Nested list with structs - [1][1]")
+
+// 3.6: Map with struct values containing lists
+struct Container { items; count }
+var box1 = Container{.items = [1, 2, 3], .count = 3}
+assert_wrap(box1.items[0] == 1 and box1.items[2] == 3, "3.6a: Struct containing list")
+assert_wrap(box1.count == 3, "3.6b: Struct field access after list field")
+
+// ============================================================================
+// SECTION 4: STRUCTS AS FUNCTION PARAMETERS (NORMAL)
+// ============================================================================
+print("=== SECTION 4: Structs as Function Parameters (Normal) ===")
+
+// 4.1: Normal parameter (pass by reference semantics)
+func movePoint(p, dx, dy) {
+    p.x = p.x + dx
+    p.y = p.y + dy
+}
+var p9 = Point(10, 20)
+movePoint(p9, 5, 10)
+assert_wrap(p9.x == 15 and p9.y == 30, "4.1: Normal parameter modifies original struct")
+
+// 4.2: Returning struct from function
+func createPoint(x, y) {
+    return Point(x, y)
+}
+var p10 = createPoint(7, 8)
+assert_wrap(p10.x == 7 and p10.y == 8, "4.2: Returning struct from function")
+
+// 4.3: Struct as multiple parameters
+func distance(p1, p2) {
+    var dx = p2.x - p1.x
+    var dy = p2.y - p1.y
+    return dx * dx + dy * dy
+}
+var dist = distance(Point(0, 0), Point(3, 4))
+assert_wrap(dist == 25, "4.3: Multiple struct parameters")
+
+// ============================================================================
+// SECTION 8: STRUCTS WITH CLOSURES AND UPVALUES
+// ============================================================================
+print("=== SECTION 8: Structs with Closures and Upvalues ===")
+
+// 8.1: Struct as upvalue
+func makeCounter() {
+    var state = Point(0, 0)
+    func increment() {
+        state.x = state.x + 1
+        return state.x
+    }
+    return increment
+}
+var counter1 = makeCounter()
+assert_wrap(counter1() == 1, "8.1a: Struct upvalue - first call")
+assert_wrap(counter1() == 2, "8.1b: Struct upvalue - second call")
+assert_wrap(counter1() == 3, "8.1c: Struct upvalue - third call")
+
+// 8.2: Multiple closures sharing struct upvalue
+func makePointMutators() {
+    var p = Point(0, 0)
+    func setX(v) { p.x = v }
+    func setY(v) { p.y = v }
+    func getPoint() { return p }
+    return {"setX": setX, "setY": setY, "get": getPoint}
+}
+var mutators = makePointMutators()
+mutators["setX"](42)
+mutators["setY"](84)
+var result = mutators["get"]()
+assert_wrap(result.x == 42 and result.y == 84, "8.2: Multiple closures sharing struct upvalue")
+
+// 8.3: Nested closures with struct upvalues
+func makeNestedCounter() {
+    var outer = Point(0, 0)
+    func makeInner() {
+        var inner = Point(100, 200)
+        func increment() {
+            outer.x = outer.x + 1
+            inner.y = inner.y + 1
+            return outer.x + inner.y
+        }
+        return increment
+    }
+    return makeInner()
+}
+var nestedInc = makeNestedCounter()
+assert_wrap(nestedInc() == 202, "8.3a: Nested closures with struct upvalues - first")
+assert_wrap(nestedInc() == 204, "8.3b: Nested closures with struct upvalues - second")
+
+// 8.4: Closure returning modified struct upvalue
+func makeAccumulator() {
+    var acc = Point(0, 0)
+    func add(dx, dy) {
+        acc.x = acc.x + dx
+        acc.y = acc.y + dy
+        return Point(acc.x, acc.y)
+    }
+    return add
+}
+var accumulate = makeAccumulator()
+var r1 = accumulate(1, 2)
+var r2 = accumulate(3, 4)
+assert_wrap(r1.x == 1 and r1.y == 2, "8.4a: Closure accumulator - first result")
+assert_wrap(r2.x == 4 and r2.y == 6, "8.4b: Closure accumulator - second result")
+
+// ============================================================================
+// SECTION 9: NESTED STRUCTS
+// ============================================================================
+print("=== SECTION 9: Nested Structs ===")
+
+// 9.1: Struct containing another struct
+struct Line { start; end }
+var line1 = Line{.start = Point(0, 0), .end = Point(10, 10)}
+assert_wrap(line1.start.x == 0 and line1.start.y == 0, "9.1a: Nested struct - start point")
+assert_wrap(line1.end.x == 10 and line1.end.y == 10, "9.1b: Nested struct - end point")
+
+// 9.2: Modifying nested struct
+line1.start.x = 5
+line1.end.y = 20
+assert_wrap(line1.start.x == 5, "9.2a: Modify nested struct - start.x")
+assert_wrap(line1.end.y == 20, "9.2b: Modify nested struct - end.y")
+
+// 9.3: Struct with mixed field types
+struct Entity { pos; velocity; health }
+var player = Entity{.pos = Point(100, 200), .velocity = Point(5, 0), .health = 100}
+assert_wrap(player.pos.x == 100 and player.pos.y == 200, "9.3a: Mixed fields - position")
+assert_wrap(player.velocity.x == 5 and player.velocity.y == 0, "9.3b: Mixed fields - velocity")
+assert_wrap(player.health == 100, "9.3c: Mixed fields - scalar")
+
+// 9.4: Deep nesting
+struct Box { content; size }
+var nestedBox = Box{.content = Box{.content = Point(7, 8), .size = 1}, .size = 2}
+assert_wrap(nestedBox.content.content.x == 7, "9.4: Deep nesting access")
+
+// ============================================================================
+// SECTION 10: STRUCT SCOPING
+// ============================================================================
+print("=== SECTION 10: Struct Scoping ===")
+
+// 10.1: Global struct used in function
+var globalPoint = Point(10, 20)
+func modifyGlobal() {
+    globalPoint.x = 99
+}
+modifyGlobal()
+assert_wrap(globalPoint.x == 99, "10.1: Global struct modified in function")
+
+// 10.2: Local struct in nested scope
+func testLocalStruct() {
+    var local = Point(1, 2)
+    if (true) {
+        local.x = 10
+    }
+    return local.x
+}
+assert_wrap(testLocalStruct() == 10, "10.2: Local struct in nested scope")
+
+// 10.3: Struct defined in function scope
+func makeLocalStruct() {
+    struct LocalPoint { a; b }
+    return LocalPoint(5, 6)
+}
+var local1 = makeLocalStruct()
+assert_wrap(local1.a == 5 and local1.b == 6, "10.3: Struct defined in function scope")
+
+// 10.4: Struct shadowing
+struct Shadow { value }
+func testShadow() {
+    struct Shadow { x; y }
+    return Shadow(11, 22)
+}
+var s1 = Shadow{.value = 1}
+var s2 = testShadow()
+assert_wrap(s1.value == 1, "10.4a: Original struct unaffected by shadow")
+assert_wrap(s2.x == 11 and s2.y == 22, "10.4b: Shadowed struct in function")
+
+// ============================================================================
+// SECTION 12: STRUCT EDGE CASES
+// ============================================================================
+print("=== SECTION 12: Struct Edge Cases ===")
+
+// 12.1: Struct with single field
+struct Single { value }
+var s3 = Single{.value = 42}
+assert_wrap(s3.value == 42, "12.1a: Single field struct - named init")
+var s4 = Single(99)
+assert_wrap(s4.value == 99, "12.1b: Single field struct - positional init")
+
+// 12.2: Empty struct field (null)
+var s5 = Point{.x = 10}
+assert_wrap(s5.y == null, "12.2: Uninitialized field is null")
+
+// 12.3: Struct equality (by reference)
+var e1 = Point(5, 5)
+var e2 = e1
+e2.x = 10
+assert_wrap(e1.x == 10, "12.3: Struct assignment by reference")
+
+// 12.4: Struct in expression chain
+var chain = Point(1, 2)
+var v = (chain.x = 10) + (chain.y = 20)
+assert_wrap(v == 30 and chain.x == 10 and chain.y == 20, "12.4: Struct in expression chain")
+
+// 12.5: Struct comparison with null
+var nullable = Point{.x = null, .y = null}
+assert_wrap(nullable.x == null and nullable.y == null, "12.5: Struct fields can be null")
+
+// ============================================================================
+// SECTION 13: COMPLEX MUTATIONS
+// ============================================================================
+print("=== SECTION 13: Complex Mutations ===")
+
+// 13.1: Circular-like reference through list
+var node1 = Point(1, 0)
+var node2 = Point(2, 0)
+var nodes = [node1, node2]
+node1.y = nodes
+node2.y = nodes
+assert_wrap(node1.y[1].x == 2, "13.1a: Complex mutation - list reference")
+nodes[0].x = 99
+assert_wrap(node1.x == 99, "13.1b: Complex mutation - through list")
+
+// 13.2: Struct field pointing to list containing itself
+var meta = Point(0, 0)
+var metaList = [meta]
+meta.x = metaList
+assert_wrap(meta.x[0].y == 0, "13.2: Self-referential structure")
+
+// 13.3: Multiple levels of indirection
+var base = Point(1, 2)
+var wrapper = {"point": base}
+var outerList = [wrapper]
+outerList[0]["point"].x = 777
+assert_wrap(base.x == 777, "13.3: Multiple indirection levels")
+
+// 13.4: Simultaneous mutation paths
+var shared = Point(10, 20)
+var list1 = [shared]
+var list2 = [shared]
+list1[0].x = 100
+assert_wrap(list2[0].x == 100, "13.4: Simultaneous mutation paths")
+
+// ============================================================================
+// SECTION 14: STRUCTS IN LOOPS
+// ============================================================================
+print("=== SECTION 14: Structs in Loops ===")
+
+// 14.1: Creating structs in loop
+var loopPoints = [null, null, null, null, null]
+for (var i = 0; i < 5; i = i + 1) {
+    loopPoints[i] = Point(i, i * 10)
+}
+assert_wrap(loopPoints[0].x == 0 and loopPoints[0].y == 0, "14.1a: Loop creation - first")
+assert_wrap(loopPoints[4].x == 4 and loopPoints[4].y == 40, "14.1b: Loop creation - last")
+
+// 14.2: Modifying structs in loop
+for (var i = 0; i < 5; i = i + 1) {
+    loopPoints[i].x = loopPoints[i].x + 100
+}
+assert_wrap(loopPoints[0].x == 100 and loopPoints[4].x == 104, "14.2: Loop modification")
+
+// 14.3: Accumulating with structs
+var accumPoint = Point(0, 0)
+for (var i = 1; i < 6; i = i + 1) {
+    accumPoint.x = accumPoint.x + i
+    accumPoint.y = accumPoint.y + i * 2
+}
+assert_wrap(accumPoint.x == 15 and accumPoint.y == 30, "14.3: Accumulation in loop")
+
+// ============================================================================
+// SECTION 15: STRUCTS WITH RECURSION
+// ============================================================================
+print("=== SECTION 15: Structs with Recursion ===")
+
+// 15.1: Recursive function with struct parameter
+func recursiveSum(p, n) {
+    if (n == 0) {
+        return p.x
+    }
+    p.x = p.x + 1
+    return recursiveSum(p, n - 1)
+}
+var recPoint = Point(0, 0)
+var recResult = recursiveSum(recPoint, 5)
+assert_wrap(recResult == 5, "15.1a: Recursive function - result")
+assert_wrap(recPoint.x == 5, "15.1b: Recursive function - modified struct")
+
+// 15.2: Recursive function returning structs
+func recursiveBuild(n) {
+    if (n == 0) {
+        return Point(0, 0)
+    }
+    var p = recursiveBuild(n - 1)
+    p.x = p.x + 1
+    return p
+}
+var recBuilt = recursiveBuild(3)
+assert_wrap(recBuilt.x == 3, "15.2: Recursive struct building")
+
+// ============================================================================
+// SECTION 16: STRUCTS WITH DISPATCHERS (OVERLOADED FUNCTIONS)
+// ============================================================================
+print("=== SECTION 16: Structs with Dispatchers ===")
+
+// 16.1: Overloaded function with different struct parameters
+func process(p) {
+    return p.x + p.y
+}
+func process(p, scale) {
+    return (p.x + p.y) * scale
+}
+func process(p, sx, sy) {
+    return Point(p.x * sx, p.y * sy)
+}
+
+var dp1 = Point(2, 3)
+assert_wrap(process(dp1) == 5, "16.1a: Dispatcher - single param")
+assert_wrap(process(dp1, 2) == 10, "16.1b: Dispatcher - two params")
+var dp2 = process(dp1, 10, 100)
+assert_wrap(dp2.x == 20 and dp2.y == 300, "16.1c: Dispatcher - three params")
+
+// ============================================================================
+// SECTION 17: STRESS TESTS
+// ============================================================================
+print("=== SECTION 17: Stress Tests ===")
+
+// 17.1: Many struct instances
+var manyPoints = [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]
+for (var i = 0; i < 100; i = i + 1) {
+    manyPoints[i] = Point(i, i * i)
+}
+assert_wrap(manyPoints[50].x == 50 and manyPoints[50].y == 2500, "17.1: Many struct instances")
+
+// 17.2: Deep nesting of structs
+struct Deep { v; next }
+var deep1 = Deep{.v = 1, .next = null}
+var deep2 = Deep{.v = 2, .next = deep1}
+var deep3 = Deep{.v = 3, .next = deep2}
+var deep4 = Deep{.v = 4, .next = deep3}
+assert_wrap(deep4.next.next.next.v == 1, "17.2: Deep struct nesting")
+
+// 17.3: Large struct with many fields
+struct Big { f1; f2; f3; f4; f5; f6; f7; f8; f9; f10 }
+var big = Big(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+assert_wrap(big.f1 == 1 and big.f5 == 5 and big.f10 == 10, "17.3: Large struct many fields")
+
+// 17.4: Complex callback chain with structs
+func chain1(p, callback) {
+    p.x = p.x + 1
+    return callback(p)
+}
+func chain2(p, callback) {
+    p.y = p.y + 1
+    return callback(p)
+}
+func chain3(p) {
+    return p.x + p.y
+}
+
+var chainP = Point(10, 20)
+var chainResult = chain1(chainP, func(p) { return chain2(p, chain3) })
+assert_wrap(chainResult == 32, "17.4: Complex callback chain with structs")
+
+// ============================================================================
+// SECTION 19: CORNER CASES AND EDGE CONDITIONS
+// ============================================================================
+print("=== SECTION 19: Corner Cases ===")
+
+// 19.1: Assigning struct to itself
+var selfAssign = Point(5, 10)
+selfAssign = selfAssign
+assert_wrap(selfAssign.x == 5, "19.1: Self assignment")
+
+// 19.2: Struct field assigned to another field of same struct
+var crossAssign = Point(10, 20)
+crossAssign.x = crossAssign.y
+assert_wrap(crossAssign.x == 20, "19.2: Cross field assignment")
+
+// 19.3: Modifying struct while it's in expression
+var exprMod = Point(1, 2)
+var exprResult = (exprMod.x = 10) + exprMod.x
+assert_wrap(exprResult == 20 and exprMod.x == 10, "19.3: Modify during expression")
+
+// 19.4: Struct in conditional
+var condStruct = Point(10, 20)
+var condResult = condStruct.x > 5 and condStruct.y < 30
+assert_wrap(condResult == true, "19.4: Struct in conditional")
+
+// 19.5: Returning struct from nested function calls
+func makeWrapper() {
+    func makeInner() {
+        return Point(99, 88)
+    }
+    return makeInner()
+}
+var nestedReturn = makeWrapper()
+assert_wrap(nestedReturn.x == 99 and nestedReturn.y == 88, "19.5: Nested function return")
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

@@ -1,0 +1,383 @@
+// ============================================================================
+// COMPREHENSIVE File NATIVE TEST SUITE
+// Exercises the `File` global: whole-file helpers, open modes, handle state &
+// positioning, block I/O + Buffer round-trip, text/line/CSV I/O, typed codecs
+// with endian overrides, metadata, and copy/rename/remove.
+// ============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+print("==========================================================")
+print("File NATIVE TEST SUITE")
+print("==========================================================")
+
+// All scratch files live under /tmp with a common prefix so a failing run
+// leaves an obvious, bounded footprint.
+var P      = "/tmp/zym_cli_file_test.txt"
+var P_BIN  = "/tmp/zym_cli_file_test.bin"
+var P_CSV  = "/tmp/zym_cli_file_test.csv"
+var P_COPY = "/tmp/zym_cli_file_test.copy"
+var P_MOVE = "/tmp/zym_cli_file_test.moved"
+var P_MISS = "/tmp/zym_cli_file_test.nosuch"
+
+// Clean any leftovers from a previous run (ignore return values).
+File.remove(P)
+File.remove(P_BIN)
+File.remove(P_CSV)
+File.remove(P_COPY)
+File.remove(P_MOVE)
+File.remove(P_MISS)
+
+
+// ============================================================================
+// SECTION 1: WHOLE-FILE HELPERS (text)
+// ============================================================================
+print("--- [1] Whole-file helpers (text) ---")
+
+var wroteT = File.writeText(P, "hello\nworld\n")
+assert_wrap(wroteT, "1.1: File.writeText returns true on success")
+assert_wrap(File.exists(P), "1.2: exists after writeText")
+assert_wrap(File.size(P) == 12, "1.3: size after writeText")
+assert_wrap(File.readText(P) == "hello\nworld\n", "1.4: readText round-trip")
+
+var appendedT = File.append(P, "tail")
+assert_wrap(appendedT, "1.5: File.append(string) returns true")
+assert_wrap(File.size(P) == 16, "1.6: size after string append")
+assert_wrap(File.readText(P) == "hello\nworld\ntail", "1.7: append content")
+
+
+// ============================================================================
+// SECTION 2: WHOLE-FILE HELPERS (bytes) + Buffer ROUND-TRIP
+// ============================================================================
+print("--- [2] Whole-file helpers (bytes) ---")
+
+var payload = Buffer.fromList([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x7F])
+var wroteB  = File.writeBytes(P_BIN, payload)
+assert_wrap(wroteB, "2.1: File.writeBytes returns true")
+assert_wrap(File.size(P_BIN) == 6, "2.2: size after writeBytes")
+
+var read = File.readBytes(P_BIN)
+assert_wrap(read.size() == 6, "2.3: readBytes size")
+assert_wrap(read.get(0) == 0xDE, "2.4: readBytes[0]")
+assert_wrap(read.get(1) == 0xAD, "2.5: readBytes[1]")
+assert_wrap(read.get(2) == 0xBE, "2.6: readBytes[2]")
+assert_wrap(read.get(3) == 0xEF, "2.7: readBytes[3]")
+assert_wrap(read.get(4) == 0x00, "2.8: readBytes[4]")
+assert_wrap(read.get(5) == 0x7F, "2.9: readBytes[5]")
+
+// readBytes returns a real Buffer (exposes the Buffer method surface).
+assert_wrap(read.hex() == "deadbeef007f", "2.10: readBytes returns a Buffer (hex() works)")
+
+var tailB = Buffer.fromList([0xAA, 0xBB])
+var appendedB = File.append(P_BIN, tailB)
+assert_wrap(appendedB, "2.11: File.append(buffer) returns true")
+assert_wrap(File.size(P_BIN) == 8, "2.12: size after buffer append")
+assert_wrap(File.readBytes(P_BIN).hex() == "deadbeef007faabb", "2.13: buffer append content")
+
+
+// ============================================================================
+// SECTION 3: OPEN MODES
+// ============================================================================
+print("--- [3] Open modes ---")
+
+var fr = File.open(P, "r")
+assert_wrap(fr != null, "3.1: open(r) on existing file")
+assert_wrap(fr.isOpen(), "3.2: handle isOpen")
+assert_wrap(fr.length() == 16, "3.3: length matches file size")
+fr.close()
+assert_wrap(fr.isOpen() == false, "3.4: isOpen false after close")
+
+var fmiss = File.open(P_MISS, "r")
+assert_wrap(fmiss == null, "3.5: open(r) on missing file -> null")
+
+var fw = File.open(P_COPY, "w")
+assert_wrap(fw != null, "3.6: open(w) creates file")
+fw.writeString("abc")
+fw.close()
+assert_wrap(File.size(P_COPY) == 3, "3.7: open(w) wrote and truncated")
+
+// Re-open "w" and verify truncation.
+var fw2 = File.open(P_COPY, "w")
+fw2.close()
+assert_wrap(File.size(P_COPY) == 0, "3.8: open(w) truncates existing file")
+
+// rw: file must exist.
+var frw = File.open(P_COPY, "rw")
+assert_wrap(frw != null, "3.9: open(rw) on existing file")
+frw.close()
+
+// wr: creates/truncates like w, and is readable.
+var fwr = File.open(P_COPY, "wr")
+assert_wrap(fwr != null, "3.10: open(wr) on a file")
+fwr.writeString("xy")
+fwr.seek(0)
+assert_wrap(fwr.readText() == "xy", "3.11: open(wr) read-back after write")
+fwr.close()
+
+
+
+// ============================================================================
+// SECTION 4: HANDLE STATE & POSITIONING
+// ============================================================================
+print("--- [4] Handle state & positioning ---")
+
+var f = File.open(P_BIN, "r")
+assert_wrap(f.length() == 8, "4.1: length")
+assert_wrap(f.position() == 0, "4.2: initial position")
+f.seek(3)
+assert_wrap(f.position() == 3, "4.3: seek(3) position")
+f.seekEnd(0)
+assert_wrap(f.position() == 8, "4.4: seekEnd(0) lands at length")
+f.seek(0)
+assert_wrap(f.eof() == false, "4.5: eof false at start")
+
+// Drain file to trigger EOF.
+f.readBytes(8)
+var b = f.readU8()       // past end
+assert_wrap(f.eof(), "4.6: eof true after reading past end")
+assert_wrap(b == 0, "4.7: read past EOF returns 0")
+
+// pathAbsolute round-trip.
+assert_wrap(f.pathAbsolute() == P_BIN, "4.8: pathAbsolute matches open path")
+
+f.close()
+assert_wrap(f.isOpen() == false, "4.9: close() makes isOpen false")
+
+
+// ============================================================================
+// SECTION 5: BLOCK I/O + Buffer INTEGRATION
+// ============================================================================
+print("--- [5] Block I/O + Buffer ---")
+
+var wf = File.open(P_COPY, "w")
+wf.writeBytes(Buffer.fromList([1, 2, 3, 4, 5]))
+wf.close()
+
+var rf = File.open(P_COPY, "r")
+var chunk = rf.readBytes(3)
+assert_wrap(chunk.size() == 3, "5.1: readBytes(3) size")
+assert_wrap(chunk.get(0) == 1, "5.2: readBytes[0]")
+assert_wrap(chunk.get(2) == 3, "5.3: readBytes[2]")
+
+// Short-read at EOF: ask for more than remaining.
+var rest = rf.readBytes(100)
+assert_wrap(rest.size() == 2, "5.4: readBytes short read at EOF")
+assert_wrap(rest.get(0) == 4, "5.5: readBytes short read first byte")
+assert_wrap(rest.get(1) == 5, "5.6: readBytes short read last byte")
+rf.close()
+
+
+// ============================================================================
+// SECTION 6: TEXT / LINE / CSV I/O
+// ============================================================================
+print("--- [6] Text / line / CSV I/O ---")
+
+var lw = File.open(P, "w")
+lw.writeLine("first")
+lw.writeLine("second")
+lw.writeString("tail-no-newline")
+lw.close()
+
+var lr = File.open(P, "r")
+assert_wrap(lr.readLine() == "first",  "6.1: readLine() 1")
+assert_wrap(lr.readLine() == "second", "6.2: readLine() 2")
+assert_wrap(lr.readLine() == "tail-no-newline", "6.3: readLine() last (no \\n)")
+lr.close()
+
+// CSV round-trip.
+var cw = File.open(P_CSV, "w")
+cw.writeCSVLine(["a", "b", "c"])
+cw.writeCSVLine(["one", "two", "three"], ";")
+cw.close()
+
+var cr = File.open(P_CSV, "r")
+var row1 = cr.readCSVLine()
+assert_wrap(row1[0] == "a", "6.4: default-delim CSV field 0")
+assert_wrap(row1[1] == "b", "6.5: default-delim CSV field 1")
+assert_wrap(row1[2] == "c", "6.6: default-delim CSV field 2")
+var row2 = cr.readCSVLine(";")
+assert_wrap(row2[0] == "one",   "6.7: custom-delim CSV field 0")
+assert_wrap(row2[1] == "two",   "6.8: custom-delim CSV field 1")
+assert_wrap(row2[2] == "three", "6.9: custom-delim CSV field 2")
+cr.close()
+
+
+// ============================================================================
+// SECTION 7: TYPED CODEC (unsigned)
+// ============================================================================
+print("--- [7] Typed codec (unsigned) ---")
+
+var uw = File.open(P_BIN, "w")
+uw.writeU8(0xAB)
+uw.writeU16(0x1234)
+uw.writeU32(0xDEADBEEF)
+uw.writeU64(0x001FFFFFFFFFFFFF)  // fits in a double (2^53 - 1)
+uw.close()
+
+var ur = File.open(P_BIN, "r")
+assert_wrap(ur.readU8()  == 0xAB,       "7.1: readU8 round-trip")
+assert_wrap(ur.readU16() == 0x1234,     "7.2: readU16 round-trip")
+assert_wrap(ur.readU32() == 0xDEADBEEF, "7.3: readU32 round-trip")
+assert_wrap(ur.readU64() == 0x001FFFFFFFFFFFFF, "7.4: readU64 round-trip (<= 2^53 - 1)")
+ur.close()
+
+
+// ============================================================================
+// SECTION 8: TYPED CODEC (signed)
+// ============================================================================
+print("--- [8] Typed codec (signed) ---")
+
+var iw = File.open(P_BIN, "w")
+iw.writeI8(-1)
+iw.writeI16(-2)
+iw.writeI32(-123456)
+iw.writeI64(-9000000000)
+iw.close()
+
+var ir = File.open(P_BIN, "r")
+assert_wrap(ir.readI8()  == -1,          "8.1: readI8 round-trip (negative)")
+assert_wrap(ir.readI16() == -2,          "8.2: readI16 round-trip (negative)")
+assert_wrap(ir.readI32() == -123456,     "8.3: readI32 round-trip (negative)")
+assert_wrap(ir.readI64() == -9000000000, "8.4: readI64 round-trip (negative)")
+ir.close()
+
+
+// ============================================================================
+// SECTION 9: TYPED CODEC (float)
+// ============================================================================
+print("--- [9] Typed codec (float) ---")
+
+var fw3 = File.open(P_BIN, "w")
+fw3.writeFloat(3.5)
+fw3.writeDouble(1.5)
+fw3.writeHalf(0.5)
+fw3.close()
+
+var fr3 = File.open(P_BIN, "r")
+assert_wrap(fr3.readFloat()  == 3.5, "9.1: readFloat round-trip")
+assert_wrap(fr3.readDouble() == 1.5, "9.2: readDouble round-trip")
+assert_wrap(fr3.readHalf()   == 0.5, "9.3: readHalf round-trip")
+fr3.close()
+
+
+// ============================================================================
+// SECTION 10: ENDIAN OVERRIDES
+// ============================================================================
+print("--- [10] Endian overrides ---")
+
+var ew = File.open(P_BIN, "w")
+ew.writeU32(0x12345678, "le")
+ew.writeU32(0x12345678, "be")
+ew.close()
+
+// Re-read as raw bytes to verify the two layouts.
+var raw = File.readBytes(P_BIN)
+assert_wrap(raw.size() == 8,       "10.1: endian write produced 8 bytes")
+assert_wrap(raw.get(0) == 0x78,    "10.2: LE byte 0")
+assert_wrap(raw.get(1) == 0x56,    "10.3: LE byte 1")
+assert_wrap(raw.get(2) == 0x34,    "10.4: LE byte 2")
+assert_wrap(raw.get(3) == 0x12,    "10.5: LE byte 3")
+assert_wrap(raw.get(4) == 0x12,    "10.6: BE byte 0")
+assert_wrap(raw.get(5) == 0x34,    "10.7: BE byte 1")
+assert_wrap(raw.get(6) == 0x56,    "10.8: BE byte 2")
+assert_wrap(raw.get(7) == 0x78,    "10.9: BE byte 3")
+
+var er2 = File.open(P_BIN, "r")
+assert_wrap(er2.readU32("le") == 0x12345678, "10.10: readU32(le) round-trip")
+assert_wrap(er2.readU32("be") == 0x12345678, "10.11: readU32(be) round-trip")
+er2.close()
+
+// setBigEndian persists across subsequent typed reads until changed.
+var pw = File.open(P_BIN, "w")
+pw.setBigEndian(true)
+assert_wrap(pw.isBigEndian(), "10.12: isBigEndian after setBigEndian(true)")
+pw.writeU16(0x00FF)
+pw.setBigEndian(false)
+pw.writeU16(0x00FF)
+pw.close()
+
+var pr = File.readBytes(P_BIN)
+assert_wrap(pr.get(0) == 0x00, "10.13: BE handle-wide byte 0")
+assert_wrap(pr.get(1) == 0xFF, "10.14: BE handle-wide byte 1")
+assert_wrap(pr.get(2) == 0xFF, "10.15: LE handle-wide byte 2")
+assert_wrap(pr.get(3) == 0x00, "10.16: LE handle-wide byte 3")
+
+
+// ============================================================================
+// SECTION 11: METADATA (exists/size/md5/sha256/modifiedTime)
+// ============================================================================
+print("--- [11] Metadata ---")
+
+File.writeText(P, "abc")
+assert_wrap(File.exists(P), "11.1: exists true")
+assert_wrap(File.exists(P_MISS) == false, "11.2: exists false on missing")
+assert_wrap(File.size(P) == 3, "11.3: size of 'abc'")
+
+// MD5 of "abc" = 900150983cd24fb0d6963f7d28e17f72
+assert_wrap(File.md5(P) == "900150983cd24fb0d6963f7d28e17f72", "11.4: md5 of 'abc'")
+// SHA-256 of "abc" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+assert_wrap(File.sha256(P) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "11.5: sha256 of 'abc'")
+
+var mtime = File.modifiedTime(P)
+assert_wrap(mtime > 0, "11.6: modifiedTime is positive")
+var atime = File.accessTime(P)
+assert_wrap(atime > 0, "11.7: accessTime is positive")
+
+
+// ============================================================================
+// SECTION 12: COPY / RENAME / REMOVE
+// ============================================================================
+print("--- [12] Copy / rename / remove ---")
+
+File.writeText(P, "src-content")
+var okCopy = File.copy(P, P_COPY)
+assert_wrap(okCopy, "12.1: copy returns true")
+assert_wrap(File.exists(P_COPY), "12.2: copy destination exists")
+assert_wrap(File.readText(P_COPY) == "src-content", "12.3: copy preserved content")
+
+var okRename = File.rename(P_COPY, P_MOVE)
+assert_wrap(okRename, "12.4: rename returns true")
+assert_wrap(File.exists(P_COPY) == false, "12.5: rename source gone")
+assert_wrap(File.exists(P_MOVE), "12.6: rename destination exists")
+
+var okRemove = File.remove(P_MOVE)
+assert_wrap(okRemove, "12.7: remove returns true")
+assert_wrap(File.exists(P_MOVE) == false, "12.8: remove target gone")
+
+// remove() on a missing file simply returns false.
+var missRemove = File.remove(P_MISS)
+assert_wrap(missRemove == false, "12.9: remove missing -> false")
+
+
+// ============================================================================
+// CLEAN UP
+// ============================================================================
+File.remove(P)
+File.remove(P_BIN)
+File.remove(P_CSV)
+File.remove(P_COPY)
+File.remove(P_MOVE)
+
+
+// ============================================================================
+// SUMMARY
+// ============================================================================
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED")
+}
+print("==========================================================")

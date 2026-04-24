@@ -1,0 +1,373 @@
+// ============================================================================
+// COMPREHENSIVE Dir NATIVE TEST SUITE
+// Exercises the `Dir` global: statics, handle state, enumeration (snapshot +
+// iterator), listing filters, mutations, symlinks, drives/metadata, destructive
+// eraseContentsRecursive, openTemp, and open-failure semantics.
+// ============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+func list_contains(xs, needle) {
+    var i = 0
+    var n = length(xs)
+    while (i < n) {
+        if (xs[i] == needle) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+print("==========================================================")
+print("Dir NATIVE TEST SUITE")
+print("==========================================================")
+
+// All scratch dirs live under /tmp with a common prefix.
+var ROOT   = "/tmp/zym_cli_dir_test"
+var SUB_A  = "/tmp/zym_cli_dir_test/a"
+var SUB_B  = "/tmp/zym_cli_dir_test/b"
+var DEEP   = "/tmp/zym_cli_dir_test/a/deep/nest"
+var F1     = "/tmp/zym_cli_dir_test/file1.txt"
+var F2     = "/tmp/zym_cli_dir_test/a/file_a.txt"
+var F_COPY = "/tmp/zym_cli_dir_test/a/file_a.copy"
+var F_MOVE = "/tmp/zym_cli_dir_test/b/file_a.moved"
+var LINK   = "/tmp/zym_cli_dir_test/link_to_a"
+
+// Clean any leftovers from a previous run (ignore return values).
+File.remove(F1)
+File.remove(F2)
+File.remove(F_COPY)
+File.remove(F_MOVE)
+File.remove(LINK)
+Dir.remove(DEEP)
+Dir.remove("/tmp/zym_cli_dir_test/a/deep")
+Dir.remove(SUB_A)
+Dir.remove(SUB_B)
+Dir.remove(ROOT)
+
+
+// ============================================================================
+// SECTION 1: STATIC HELPERS (exists, makeDir, makeDirRecursive, remove)
+// ============================================================================
+print("--- [1] Static helpers ---")
+
+assert_wrap(Dir.exists(ROOT) == false, "1.1: exists false for missing dir")
+assert_wrap(Dir.makeDir(ROOT),           "1.2: makeDir top-level")
+assert_wrap(Dir.exists(ROOT),            "1.3: exists true after makeDir")
+assert_wrap(Dir.makeDirRecursive(DEEP),  "1.4: makeDirRecursive creates chain")
+assert_wrap(Dir.exists(SUB_A),           "1.5: makeDirRecursive created intermediate")
+assert_wrap(Dir.exists(DEEP),            "1.6: makeDirRecursive created leaf")
+
+// makeDir without existing parent fails.
+assert_wrap(Dir.makeDir("/tmp/zym_cli_dir_test_bogus_parent/x") == false,
+    "1.7: makeDir fails when parent missing")
+
+// remove refuses non-empty dir.
+assert_wrap(Dir.remove(SUB_A) == false,  "1.8: remove non-empty dir returns false")
+
+assert_wrap(Dir.makeDir(SUB_B),          "1.9: makeDir sibling")
+
+
+// ============================================================================
+// SECTION 2: STATIC FILE LISTINGS
+// ============================================================================
+print("--- [2] Static file/dir listings ---")
+
+File.writeText(F1, "one")
+File.writeText(F2, "two")
+
+var rootFiles = Dir.files(ROOT)
+assert_wrap(list_contains(rootFiles, "file1.txt"),  "2.1: Dir.files sees top-level file")
+assert_wrap(list_contains(rootFiles, "a") == false, "2.2: Dir.files excludes subdirs")
+
+var rootDirs = Dir.directories(ROOT)
+assert_wrap(list_contains(rootDirs, "a"),           "2.3: Dir.directories sees subdir a")
+assert_wrap(list_contains(rootDirs, "b"),           "2.4: Dir.directories sees subdir b")
+assert_wrap(list_contains(rootDirs, "file1.txt") == false,
+    "2.5: Dir.directories excludes files")
+
+var subAFiles = Dir.files(SUB_A)
+assert_wrap(list_contains(subAFiles, "file_a.txt"), "2.6: nested dir listing")
+
+
+// ============================================================================
+// SECTION 3: OPEN + HANDLE STATE
+// ============================================================================
+print("--- [3] Open + handle state ---")
+
+var d = Dir.open(ROOT)
+assert_wrap(d != null, "3.1: Dir.open returns handle")
+assert_wrap(d.path() == ROOT, "3.2: path() matches")
+
+assert_wrap(d.dirExists("a"),                "3.3: dirExists relative")
+assert_wrap(d.dirExists("missing") == false, "3.4: dirExists missing")
+assert_wrap(d.fileExists("file1.txt"),       "3.5: fileExists relative")
+assert_wrap(d.fileExists("a") == false,      "3.6: fileExists on dir -> false")
+
+// changeDir relative.
+assert_wrap(d.changeDir("a"), "3.7: changeDir into subdir")
+assert_wrap(d.path() == SUB_A, "3.8: path() reflects changeDir")
+assert_wrap(d.changeDir(".."), "3.9: changeDir parent")
+assert_wrap(d.path() == ROOT, "3.10: path() reflects .. change")
+
+// Failed changeDir leaves handle valid and path unchanged.
+assert_wrap(d.changeDir("nope_no_such_subdir") == false, "3.11: changeDir missing returns false")
+assert_wrap(d.path() == ROOT, "3.12: path() unchanged after failed changeDir")
+
+// Permissions (at minimum not raising; /tmp is readable & writable for the user).
+assert_wrap(d.isReadable("a"),  "3.13: isReadable subdir")
+assert_wrap(d.isWritable("a"),  "3.14: isWritable subdir")
+
+
+// ============================================================================
+// SECTION 4: OPEN FAILURE
+// ============================================================================
+print("--- [4] Open failure ---")
+
+var miss = Dir.open("/tmp/zym_cli_dir_test_does_not_exist")
+assert_wrap(miss == null, "4.1: Dir.open missing path returns null")
+
+
+// ============================================================================
+// SECTION 5: HANDLE MUTATIONS (copy / rename / remove)
+// ============================================================================
+print("--- [5] Handle mutations ---")
+
+assert_wrap(d.copy(F2, F_COPY), "5.1: d.copy")
+assert_wrap(File.exists(F_COPY), "5.2: copy produced file")
+assert_wrap(File.readText(F_COPY) == "two", "5.3: copy content preserved")
+
+assert_wrap(d.rename(F_COPY, F_MOVE), "5.4: d.rename across dirs")
+assert_wrap(File.exists(F_COPY) == false, "5.5: rename removed source")
+assert_wrap(File.exists(F_MOVE), "5.6: rename placed at dest")
+
+assert_wrap(d.remove(F_MOVE), "5.7: d.remove file by absolute path")
+assert_wrap(File.exists(F_MOVE) == false, "5.8: remove cleared file")
+
+// d.makeDir relative to current dir.
+assert_wrap(d.makeDir("mkd_rel"), "5.9: d.makeDir relative")
+assert_wrap(Dir.exists("/tmp/zym_cli_dir_test/mkd_rel"), "5.10: relative dir created")
+assert_wrap(d.remove("mkd_rel"), "5.11: d.remove relative empty dir")
+
+// d.makeDirRecursive
+assert_wrap(d.makeDirRecursive("chain/of/dirs"), "5.12: d.makeDirRecursive relative chain")
+assert_wrap(Dir.exists("/tmp/zym_cli_dir_test/chain/of/dirs"), "5.13: recursive chain exists")
+
+
+// ============================================================================
+// SECTION 6: SNAPSHOT ENUMERATION (instance)
+// ============================================================================
+print("--- [6] Instance enumeration (snapshot) ---")
+
+var fs2 = d.files()
+assert_wrap(list_contains(fs2, "file1.txt"), "6.1: d.files() includes file1.txt")
+
+var ds2 = d.directories()
+assert_wrap(list_contains(ds2, "a"), "6.2: d.directories() includes a")
+assert_wrap(list_contains(ds2, "b"), "6.3: d.directories() includes b")
+assert_wrap(list_contains(ds2, "chain"), "6.4: d.directories() includes chain")
+
+
+// ============================================================================
+// SECTION 7: ITERATOR ENUMERATION
+// ============================================================================
+print("--- [7] Iterator enumeration ---")
+
+assert_wrap(d.listBegin(), "7.1: listBegin returns true")
+
+var sawFile = false
+var sawDirA = false
+var itered = 0
+var cur = d.listNext()
+while (cur != null) {
+    itered = itered + 1
+    if (cur == "file1.txt") {
+        sawFile = true
+        assert_wrap(d.listCurrentIsDir() == false, "7.2: current is file")
+    }
+    if (cur == "a") {
+        sawDirA = true
+        assert_wrap(d.listCurrentIsDir(), "7.3: current is dir")
+    }
+    cur = d.listNext()
+}
+d.listEnd()
+
+assert_wrap(sawFile, "7.4: iterator saw file1.txt")
+assert_wrap(sawDirA, "7.5: iterator saw dir a")
+assert_wrap(itered >= 3, "7.6: iterator visited at least 3 entries")
+
+
+// ============================================================================
+// SECTION 8: LISTING FILTERS
+// ============================================================================
+print("--- [8] Listing filters ---")
+
+// Set + getter round-trip.
+d.setIncludeNavigational(true)
+assert_wrap(d.includeNavigational(), "8.1: setIncludeNavigational(true) round-trip")
+d.setIncludeNavigational(false)
+assert_wrap(d.includeNavigational() == false, "8.2: setIncludeNavigational(false) round-trip")
+
+d.setIncludeHidden(true)
+assert_wrap(d.includeHidden(), "8.3: setIncludeHidden(true) round-trip")
+d.setIncludeHidden(false)
+assert_wrap(d.includeHidden() == false, "8.4: setIncludeHidden(false) round-trip")
+
+// With navigational on, iteration must include "." and "..".
+d.setIncludeNavigational(true)
+d.listBegin()
+var sawDot = false
+var sawDotDot = false
+var x = d.listNext()
+while (x != null) {
+    if (x == ".")  { sawDot    = true }
+    if (x == "..") { sawDotDot = true }
+    x = d.listNext()
+}
+d.listEnd()
+d.setIncludeNavigational(false)
+assert_wrap(sawDot,    "8.5: navigational includes .")
+assert_wrap(sawDotDot, "8.6: navigational includes ..")
+
+// Hidden files appear when the filter is enabled.
+File.writeText("/tmp/zym_cli_dir_test/.hidden", "h")
+d.setIncludeHidden(true)
+var fsHidden = d.files()
+assert_wrap(list_contains(fsHidden, ".hidden"), "8.7: hidden file shown when enabled")
+d.setIncludeHidden(false)
+var fsNoHidden = d.files()
+assert_wrap(list_contains(fsNoHidden, ".hidden") == false, "8.8: hidden file hidden when disabled")
+File.remove("/tmp/zym_cli_dir_test/.hidden")
+
+
+// ============================================================================
+// SECTION 9: METADATA + DRIVES
+// ============================================================================
+print("--- [9] Metadata + drives ---")
+
+var fs_type = d.filesystemType()
+assert_wrap(length(fs_type) >= 0, "9.1: filesystemType returns a string")
+
+// isCaseSensitive is platform/fs-dependent; only assert the call works & returns bool.
+var cs = d.isCaseSensitive(".")
+assert_wrap(cs == true || cs == false, "9.2: isCaseSensitive returns a bool")
+
+// Drives: on Unix, driveCount is typically 0. Just assert it's a number >= 0.
+var dcS = Dir.driveCount()
+assert_wrap(dcS >= 0, "9.3: static driveCount is non-negative")
+var dcI = d.driveCount()
+assert_wrap(dcI >= 0, "9.4: instance driveCount is non-negative")
+
+// currentDrive should be reachable without raising; value may be 0 on Unix.
+var cd = d.currentDrive()
+assert_wrap(cd >= 0, "9.5: currentDrive returns a number")
+
+// Space-left is platform dependent; only assert it is a number and not obviously broken.
+var sl = d.spaceLeft()
+assert_wrap(sl >= 0, "9.6: spaceLeft >= 0")
+
+
+// ============================================================================
+// SECTION 10: SYMLINKS
+// ============================================================================
+print("--- [10] Symlinks ---")
+
+// createLink takes (source, destination). Treat failure as "filesystem / perms
+// do not support it" and skip the follow-up assertions rather than hard-fail.
+var linked = d.createLink(SUB_A, LINK)
+if (linked) {
+    assert_wrap(d.isLink("link_to_a"), "10.1: isLink true for created symlink")
+    assert_wrap(d.readLink("link_to_a") == SUB_A, "10.2: readLink returns target")
+    assert_wrap(d.isLink("a") == false, "10.3: isLink false for real dir")
+    File.remove(LINK)
+} else {
+    print("    (symlink creation unavailable; skipping 10.x)")
+}
+
+
+// ============================================================================
+// SECTION 11: openTemp
+// ============================================================================
+print("--- [11] openTemp ---")
+
+var t = Dir.openTemp("zym_cli_dir_temp_", false)
+assert_wrap(t != null, "11.1: openTemp returns a handle")
+var tPath = t.path()
+assert_wrap(length(tPath) > 0, "11.2: openTemp path is non-empty")
+assert_wrap(Dir.exists(tPath), "11.3: openTemp dir exists on disk")
+
+// Keep=false means the directory will be cleaned when the handle is released.
+// We still exercise the handle first.
+File.writeText(tPath + "/marker", "x")
+assert_wrap(list_contains(t.files(), "marker"), "11.4: openTemp handle lists contents")
+
+
+// ============================================================================
+// SECTION 12: eraseContentsRecursive (destructive)
+// ============================================================================
+print("--- [12] eraseContentsRecursive ---")
+
+// Build an isolated subtree so the rest of the suite is unaffected.
+var BOMB = "/tmp/zym_cli_dir_test/bomb"
+Dir.makeDirRecursive(BOMB + "/x/y")
+File.writeText(BOMB + "/top.txt",   "t")
+File.writeText(BOMB + "/x/mid.txt", "m")
+File.writeText(BOMB + "/x/y/bot",   "b")
+
+var bomb = Dir.open(BOMB)
+assert_wrap(bomb != null, "12.1: open bomb dir")
+assert_wrap(bomb.eraseContentsRecursive(), "12.2: eraseContentsRecursive returns true")
+assert_wrap(length(bomb.files()) == 0, "12.3: no files remain")
+assert_wrap(length(bomb.directories()) == 0, "12.4: no subdirs remain")
+// The directory itself still exists; only contents were erased.
+assert_wrap(Dir.exists(BOMB), "12.5: target dir still present")
+assert_wrap(Dir.remove(BOMB), "12.6: now-empty target dir removable")
+
+
+// ============================================================================
+// FINAL CLEANUP
+// ============================================================================
+print("--- cleanup ---")
+
+File.remove(F1)
+File.remove(F2)
+File.remove(F_COPY)
+File.remove(F_MOVE)
+
+// Tear down the chain we built in section 5.
+Dir.remove("/tmp/zym_cli_dir_test/chain/of/dirs")
+Dir.remove("/tmp/zym_cli_dir_test/chain/of")
+Dir.remove("/tmp/zym_cli_dir_test/chain")
+
+Dir.remove(DEEP)
+Dir.remove("/tmp/zym_cli_dir_test/a/deep")
+Dir.remove(SUB_A)
+Dir.remove(SUB_B)
+Dir.remove(ROOT)
+
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

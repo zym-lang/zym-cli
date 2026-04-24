@@ -156,10 +156,10 @@ methods (`decodeU8` / `decodeI8` / `encodeU8` / `encodeI8`) accept the
 argument for API symmetry but ignore it.
 
 ```zym
-let b = Buffer.new(4)
-b.encodeU32(0, 0x11223344, "be")   // bytes: 11 22 33 44
-print "%n", b.decodeU32(0, "be")   // 287454020 (0x11223344)
-print "%n", b.decodeU32(0)         // 1144201745 (0x44332211) - read as LE
+var b = Buffer.new(4)
+b.encodeU32(0, 0x11223344, "be")       // bytes: 11 22 33 44
+print("%n", b.decodeU32(0, "be"))      // 287454020 (0x11223344)
+print("%n", b.decodeU32(0))            // 1144201745 (0x44332211) - read as LE
 ```
 
 Choose the endianness at every call site; there is no buffer-wide mode.
@@ -169,22 +169,22 @@ Choose the endianness at every call site; there is no buffer-wide mode.
 ## Example
 
 ```zym
-let b = Buffer.new(8)
+var b = Buffer.new(8)
 b.encodeU32(0, 0xCAFEBABE)
 b.encodeI32(4, 42)
 
-print "size: %n", b.size()
-print "hex:  %s", b.hex()
+print("size: %n", b.size())
+print("hex:  %s", b.hex())
 
-print "magic: %n", b.decodeU32(0)
-print "value: %n", b.decodeI32(4)
+print("magic: %n", b.decodeU32(0))
+print("value: %n", b.decodeI32(4))
 
-let c = Buffer.fromString("hi")
-print "utf8: %s", c.toUtf8()
-print "hex:  %s", c.hex()
+var c = Buffer.fromString("hi")
+print("utf8: %s", c.toUtf8())
+print("hex:  %s", c.hex())
 
-let d = b.concat(c)
-print "combined size: %n", d.size()
+var d = b.concat(c)
+print("combined size: %n", d.size())
 ```
 
 ---

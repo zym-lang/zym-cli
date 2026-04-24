@@ -48,6 +48,11 @@ static bool reqString(ZymVM* vm, ZymValue v, const char* where, String* out) {
 // Forward decl: builds an instance map wrapping a fresh PBA copy.
 static ZymValue makeInstance(ZymVM* vm, const PackedByteArray& src);
 
+// External entry point for other natives (e.g. File) that need to return buffers.
+ZymValue makeBufferInstance(ZymVM* vm, const PackedByteArray& src) {
+    return makeInstance(vm, src);
+}
+
 static bool reqBuffer(ZymVM* vm, ZymValue v, const char* where, PackedByteArray** out) {
     if (zym_isMap(v)) {
         ZymValue ctx = zym_mapGet(vm, v, "__pba__");

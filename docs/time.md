@@ -75,17 +75,16 @@ Input maps may carry any subset of the datetime keys; missing fields default to 
 ## Example
 
 ```zym
-let started = Time.ticksMsec()
+var started = Time.ticksMsec()
+print("now unix: %n", Time.now())
+print("local:    %s", Time.datetimeString(false, true))
+print("utc:      %s", Time.datetimeString(true, false))
 
-print "now unix: %n", Time.now()
-print "local:    %s", Time.datetimeString(false, true)
-print "utc:      %s", Time.datetimeString(true, false)
-
-let dt = Time.datetime(true)
-print "year=%n month=%n day=%n", dt.year, dt.month, dt.day
+var dt = Time.datetime(true)
+print("year=%n month=%n day=%n", dt.year, dt.month, dt.day)
 
 Time.sleep(250)
-print "elapsed: %n ms", Time.ticksMsec() - started
+print("elapsed: %n ms", Time.ticksMsec() - started)
 ```
 
 ---

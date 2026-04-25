@@ -1,0 +1,42 @@
+// A classic [#####-----] progress bar that updates in place.
+
+var total = 60
+var width = 40
+
+Console.writeLine("Downloading something important...")
+Console.hideCursor()
+
+for (var i = 0; i <= total; i = i + 1) {
+    if (i > 0) {
+        Console.moveCursorUp(1)
+    }
+    Console.write("\r")
+    Console.clearLine()
+
+    var pct = i * 100 / total
+    var filled = floor(width * i / total)
+
+    var bar = ""
+    for (var k = 0; k < width; k = k + 1) {
+        if (k < filled) {
+            bar = bar + "#"
+        } else {
+            bar = bar + "-"
+        }
+    }
+
+    Console.setColor("green")
+    Console.write("[")
+    Console.write(bar)
+    Console.write("] ")
+    Console.reset()
+    print("%n%%  (%n / %n)", pct, i, total)
+    Console.flush()
+
+    Time.sleep(30)
+}
+
+Console.showCursor()
+Console.setColor("brightGreen")
+Console.writeLine("done.")
+Console.reset()

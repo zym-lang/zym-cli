@@ -1,0 +1,123 @@
+// A short Matrix-style "falling green columns" demo.
+
+var w = Console.getWidth()
+var h = Console.getHeight()
+if (w < 20) { w = 20 }
+if (h < 10) { h = 10 }
+
+// Use a fixed list of single-byte glyphs to keep things simple.
+var chars = ["0","1","#","@","*","+","=","-","_","/","\\","<",">","|","%","$",
+             "A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P"]
+var chCount = length(chars)
+
+// One state per column: [y, speed]. Pre-size with zeros, then seed.
+var cols = []
+{
+    // Build a list of length w via repeated indexing won't work; use a literal of N zeros via concat trick.
+    // Lists can't grow in Zym, but we can index-assign within bounds, so we preallocate by writing
+    // out a literal-sized template once.
+    var template = []
+    var i = 0
+    // We use a fixed cap of 256 columns; if the terminal is wider, the matrix just stops at column 256.
+    var cap = 256
+    if (w > cap) { w = cap }
+    template = [
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],
+        [0,0],[0,0],[0,0],[0,0],[0,0],[0,0]
+    ]
+    cols = template
+}
+
+// Seed initial positions.
+for (var i = 0; i < w; i = i + 1) {
+    var seed = (Time.ticksMsec() + i * 31) % h
+    cols[i] = [seed, 1 + (i % 3)]
+}
+
+Console.useAltScreen()
+Console.hideCursor()
+Console.clear()
+
+var frames = 120
+var trailLen = 6
+
+for (var f = 0; f < frames; f = f + 1) {
+    for (var i = 0; i < w; i = i + 1) {
+        var s = cols[i]
+        var y = s[0]
+        var spd = s[1]
+
+        // Head: bright white char.
+        if (y >= 1 and y <= h) {
+            var pickH = (y * 7 + i * 13 + f) % chCount
+            Console.moveCursor(y, i + 1)
+            Console.setColor("brightWhite")
+            Console.setBold(true)
+            Console.write(chars[pickH])
+        }
+
+        // Trail.
+        for (var k = 1; k <= trailLen; k = k + 1) {
+            var ty = y - k
+            if (ty >= 1 and ty <= h) {
+                Console.moveCursor(ty, i + 1)
+                if (k <= 2) {
+                    Console.setColor("brightGreen")
+                } else {
+                    Console.setColor("green")
+                }
+                if (k >= 5) { Console.setDim(true) }
+                var pickT = (ty * 11 + i * 7 + f) % chCount
+                Console.write(chars[pickT])
+                Console.setDim(false)
+            }
+        }
+
+        // Erase the cell that just left the trail's tail.
+        var ey = y - trailLen - 1
+        if (ey >= 1 and ey <= h) {
+            Console.moveCursor(ey, i + 1)
+            Console.write(" ")
+        }
+
+        if (y - trailLen > h) {
+            cols[i] = [0, 1 + ((i + f) % 3)]
+        } else {
+            cols[i] = [y + spd, spd]
+        }
+
+        Console.reset()
+    }
+
+    Console.flush()
+    Time.sleep(50)
+}
+
+Console.useMainScreen()
+Console.showCursor()
+Console.reset()
+Console.writeLine("rabbit hole over.")

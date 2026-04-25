@@ -1,0 +1,43 @@
+// Demonstrates the six text style toggles.
+
+var sample = "the quick brown fox"
+
+Console.write("normal:    ")
+Console.writeLine(sample)
+
+Console.write("bold:      ")
+Console.setBold(true)
+Console.writeLine(sample)
+Console.setBold(false)
+
+Console.write("dim:       ")
+Console.setDim(true)
+Console.writeLine(sample)
+Console.setDim(false)
+
+Console.write("italic:    ")
+Console.setItalic(true)
+Console.writeLine(sample)
+Console.setItalic(false)
+
+Console.write("underline: ")
+Console.setUnderline(true)
+Console.writeLine(sample)
+Console.setUnderline(false)
+
+Console.write("reverse:   ")
+Console.setReverse(true)
+Console.writeLine(sample)
+Console.setReverse(false)
+
+Console.write("strike:    ")
+Console.setStrikethrough(true)
+Console.writeLine(sample)
+Console.setStrikethrough(false)
+
+Console.write("combo:     ")
+Console.setBold(true)
+Console.setUnderline(true)
+Console.setColor("cyan")
+Console.writeLine("bold + underline + cyan")
+Console.reset()

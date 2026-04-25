@@ -1,0 +1,59 @@
+// 16 named colors, bright variants, and a truecolor gradient.
+
+var names = [
+    "black",   "red",     "green",   "yellow",
+    "blue",    "magenta", "cyan",    "white"
+]
+
+var bright = [
+    "brightBlack",   "brightRed",     "brightGreen",   "brightYellow",
+    "brightBlue",    "brightMagenta", "brightCyan",    "brightWhite"
+]
+
+Console.writeLine("16 named colors:")
+for (var i = 0; i < length(names); i = i + 1) {
+    Console.setColor(names[i])
+    Console.write(" " + names[i] + " ")
+}
+Console.reset()
+Console.writeLine("")
+for (var i = 0; i < length(bright); i = i + 1) {
+    Console.setColor(bright[i])
+    Console.write(" " + bright[i] + " ")
+}
+Console.reset()
+Console.writeLine("")
+Console.writeLine("")
+
+Console.writeLine("Backgrounds:")
+for (var i = 0; i < length(names); i = i + 1) {
+    Console.setBackgroundColor(names[i])
+    Console.setColor("black")
+    Console.write(" " + names[i] + " ")
+    Console.reset()
+}
+Console.writeLine("")
+Console.writeLine("")
+
+Console.writeLine("Truecolor gradient (red -> green -> blue):")
+var width = Console.getWidth()
+if (width > 60) { width = 60 }
+for (var x = 0; x < width; x = x + 1) {
+    var t = x * 1.0 / (width - 1)
+    var r = 0
+    var g = 0
+    var b = 0
+    if (t < 0.5) {
+        var u = t * 2
+        r = floor(255 * (1 - u))
+        g = floor(255 * u)
+    } else {
+        var u = (t - 0.5) * 2
+        g = floor(255 * (1 - u))
+        b = floor(255 * u)
+    }
+    Console.setBackgroundColorRGB(r, g, b)
+    Console.write(" ")
+}
+Console.reset()
+Console.writeLine("")

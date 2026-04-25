@@ -1,0 +1,93 @@
+// ============================================================================
+// STRING REGRESSION TESTS
+// Focus: non-ASCII (multi-byte UTF-8) literals must survive the
+// compile -> serialize -> deserialize -> run pipeline that the CLI uses.
+// Pre-fix, the bytecode serializer wrote the codepoint count instead of
+// the byte length, truncating multi-byte literals to their first byte.
+// ============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+        print("")
+    }
+}
+
+print("=== STARTING STRING TESTS ===")
+print("")
+
+// ----------------------------------------------------------------------------
+// SECTION 1: ASCII baseline
+// ----------------------------------------------------------------------------
+print("--- [1] ASCII baseline ---")
+assert_wrap(length("") == 0, "1.1: empty string")
+assert_wrap(length("abc") == 3, "1.2: ascii length")
+assert_wrap("abc" == "abc", "1.3: ascii equality")
+
+// ----------------------------------------------------------------------------
+// SECTION 2: Multi-byte UTF-8 literals (single codepoint each)
+// ----------------------------------------------------------------------------
+print("--- [2] Multi-byte UTF-8 literals ---")
+
+// 2-byte codepoint (U+00E9 'é')
+var e_acute = "é"
+assert_wrap(length(e_acute) == 1, "2.1: 2-byte codepoint length is 1")
+
+// 3-byte codepoint (U+2800 BRAILLE PATTERN BLANK ⠀ -> use ⠋ U+280B)
+var braille = "⠋"
+assert_wrap(length(braille) == 1, "2.2: 3-byte codepoint length is 1")
+
+// 4-byte codepoint (U+1F600 GRINNING FACE)
+var smile = "😀"
+assert_wrap(length(smile) == 1, "2.3: 4-byte codepoint length is 1")
+
+// ----------------------------------------------------------------------------
+// SECTION 3: Multi-codepoint sequences
+// ----------------------------------------------------------------------------
+print("--- [3] Multi-codepoint sequences ---")
+
+// If the serializer truncates to the codepoint count and writes only
+// that many bytes, the deserialized string has 1 codepoint instead of 3.
+assert_wrap(length("⠋⠋⠋") == 3, "3.1: 3 braille codepoints")
+assert_wrap(length("ééé") == 3, "3.2: 3 two-byte codepoints")
+assert_wrap(length("😀😀") == 2, "3.3: 2 four-byte codepoints")
+assert_wrap(length("a⠋b") == 3, "3.4: mixed ASCII and 3-byte")
+assert_wrap(length("ⓐⓑⓒⓓⓔ") == 5, "3.5: 5 circled latin letters")
+
+// ----------------------------------------------------------------------------
+// SECTION 4: Equality across literal forms
+// ----------------------------------------------------------------------------
+print("--- [4] Equality across forms ---")
+assert_wrap("⠋" == "\xe2\xa0\x8b", "4.1: literal equals \\x escapes")
+assert_wrap("é" == "\xc3\xa9",     "4.2: 'é' equals \\xc3\\xa9")
+assert_wrap("\u00e9" == "é",       "4.3: \\u00e9 equals 'é'")
+
+// ----------------------------------------------------------------------------
+// SECTION 5: Concatenation preserves bytes
+// ----------------------------------------------------------------------------
+print("--- [5] Concatenation ---")
+var s = "⠋" + "⠙" + "⠹"
+assert_wrap(length(s) == 3, "5.1: concat 3 braille -> 3 codepoints")
+assert_wrap(s == "⠋⠙⠹", "5.2: concat equals literal")
+
+// ----------------------------------------------------------------------------
+// RESULTS
+// ----------------------------------------------------------------------------
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %n", testsPassed)
+print("Tests Failed: %n", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED.")
+}
+print("==========================================================")

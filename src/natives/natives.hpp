@@ -9,3 +9,4 @@ ZymValue nativeTime_create(ZymVM* vm);
 ZymValue nativeBuffer_create(ZymVM* vm);
 ZymValue nativeFile_create(ZymVM* vm);
 ZymValue nativeDir_create(ZymVM* vm);
+ZymValue nativeConsole_create(ZymVM* vm);

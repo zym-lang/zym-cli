@@ -1,0 +1,34 @@
+// Character-by-character "typing" effect.
+// Iterates the bytes of a Buffer for fast char-at-a-time output.
+
+var lines = [
+    "Hello, world.",
+    "",
+    "Welcome to the Zym console examples.",
+    "Watch each character get typed out, one at a time...",
+    "",
+    "(yes, this is just sleep + write in a loop)"
+]
+
+Console.hideCursor()
+
+for (var i = 0; i < length(lines); i = i + 1) {
+    var line = lines[i]
+    var buf = Buffer.fromString(line)
+    var n = buf.size()
+
+    for (var k = 0; k < n; k = k + 1) {
+        // Slice + toUtf8 lets us pull a single (UTF-8) byte back out as a string.
+        var ch = buf.slice(k, k + 1).toUtf8()
+        Console.setColor("brightWhite")
+        Console.write(ch)
+        Console.reset()
+        Console.flush()
+        Time.sleep(35)
+    }
+
+    Console.writeLine("")
+    Time.sleep(120)
+}
+
+Console.showCursor()

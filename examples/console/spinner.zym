@@ -1,0 +1,36 @@
+// A braille spinner with elapsed seconds.
+
+var frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+var iters = 60
+
+Console.hideCursor()
+var start = Time.ticksMsec()
+
+for (var i = 0; i < iters; i = i + 1) {
+    if (i > 0) { Console.moveCursorUp(1) }
+    Console.write("\r")
+    Console.clearLine()
+
+    var frame = frames[i % length(frames)]
+    var elapsed = Time.ticksMsec() - start
+
+    Console.setColor("cyan")
+    Console.write(frame)
+    Console.reset()
+    Console.write(" working... ")
+    Console.setColor("brightBlack")
+    print("(%nms)", elapsed)
+    Console.reset()
+    Console.flush()
+
+    Time.sleep(80)
+}
+
+Console.moveCursorUp(1)
+Console.write("\r")
+Console.clearLine()
+Console.setColor("brightGreen")
+Console.write("✔ ")
+Console.reset()
+Console.writeLine("done.")
+Console.showCursor()

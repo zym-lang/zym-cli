@@ -1,0 +1,101 @@
+// A small live "dashboard" demo: header, three animated bars, and a clock.
+// Runs for ~6 seconds on the alternate screen.
+
+var w = Console.getWidth()
+if (w < 50) { w = 50 }
+
+var barWidth = w - 22
+if (barWidth < 10) { barWidth = 10 }
+
+Console.useAltScreen()
+Console.hideCursor()
+Console.clear()
+
+// --- Header ---
+Console.moveCursor(1, 1)
+Console.setBackgroundColor("blue")
+Console.setColor("brightWhite")
+Console.setBold(true)
+var headPad = ""
+for (var i = 0; i < w; i = i + 1) { headPad = headPad + " " }
+Console.write(headPad)
+Console.moveCursor(1, 2)
+Console.write(" ZYM CONSOLE DASHBOARD ")
+Console.moveCursor(1, w - 14)
+Console.write(" demo  ")
+Console.reset()
+
+var labels = ["CPU ", "MEM ", "NET "]
+var phases = [0, 90, 180]
+var colors = ["brightCyan", "brightMagenta", "brightYellow"]
+var startRow = 4
+
+var start = Time.ticksMsec()
+var duration = 6000
+
+while (true) {
+    var now = Time.ticksMsec()
+    var elapsed = now - start
+    if (elapsed > duration) { break }
+
+    // --- Bars ---
+    for (var i = 0; i < 3; i = i + 1) {
+        var t = (elapsed / 20 + phases[i]) % 360
+        // sine-ish via piecewise quadratic; keep it simple, value in [0..100].
+        var u = (t / 360.0)
+        var v = u
+        if (v > 0.5) { v = 1 - v }
+        var pct = floor(v * 200)
+        if (pct > 100) { pct = 100 }
+        var filled = floor(barWidth * pct / 100)
+
+        Console.moveCursor(startRow + i * 2, 2)
+        Console.setColor("brightWhite")
+        Console.setBold(true)
+        Console.write(labels[i])
+        Console.reset()
+
+        Console.write("[")
+        Console.setColor(colors[i])
+        for (var k = 0; k < barWidth; k = k + 1) {
+            if (k < filled) {
+                Console.write("█")
+            } else {
+                Console.write(" ")
+            }
+        }
+        Console.reset()
+        Console.write("] ")
+        print("%n%%", pct)
+    }
+
+    // --- Clock ---
+    var dt = Time.datetime(false)
+    Console.moveCursor(startRow + 7, 2)
+    Console.setColor("brightBlack")
+    Console.write("clock: ")
+    Console.reset()
+    Console.setColor("brightWhite")
+    print("%n-%n-%n %n:%n:%n", dt["year"], dt["month"], dt["day"], dt["hour"], dt["minute"], dt["second"])
+    Console.reset()
+
+    // --- Uptime line ---
+    Console.moveCursor(startRow + 9, 2)
+    Console.setColor("brightBlack")
+    Console.write("uptime: ")
+    Console.reset()
+    print("%n ms", elapsed)
+
+    // --- Footer ---
+    Console.moveCursor(startRow + 11, 2)
+    Console.setColor("brightBlack")
+    Console.write("press Ctrl+C to exit (or wait, it stops itself)")
+    Console.reset()
+
+    Console.flush()
+    Time.sleep(80)
+}
+
+Console.useMainScreen()
+Console.showCursor()
+Console.writeLine("dashboard demo finished.")

@@ -1,0 +1,48 @@
+// Animated rainbow text with truecolor.
+// Each character gets a hue that drifts a little every frame.
+
+var text = "  R A I N B O W   T E X T   I N   T H E   T E R M I N A L  "
+var frames = 80
+
+Console.hideCursor()
+
+var buf = Buffer.fromString(text)
+var n = buf.size()
+
+for (var f = 0; f < frames; f = f + 1) {
+    if (f > 0) { Console.moveCursorUp(1) }
+    Console.write("\r")
+    Console.clearLine()
+
+    for (var i = 0; i < n; i = i + 1) {
+        var ch = buf.slice(i, i + 1).toUtf8()
+        var hue = (i * 12 + f * 8) % 360
+
+        // Inlined HSV (S=1, V=1) -> RGB across 6 segments.
+        var seg = floor(hue / 60)
+        var frac = (hue / 60.0) - seg
+        var c = 255
+        var x = floor(c * (1 - frac))
+        var y = floor(c * frac)
+        var rr = 0
+        var gg = 0
+        var bb = 0
+        if (seg == 0) { rr = c; gg = y; bb = 0 }
+        if (seg == 1) { rr = x; gg = c; bb = 0 }
+        if (seg == 2) { rr = 0; gg = c; bb = y }
+        if (seg == 3) { rr = 0; gg = x; bb = c }
+        if (seg == 4) { rr = y; gg = 0; bb = c }
+        if (seg == 5) { rr = c; gg = 0; bb = x }
+
+        Console.setColorRGB(rr, gg, bb)
+        Console.setBold(true)
+        Console.write(ch)
+    }
+    Console.reset()
+    Console.writeLine("")
+    Console.flush()
+
+    Time.sleep(50)
+}
+
+Console.showCursor()

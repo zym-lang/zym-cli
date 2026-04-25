@@ -1,0 +1,91 @@
+// Bouncing ball on the alternate screen.
+
+var w = Console.getWidth()
+var h = Console.getHeight()
+if (w < 20) { w = 20 }
+if (h < 10) { h = 10 }
+// Reserve the last terminal row: a `print` newline on the bottom row
+// would scroll the alternate screen. Border ends one row above status.
+var W = w
+var H = h - 2
+
+Console.useAltScreen()
+Console.hideCursor()
+Console.clear()
+
+// Draw border once.
+Console.setColor("brightBlack")
+Console.moveCursor(1, 1)
+var top = ""
+for (var i = 0; i < W; i = i + 1) { top = top + "─" }
+Console.write(top)
+Console.moveCursor(H, 1)
+Console.write(top)
+for (var r = 1; r <= H; r = r + 1) {
+    Console.moveCursor(r, 1)
+    Console.write("│")
+    Console.moveCursor(r, W)
+    Console.write("│")
+}
+Console.moveCursor(1, 1)
+Console.write("┌")
+Console.moveCursor(1, W)
+Console.write("┐")
+Console.moveCursor(H, 1)
+Console.write("└")
+Console.moveCursor(H, W)
+Console.write("┘")
+Console.reset()
+
+var x = 4
+var y = 3
+var dx = 1
+var dy = 1
+var prevX = x
+var prevY = y
+var frames = 200
+
+for (var f = 0; f < frames; f = f + 1) {
+    // Erase previous position.
+    Console.moveCursor(prevY, prevX)
+    Console.write(" ")
+
+    // Draw current ball with a hue cycling on every frame.
+    var hue = (f * 7) % 360
+    var seg = floor(hue / 60)
+    var rr = 0
+    var gg = 0
+    var bb = 0
+    if (seg == 0) { rr = 255; gg = floor(255 * (hue / 60)) }
+    if (seg == 1) { rr = floor(255 * (1 - (hue - 60) / 60)); gg = 255 }
+    if (seg == 2) { gg = 255; bb = floor(255 * ((hue - 120) / 60)) }
+    if (seg == 3) { gg = floor(255 * (1 - (hue - 180) / 60)); bb = 255 }
+    if (seg == 4) { rr = floor(255 * ((hue - 240) / 60)); bb = 255 }
+    if (seg == 5) { rr = 255; bb = floor(255 * (1 - (hue - 300) / 60)) }
+    Console.setColorRGB(rr, gg, bb)
+    Console.moveCursor(y, x)
+    Console.write("●")
+    Console.reset()
+
+    // Status line above the reserved bottom row to avoid newline scroll.
+    Console.moveCursor(h - 1, 1)
+    Console.clearLine()
+    Console.setColor("brightBlack")
+    print("frame %n / %n   pos=(%n,%n)", f + 1, frames, x, y)
+    Console.reset()
+
+    Console.flush()
+    prevX = x
+    prevY = y
+
+    x = x + dx
+    y = y + dy
+    if (x <= 2 or x >= W - 1) { dx = -dx; x = x + dx + dx }
+    if (y <= 2 or y >= H - 1) { dy = -dy; y = y + dy + dy }
+
+    Time.sleep(40)
+}
+
+Console.useMainScreen()
+Console.showCursor()
+Console.writeLine("ball settled.")

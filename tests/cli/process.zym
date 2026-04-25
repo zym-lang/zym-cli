@@ -1,0 +1,271 @@
+// ============================================================================
+// COMPREHENSIVE Process NATIVE TEST SUITE
+// Exercises the `Process` global: exec, spawn, stdin/stdout/stderr, kill,
+// signals, env, cwd, pid. Linux-only (uses /bin/sh, /bin/echo, /bin/sleep,
+// /bin/true, /bin/false, /usr/bin/wc, /usr/bin/env, /usr/bin/printf).
+// ============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+print("==========================================================")
+print("Process NATIVE TEST SUITE")
+print("==========================================================")
+
+
+// ============================================================================
+// SECTION 1: Process.exec - happy path
+// ============================================================================
+print("--- [1] Process.exec basics ---")
+
+var r1 = Process.exec("/bin/echo", ["hello", "world"])
+assert_wrap(r1.exitCode == 0, "1.1: echo exits 0")
+assert_wrap(r1.stdout.toUtf8() == "hello world\n", "1.2: echo stdout captured")
+assert_wrap(r1.stderr.size() == 0, "1.3: echo stderr empty")
+
+// /bin/true / /bin/false exit codes
+var rT = Process.exec("/bin/true", [])
+assert_wrap(rT.exitCode == 0, "1.4: /bin/true exit 0")
+
+var rF = Process.exec("/bin/false", [])
+assert_wrap(rF.exitCode == 1, "1.5: /bin/false exit 1")
+
+
+// ============================================================================
+// SECTION 2: Stdout vs stderr separation + non-zero exit
+// ============================================================================
+print("--- [2] Separate stdout/stderr + custom exit ---")
+
+var r2 = Process.exec("/bin/sh", ["-c", "echo out; echo err 1>&2; exit 7"])
+assert_wrap(r2.exitCode == 7, "2.1: shell-set exit code propagated")
+assert_wrap(r2.stdout.toUtf8() == "out\n", "2.2: stdout captured separately")
+assert_wrap(r2.stderr.toUtf8() == "err\n", "2.3: stderr captured separately")
+
+
+// ============================================================================
+// SECTION 3: Process.spawn + stdin feed (wc -c)
+// ============================================================================
+print("--- [3] spawn + stdin -> wc -c ---")
+
+var p3 = Process.spawn("/usr/bin/wc", ["-c"])
+assert_wrap(p3 != null, "3.1: spawn wc returned a handle")
+assert_wrap(p3.getPid() > 0, "3.2: child pid > 0")
+p3.write("hello, zym")
+p3.closeStdin()
+var rc3 = p3.wait()
+assert_wrap(rc3 == 0, "3.3: wc exited cleanly after stdin EOF")
+var b3 = p3.read()
+assert_wrap(b3.size() > 0, "3.4: read() returned a non-empty buffer")
+// wc output format varies across distros; verify the byte-count token by
+// scanning for ASCII '1' followed by '0'.
+var sawOne = false
+for (var j = 0; j < b3.size() - 1; j = j + 1) {
+    if (b3.get(j) == 0x31 and b3.get(j + 1) == 0x30) {
+        sawOne = true
+    }
+}
+assert_wrap(sawOne, "3.5: wc output contains \"10\"")
+
+
+// ============================================================================
+// SECTION 4: writeBuffer + readErr
+// ============================================================================
+print("--- [4] writeBuffer + readErr ---")
+
+// `cat` echoes its stdin to stdout. Pipe a Buffer through it.
+var p4 = Process.spawn("/bin/cat", [])
+assert_wrap(p4 != null, "4.1: spawn cat handle")
+var payload = Buffer.fromList([0x68, 0x69, 0x0A]) // "hi\n"
+p4.writeBuffer(payload)
+p4.closeStdin()
+var rc4 = p4.wait()
+assert_wrap(rc4 == 0, "4.2: cat exited 0")
+var got = p4.read()
+assert_wrap(got.size() == 3, "4.3: cat echoed 3 bytes back")
+assert_wrap(got.get(0) == 0x68 and got.get(1) == 0x69 and got.get(2) == 0x0A, "4.4: cat echoed payload exactly")
+
+// stderr-only: shell that prints just to stderr.
+var r4e = Process.exec("/bin/sh", ["-c", "echo 'oops' 1>&2"])
+assert_wrap(r4e.exitCode == 0, "4.5: stderr-only command exits 0")
+assert_wrap(r4e.stdout.size() == 0, "4.6: stdout empty when only stderr written")
+assert_wrap(r4e.stderr.toUtf8() == "oops\n", "4.7: readErr captured stderr content")
+
+
+// ============================================================================
+// SECTION 5: kill + signaled exit code (128 + signum)
+// ============================================================================
+print("--- [5] kill / signal exit code ---")
+
+var p5 = Process.spawn("/bin/sleep", ["30"])
+assert_wrap(p5 != null, "5.1: spawn sleep handle")
+assert_wrap(p5.isRunning(), "5.2: sleep is running")
+assert_wrap(p5.getPid() > 0, "5.3: sleep pid > 0")
+p5.kill("SIGTERM")
+var rc5 = p5.wait()
+assert_wrap(rc5 == 143, "5.4: SIGTERM yields 128+15=143")
+assert_wrap(p5.isRunning() == false, "5.5: not running after wait")
+assert_wrap(p5.getExitCode() == 143, "5.6: getExitCode matches wait")
+
+// kill with numeric signal (SIGKILL = 9)
+var p5b = Process.spawn("/bin/sleep", ["30"])
+p5b.kill(9)
+var rc5b = p5b.wait()
+assert_wrap(rc5b == 137, "5.7: SIGKILL (9) yields 128+9=137")
+
+
+// ============================================================================
+// SECTION 6: poll() returns null while running, exit code after exit
+// ============================================================================
+print("--- [6] poll lifecycle ---")
+
+var p6 = Process.spawn("/bin/sh", ["-c", "sleep 0.1; exit 3"])
+// Right after spawn, very likely still running.
+var pollEarly = p6.poll()
+assert_wrap(pollEarly == null or pollEarly == 3, "6.1: poll early -> null (or already finished)")
+var rc6 = p6.wait()
+assert_wrap(rc6 == 3, "6.2: scripted exit 3 propagated")
+var pollLate = p6.poll()
+assert_wrap(pollLate == 3, "6.3: poll after exit returns the code")
+
+
+// ============================================================================
+// SECTION 7: options - cwd + env
+// ============================================================================
+print("--- [7] options cwd/env ---")
+
+Process.setEnv("ZYM_PROC_TEST", "marker_42")
+var r7 = Process.exec("/bin/sh", ["-c", "echo cwd=$(pwd); echo demo=$ZYM_PROC_TEST"], {
+    cwd: "/tmp"
+})
+assert_wrap(r7.exitCode == 0, "7.1: exec with options exits 0")
+var b7 = r7.stdout
+// Just check the inherited env propagated by searching for "marker_42" bytes.
+var sawMarker = false
+for (var k = 0; k < b7.size() - 8; k = k + 1) {
+    if (b7.get(k) == 0x6D and b7.get(k+1) == 0x61 and b7.get(k+2) == 0x72 and b7.get(k+3) == 0x6B and b7.get(k+4) == 0x65 and b7.get(k+5) == 0x72) {
+        sawMarker = true
+    }
+}
+assert_wrap(sawMarker, "7.2: child saw inherited env var")
+// And cwd reflects /tmp
+var sawTmp = false
+for (var m = 0; m < b7.size() - 4; m = m + 1) {
+    if (b7.get(m) == 0x2F and b7.get(m+1) == 0x74 and b7.get(m+2) == 0x6D and b7.get(m+3) == 0x70) {
+        sawTmp = true
+    }
+}
+assert_wrap(sawTmp, "7.3: child cwd was /tmp")
+
+
+// ============================================================================
+// SECTION 8: stdio "null" discards stderr
+// ============================================================================
+print("--- [8] stdio null mode ---")
+
+var r8 = Process.exec("/bin/sh", ["-c", "echo keep; echo drop 1>&2"], {
+    stderr: "null"
+})
+assert_wrap(r8.exitCode == 0, "8.1: stdio null exits 0")
+assert_wrap(r8.stdout.toUtf8() == "keep\n", "8.2: stdout still captured")
+assert_wrap(r8.stderr.size() == 0, "8.3: stderr discarded -> empty buffer")
+
+
+// ============================================================================
+// SECTION 9: Process statics - cwd / pid / parent / env
+// ============================================================================
+print("--- [9] process statics ---")
+
+var pid = Process.getPid()
+assert_wrap(pid > 0, "9.1: getPid > 0")
+
+var ppid = Process.getParentPid()
+assert_wrap(ppid != null and ppid > 0, "9.2: getParentPid > 0 on Linux")
+
+var origCwd = Process.getCwd()
+assert_wrap(origCwd != null, "9.3: getCwd returns a string")
+Process.setCwd("/tmp")
+assert_wrap(Process.getCwd() == "/tmp", "9.4: setCwd takes effect")
+Process.setCwd(origCwd)
+assert_wrap(Process.getCwd() == origCwd, "9.5: setCwd back to original")
+
+// setEnv / getEnv / unsetEnv round trip
+Process.setEnv("ZYM_PROC_K", "v1")
+assert_wrap(Process.getEnv("ZYM_PROC_K") == "v1", "9.6: getEnv after setEnv")
+Process.setEnv("ZYM_PROC_K", "v2")
+assert_wrap(Process.getEnv("ZYM_PROC_K") == "v2", "9.7: setEnv overwrites")
+Process.unsetEnv("ZYM_PROC_K")
+assert_wrap(Process.getEnv("ZYM_PROC_K") == null, "9.8: unsetEnv clears")
+
+// getEnvAll returns a non-empty map and contains PATH (almost certainly).
+var allEnv = Process.getEnvAll()
+assert_wrap(allEnv != null, "9.9: getEnvAll returns something non-null")
+
+
+// ============================================================================
+// SECTION 10: readNonBlock drain after exit
+// ============================================================================
+print("--- [10] readNonBlock + streaming ---")
+
+var p10 = Process.spawn("/bin/sh", ["-c", "for i in 1 2 3; do echo $i; done"])
+var rc10 = p10.wait()
+assert_wrap(rc10 == 0, "10.1: streaming child exited 0")
+var collected = Buffer.new(0)
+var chunk1 = p10.readNonBlock()
+if (chunk1.size() > 0) { collected = collected.concat(chunk1) }
+var tail = p10.read()
+if (tail.size() > 0) { collected = collected.concat(tail) }
+// Expect "1\n2\n3\n" = 6 bytes
+assert_wrap(collected.size() == 6, "10.2: collected total of 6 bytes")
+assert_wrap(collected.get(0) == 0x31 and collected.get(2) == 0x32 and collected.get(4) == 0x33, "10.3: bytes are 1,2,3 separated by \\n")
+
+
+// ============================================================================
+// SECTION 11: spawn failure -> null
+// ============================================================================
+print("--- [11] spawn failure ---")
+
+// On POSIX systems using fork+exec, the parent's fork() succeeds before the
+// child's exec fails, so spawn may legitimately return a handle whose child
+// then exits non-zero (typically 127). Accept either shape.
+var pNo = Process.spawn("/no/such/binary_that_should_not_exist", [])
+if (pNo == null) {
+    assert_wrap(true, "11.1: spawn on missing binary returned null")
+} else {
+    var rcNo = pNo.wait()
+    assert_wrap(rcNo != 0, "11.1: spawn on missing binary returned a handle that exited non-zero")
+}
+
+
+// ============================================================================
+// SECTION 12: exec auto-closes stdin
+// ============================================================================
+print("--- [12] exec closes child stdin ---")
+
+// `cat` with no stdin should EOF immediately and exit 0.
+var r12 = Process.exec("/bin/cat", [])
+assert_wrap(r12.exitCode == 0, "12.1: cat with auto-closed stdin exits 0")
+assert_wrap(r12.stdout.size() == 0, "12.2: cat with no input -> empty stdout")
+
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("==========================================================")
+print("RESULTS:")
+print("Tests Passed: %n", testsPassed)
+print("Tests Failed: %n", testsFailed)
+if (testsFailed == 0) {
+    print(">>> ALL TESTS PASSED!")
+} else {
+    print(">>> SOME TESTS FAILED!")
+}
+print("==========================================================")

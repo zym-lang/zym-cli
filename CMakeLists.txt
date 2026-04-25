@@ -61,6 +61,7 @@ set(ZYM_NATIVE_SOURCES
         src/natives/file.cpp
         src/natives/dir.cpp
         src/natives/console.cpp
+        src/natives/process.cpp
 )
 
 add_executable(zym ${APP_SOURCES} ${ZYM_NATIVE_SOURCES})

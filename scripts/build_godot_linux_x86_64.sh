@@ -54,8 +54,8 @@ cd "${GODOT_DIR}"
 # C TUs are unaffected: they don't include class_db.h, so the shim is never
 # resolved and `-I` is harmless.
 ZYM_SHIM_DIR="${SCRIPT_DIR}/zym_shim"
-ZYM_CCFLAGS="-fvisibility=hidden -ffunction-sections -fdata-sections"
-ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR}"
+ZYM_CCFLAGS="-fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
+ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR} -fno-asynchronous-unwind-tables -fno-unwind-tables"
 
 exec scons \
     platform=linuxbsd \

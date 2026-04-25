@@ -4,9 +4,10 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address,undefined -fno-omit-frame-p
 set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer")
 set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections")
-set(CMAKE_C_FLAGS_RELEASE   "-O3 -march=native -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+set(CMAKE_C_FLAGS_RELEASE   "-O3 -march=native -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
 set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
+#set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections")
 
 set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
 set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
@@ -26,6 +27,7 @@ elseif(PGO_MODE STREQUAL "USE")
 endif()
 
 set(CMAKE_BUILD_TYPE Release)
+set(USE_COMPRESSION ON)
 
 cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)
@@ -166,3 +168,20 @@ target_link_libraries(zym PRIVATE
         -Wl,--no-whole-archive
         pthread dl m
 )
+
+# Post-build compression via UPX. Runs for Release and Tiny builds, gated on
+# USE_COMPRESSION, auto-skipped if `upx` is not available on the host.
+# Debug stays unpacked so symbols / sanitizers remain usable.
+if(USE_COMPRESSION AND (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "Tiny"))
+    find_program(ZYM_UPX_EXECUTABLE upx)
+    if(ZYM_UPX_EXECUTABLE)
+        message(STATUS ">> UPX: found at ${ZYM_UPX_EXECUTABLE} (will pack ${CMAKE_BUILD_TYPE} zym)")
+        add_custom_command(TARGET zym POST_BUILD
+                COMMAND "${ZYM_UPX_EXECUTABLE}" --best --lzma "$<TARGET_FILE:zym>"
+                COMMENT "Compressing $<TARGET_FILE_NAME:zym> with UPX"
+                VERBATIM
+        )
+    else()
+        message(STATUS ">> UPX: not found in PATH; skipping post-build compression")
+    endif()
+endif()

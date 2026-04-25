@@ -28,6 +28,35 @@ fi
 
 cd "${GODOT_DIR}"
 
+# ClassDB-registration neutering (size lever).
+# zym never resolves classes/methods/properties by name through ClassDB; it
+# only calls Godot via direct C++ symbols. We therefore strip every
+# GDREGISTER_*() expansion from the engine *without modifying godot/* by
+# prepending an include-path shim that intercepts the engine header:
+#
+#   scripts/zym_shim/core/object/class_db.h
+#
+# is searched before godot/core/object/class_db.h. The shim does
+# `#include_next "core/object/class_db.h"` to pull in the real engine
+# header, then `#undef`s and redefines the GDREGISTER_* macros to no-ops
+# for the rest of the TU. Net: every _bind_methods / MethodBind /
+# property / signal / enum table the engine would have emitted is gone.
+#
+# We deliberately do NOT use `-include` to force-inject class_db.h into
+# every TU: some Godot TUs (e.g. core/variant/array.cpp,
+# core/variant/dictionary.cpp) compile against intentionally-incomplete
+# `Array`/`Dictionary`/`Object`/`String` types and assert that via
+# STATIC_ASSERT_INCOMPLETE_TYPE. A force-include of class_db.h transitively
+# defines those types and breaks the assertion. The shim approach only
+# triggers for TUs that *already* include class_db.h, so the contract is
+# preserved.
+#
+# C TUs are unaffected: they don't include class_db.h, so the shim is never
+# resolved and `-I` is harmless.
+ZYM_SHIM_DIR="${SCRIPT_DIR}/zym_shim"
+ZYM_CCFLAGS="-fvisibility=hidden -ffunction-sections -fdata-sections"
+ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR}"
+
 exec scons \
     platform=linuxbsd \
     target=template_release \
@@ -68,9 +97,8 @@ exec scons \
     deprecated=no \
     minizip=no \
     brotli=no \
-    use_static_cpp=yes \
     disable_exceptions=yes \
     build_profile="../scripts/zym_profile.gdbuild" \
-    ccflags="-fvisibility=hidden -ffunction-sections -fdata-sections" \
-    cxxflags="-fvisibility-inlines-hidden" \
+    ccflags="${ZYM_CCFLAGS}" \
+    cxxflags="${ZYM_CXXFLAGS}" \
     "$@"

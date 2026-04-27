@@ -30,6 +30,16 @@
 // `DirAccess::open`, `print_line`, `PackedByteArray`, etc.), which are
 // unaffected by what is or isn't registered with ClassDB.
 //
+// Companion shim. scripts/zym_shim/core/object/method_bind.h kills the
+// per-method `MethodBindT<...>` / `MethodBindTC<...>` / `MethodBindTR<...>`
+// / `MethodBindTRC<...>` / `MethodBindTS<...>` / `MethodBindTRS<...>` /
+// `MethodBindVarArgT<...>` / `MethodBindVarArgTR<...>` instantiations
+// (which is where the actual reflection-driven code-size weight lives).
+// `ClassDB::bind_method` template bodies still parse here -- they're
+// reachable from each `_bind_methods()` body but unreachable at runtime
+// because the GDREGISTER macros below are noop'd, so `register_class<T>()`
+// is never invoked and `_bind_methods()` is never called.
+//
 // To disable this lever, drop the `-I${SCRIPT_DIR}/zym_shim` flag from
 // build_godot_linux_x86_64.sh; the build is then byte-identical to a stock
 // Godot static-library build.

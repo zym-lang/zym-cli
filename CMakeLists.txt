@@ -27,7 +27,7 @@ elseif(PGO_MODE STREQUAL "USE")
 endif()
 
 set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION ON)
+set(USE_COMPRESSION OFF)
 
 cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)

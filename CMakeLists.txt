@@ -26,8 +26,8 @@ elseif(PGO_MODE STREQUAL "USE")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use -fprofile-correction")
 endif()
 
-set(CMAKE_BUILD_TYPE Debug)
-set(USE_COMPRESSION OFF)
+set(CMAKE_BUILD_TYPE Release)
+set(USE_COMPRESSION ON)
 
 cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)

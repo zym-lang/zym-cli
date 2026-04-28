@@ -58,7 +58,20 @@ bool init() {
     zym::boot::register_core_types();
     g_packed_data      = memnew(PackedData);
     g_project_settings = memnew(ProjectSettings);
-    register_core_settings();
+    // register_core_settings() intentionally NOT called: its 6 GLOBAL_DEFs
+    // configure (a) network/limits/{tcp,unix,packet_peer_stream} +
+    // network/tls/certificate_bundle_override -- consumed only by the
+    // network/TLS class graph already permanently skipped via the 8
+    // register_custom_instance_class<T>() deletions (HTTPClient, Crypto,
+    // StreamPeerTLS, PacketPeerDTLS, ...), and (b) threading/worker_pool/*
+    // -- consumed only by WorkerThreadPool::init(), which zym never reaches
+    // because zym::boot::register_core_types() does not memnew the
+    // WorkerThreadPool singleton (engine register_core_types.cpp:341 was
+    // its only construction site). Nothing in zym's link graph queries
+    // any of these keys, so the GLOBAL_DEFs would be orphaned defaults.
+    // Skipping the call lets --gc-sections evict register_core_settings()
+    // itself plus the 4 PropertyInfo ctors it constructs.
+    //
     // register_early_core_singletons() / register_core_singletons() are
     // intentionally NOT called: they wire CoreBind::Engine / OS / OS_Time /
     // Marshalls / EngineDebugger / Geometry2D|3D / ResourceLoader|Saver /

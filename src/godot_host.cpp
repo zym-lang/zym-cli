@@ -19,6 +19,12 @@
 #include "core/os/thread_safe.h"
 #include "core/register_core_types.h"
 
+// zym's hand-rolled, additive replacement for ::register_core_types() /
+// ::unregister_core_types(). Bodies start empty; lines are added back only
+// when a real test failure proves the engine init is needed. See
+// src/boot/register_core.cpp for the strategy and confirmed-skip list.
+#include "boot/register_core.hpp"
+
 namespace zym::godot_host {
 
 namespace {
@@ -43,12 +49,30 @@ bool init() {
     g_os->initialize();
     CoreGlobals::print_ready = true;
     g_engine = memnew(Engine);
-    register_core_types();
+    // Order matches Main::setup(): register_core_types() runs first
+    // (it brings up ObjectDB / StringName / CoreStringNames -- foundational
+    // state that ProjectSettings's ctor depends on via Object::set on
+    // StringName-keyed properties), then PackedData (consulted by
+    // ProjectSettings during its ctor for pack-mounted overrides), then
+    // ProjectSettings itself.
+    zym::boot::register_core_types();
     g_packed_data      = memnew(PackedData);
     g_project_settings = memnew(ProjectSettings);
     register_core_settings();
-    register_early_core_singletons();
-    register_core_singletons();
+    // register_early_core_singletons() / register_core_singletons() are
+    // intentionally NOT called: they wire CoreBind::Engine / OS / OS_Time /
+    // Marshalls / EngineDebugger / Geometry2D|3D / ResourceLoader|Saver /
+    // ClassDB / IP / TranslationServer / Input / InputMap / GDExtensionManager
+    // / ResourceUID / WorkerThreadPool singletons into Engine's name table
+    // for `Engine::get_singleton_object("Foo")` reflection. zym never does
+    // that lookup -- natives talk to godot via direct C++ symbols
+    // (`OS::get_singleton()`, `Time::get_singleton()`, ...), which are
+    // independent of the Engine name table.
+    //
+    // Skipping these calls also avoids ~5.7 KB of teardown leaks that
+    // ::unregister_core_types() can't clean up without a matching
+    // ::register_core_types() call (the CoreBind::* singletons live as
+    // file-local statics in godot/core/register_core_types.cpp).
 
     g_initialized = true;
     return true;
@@ -79,7 +103,7 @@ void shutdown() {
         g_engine = nullptr;
     }
 
-    unregister_core_types();
+    zym::boot::unregister_core_types();
 
     if (g_os) {
         // finalize_core() lives on OS_Unix.

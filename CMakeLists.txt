@@ -26,8 +26,8 @@ elseif(PGO_MODE STREQUAL "USE")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use -fprofile-correction")
 endif()
 
-set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION ON)
+set(CMAKE_BUILD_TYPE Debug)
+set(USE_COMPRESSION OFF)
 
 cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)
@@ -50,6 +50,8 @@ set(APP_SOURCES
         src/full_executor.cpp
         src/godot_host.hpp
         src/godot_host.cpp
+        src/boot/register_core.hpp
+        src/boot/register_core.cpp
 )
 
 set(ZYM_NATIVE_SOURCES
@@ -62,6 +64,16 @@ set(ZYM_NATIVE_SOURCES
         src/natives/dir.cpp
         src/natives/console.cpp
         src/natives/process.cpp
+)
+
+# src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and
+# StringName::setup / cleanup, which the engine declares `private` and
+# friends only to godot/core/register_core_types.cpp. We can't modify
+# godot/ and `#define private public` is not reliable here, so disable
+# access checks for this TU only. See src/boot/register_core.cpp for
+# the rationale.
+set_source_files_properties(src/boot/register_core.cpp
+        PROPERTIES COMPILE_OPTIONS "-fno-access-control"
 )
 
 add_executable(zym ${APP_SOURCES} ${ZYM_NATIVE_SOURCES})

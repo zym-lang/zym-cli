@@ -17,12 +17,24 @@
 #include "core/core_globals.h"
 #include "core/io/file_access_pack.h"
 #include "core/os/thread_safe.h"
-#include "core/register_core_types.h"
 
 // zym's hand-rolled, additive replacement for ::register_core_types() /
 // ::unregister_core_types(). Bodies start empty; lines are added back only
 // when a real test failure proves the engine init is needed. See
 // src/boot/register_core.cpp for the strategy and confirmed-skip list.
+//
+// `core/register_core_types.h` is intentionally NOT included: every engine
+// entrypoint it declares (`register_core_types`, `unregister_core_types`,
+// `register_core_settings`, `register_early_core_singletons`,
+// `register_core_singletons`, `register_core_extensions`,
+// `unregister_core_extensions`, `register_core_driver_types`,
+// `unregister_core_driver_types`) is either replaced by a zym::boot::*
+// hand-roll or permanently skipped (see comments in init() below). With no
+// remaining call sites from this TU, `--gc-sections` + LTO can finally
+// evict `godot/core/register_core_types.cpp.o` -- and transitively the
+// CoreBind::* file-local singletons, the 6 GLOBAL_DEFs, the 8
+// register_custom_instance_class<T>() chains, and the
+// register_global_constants() body -- from the final zym binary.
 #include "boot/register_core.hpp"
 
 namespace zym::godot_host {

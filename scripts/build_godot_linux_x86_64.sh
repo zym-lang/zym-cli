@@ -54,8 +54,40 @@ cd "${GODOT_DIR}"
 # C TUs are unaffected: they don't include class_db.h, so the shim is never
 # resolved and `-I` is harmless.
 ZYM_SHIM_DIR="${SCRIPT_DIR}/zym_shim"
+#
+# Variant / utility-function / constructor / operator registration neutering
+# (size lever, companion to the class_db + method_bind shims above).
+#
+# zym never invokes Variant::call(), Variant::evaluate(),
+# Variant::Utility::call_utility_function(), Variant::construct(), or any
+# of the other reflective dispatch entrypoints -- the runtime is a
+# self-hosted C VM that touches godot only through direct C++ symbols
+# (FileAccess::open, print_line, PackedByteArray::*, ...). We therefore
+# strip every Method_<type>_<name> / Func_<name> / VariantConstructor<...>
+# / OperatorEvaluator<...> instantiation that variant_call.cpp /
+# variant_utility.cpp / variant_construct.cpp / variant_op.cpp would
+# otherwise pin into their dispatch tables (which is where the bulk of
+# the engine's reflection code-size weight lives, alongside the per-
+# method MethodBind family already gutted by the method_bind shim).
+#
+# Unlike class_db / method_bind, those four .cpps each use a
+# same-directory relative include for their own header (e.g.
+# variant_op.cpp -> "variant_op.h"), so an `-I${ZYM_SHIM_DIR}` shim under
+# scripts/zym_shim/core/variant/... would never be reached. And the
+# registrar templates -- register_op, register_builtin_method,
+# register_builtin_compat_method, register_utility_function,
+# add_constructor -- are file-local statics defined inside their .cpps,
+# not in any header we could intercept. The only knob that touches those
+# TUs without patching godot/ is a global force-include via the C++
+# flags. See zym_variant_strip.h for the preprocessor / wrapper-template
+# mechanics.
+#
+# `-include` uses a path relative to the compiler's CWD (which SCons
+# sets to the godot/ tree root); we pass an absolute path so it
+# resolves regardless of where SCons recurses.
+ZYM_VARIANT_STRIP_SHIM="${ZYM_SHIM_DIR}/zym_variant_strip.h"
 ZYM_CCFLAGS="-fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
-ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR} -fno-asynchronous-unwind-tables -fno-unwind-tables"
+ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR} -include ${ZYM_VARIANT_STRIP_SHIM} -fno-asynchronous-unwind-tables -fno-unwind-tables"
 
 exec scons \
     platform=linuxbsd \

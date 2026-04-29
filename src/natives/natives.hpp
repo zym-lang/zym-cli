@@ -12,3 +12,5 @@ ZymValue nativeDir_create(ZymVM* vm);
 ZymValue nativeConsole_create(ZymVM* vm);
 ZymValue nativeProcess_create(ZymVM* vm);
 ZymValue nativeRegex_create(ZymVM* vm);
+ZymValue nativeJson_create(ZymVM* vm);
+ZymValue nativeCrypto_create(ZymVM* vm);

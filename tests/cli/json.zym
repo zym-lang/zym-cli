@@ -1,0 +1,233 @@
+// ============================================================================
+// COMPREHENSIVE JSON NATIVE TEST SUITE
+// Exercises the `JSON` global (statics: stringify / parse / create) and
+// the per-instance API (parse / data / setData / parsedText /
+// errorLine / errorMessage). Covers primitive encoding, nested round-trip,
+// pretty-printing, sorted-key output, error handling, and instance state.
+// ============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+print("==========================================================")
+print("JSON NATIVE TEST SUITE")
+print("==========================================================")
+
+
+// ============================================================================
+// SECTION 1: STRINGIFY PRIMITIVES
+// ============================================================================
+print("--- [1] Stringify primitives ---")
+
+assert_wrap(JSON.stringify(null) == "null", "1.1: stringify(null)")
+assert_wrap(JSON.stringify(true) == "true", "1.2: stringify(true)")
+assert_wrap(JSON.stringify(false) == "false", "1.3: stringify(false)")
+// Zym numbers are doubles; integral values render with a `.0` tail.
+assert_wrap(JSON.stringify(42) == "42.0", "1.4: stringify integer-valued number")
+assert_wrap(JSON.stringify(0) == "0.0", "1.5: stringify zero")
+assert_wrap(JSON.stringify(-3.5) == "-3.5", "1.6: stringify negative float")
+assert_wrap(JSON.stringify("hello") == "\"hello\"", "1.7: stringify simple string")
+// Embedded quote becomes \".
+assert_wrap(JSON.stringify("a\"b") == "\"a\\\"b\"", "1.8: stringify string with embedded quote")
+// Empty containers.
+assert_wrap(JSON.stringify([]) == "[]", "1.9: stringify empty list")
+assert_wrap(JSON.stringify({}) == "{}", "1.10: stringify empty map")
+
+
+// ============================================================================
+// SECTION 2: STRINGIFY CONTAINERS
+// ============================================================================
+print("--- [2] Stringify containers ---")
+
+assert_wrap(JSON.stringify([1, 2, 3]) == "[1.0,2.0,3.0]", "2.1: list of numbers")
+assert_wrap(JSON.stringify(["a", "b"]) == "[\"a\",\"b\"]", "2.2: list of strings")
+assert_wrap(JSON.stringify([true, null, false]) == "[true,null,false]",
+            "2.3: mixed primitive list")
+
+// sortKeys defaults to true: keys come out sorted.
+assert_wrap(JSON.stringify({"b": 1, "a": 2}) == "{\"a\":2.0,\"b\":1.0}",
+            "2.4: stringify sorts keys by default")
+
+// Nested.
+assert_wrap(JSON.stringify({"k": [1, 2]}) == "{\"k\":[1.0,2.0]}",
+            "2.5: map with nested list")
+assert_wrap(JSON.stringify([{"x": 1}]) == "[{\"x\":1.0}]",
+            "2.6: list of map")
+
+
+// ============================================================================
+// SECTION 3: STRINGIFY OPTIONS
+// ============================================================================
+print("--- [3] Stringify options ---")
+
+// Pretty-printing with indent.
+var pretty = JSON.stringify({"a": 1}, "  ")
+assert_wrap(pretty == "{\n  \"a\": 1.0\n}", "3.1: pretty-print with two-space indent")
+
+// Tab indent.
+assert_wrap(JSON.stringify([1, 2], "\t") == "[\n\t1.0,\n\t2.0\n]",
+            "3.2: pretty-print with tab indent")
+
+// Compact mode = empty indent string.
+assert_wrap(JSON.stringify([1, 2], "") == "[1.0,2.0]",
+            "3.3: empty indent equals compact output")
+
+
+// ============================================================================
+// SECTION 4: PARSE PRIMITIVES
+// ============================================================================
+print("--- [4] Parse primitives ---")
+
+assert_wrap(JSON.parse("null") == null, "4.1: parse(null)")
+assert_wrap(JSON.parse("true") == true, "4.2: parse(true)")
+assert_wrap(JSON.parse("false") == false, "4.3: parse(false)")
+assert_wrap(JSON.parse("42") == 42, "4.4: parse integer-valued number")
+assert_wrap(JSON.parse("3.5") == 3.5, "4.5: parse float")
+assert_wrap(JSON.parse("-7") == -7, "4.6: parse negative number")
+assert_wrap(JSON.parse("\"hello\"") == "hello", "4.7: parse simple string")
+assert_wrap(JSON.parse("\"a\\nb\"") == "a\nb", "4.8: parse escape sequence")
+
+
+// ============================================================================
+// SECTION 5: PARSE CONTAINERS
+// ============================================================================
+print("--- [5] Parse containers ---")
+
+var arr = JSON.parse("[1,2,3]")
+assert_wrap(arr != null, "5.1: parse list returns non-null")
+assert_wrap(length(arr) == 3, "5.2: parsed list length")
+assert_wrap(arr[0] == 1, "5.3: parsed list[0]")
+assert_wrap(arr[2] == 3, "5.4: parsed list[2]")
+
+var obj = JSON.parse("{\"name\":\"x\",\"vals\":[1,2,3],\"f\":0.5,\"ok\":true}")
+assert_wrap(obj != null, "5.5: parse object returns non-null")
+assert_wrap(obj["name"] == "x", "5.6: object string field")
+assert_wrap(obj["f"] == 0.5, "5.7: object float field")
+assert_wrap(obj["ok"] == true, "5.8: object bool field")
+assert_wrap(length(obj["vals"]) == 3, "5.9: nested list length")
+assert_wrap(obj["vals"][2] == 3, "5.10: nested list element")
+
+// Empty containers.
+assert_wrap(length(JSON.parse("[]")) == 0, "5.11: parse empty list")
+var emptyObj = JSON.parse("{}")
+assert_wrap(emptyObj != null, "5.12: parse empty map non-null")
+
+
+// ============================================================================
+// SECTION 6: PARSE ERRORS (STATIC)
+// ============================================================================
+print("--- [6] Parse errors (static) ---")
+
+assert_wrap(JSON.parse("{not json}") == null, "6.1: malformed object -> null")
+assert_wrap(JSON.parse("[1,2,") == null, "6.2: truncated list -> null")
+assert_wrap(JSON.parse("oops") == null, "6.3: garbage tokens -> null")
+assert_wrap(JSON.parse("") == null, "6.4: empty input -> null")
+// Note: Godot's JSON parser is lenient and accepts trailing commas in arrays
+// and objects; we treat that as valid input rather than an error.
+var lenient = JSON.parse("{\"k\":[1,2,]}")
+assert_wrap(lenient != null, "6.5: trailing comma is accepted (lenient parser)")
+assert_wrap(length(lenient["k"]) == 2, "6.6: trailing-comma array still has 2 elements")
+
+
+// ============================================================================
+// SECTION 7: ROUND-TRIP
+// ============================================================================
+print("--- [7] Round-trip ---")
+
+var original = {"items": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}], "count": 2}
+var txt = JSON.stringify(original)
+var back = JSON.parse(txt)
+assert_wrap(back != null, "7.1: round-trip parse non-null")
+assert_wrap(back["count"] == 2, "7.2: round-trip scalar field")
+assert_wrap(length(back["items"]) == 2, "7.3: round-trip list length")
+assert_wrap(back["items"][0]["name"] == "a", "7.4: round-trip nested string")
+assert_wrap(back["items"][1]["id"] == 2, "7.5: round-trip nested number")
+// Stringifying the parsed value yields the same canonical text (sorted keys).
+assert_wrap(JSON.stringify(back) == txt, "7.6: stringify round-trip is canonical")
+
+
+// ============================================================================
+// SECTION 8: JSON INSTANCE -- SUCCESS PATH
+// ============================================================================
+print("--- [8] JSON instance: success path ---")
+
+var j = JSON.create()
+assert_wrap(j != null, "8.1: JSON.create returns a handle")
+// Fresh instance: no stored data, no error.
+assert_wrap(j.data() == null, "8.2: fresh instance data() is null")
+assert_wrap(j.errorLine() == 0, "8.3: fresh instance errorLine() == 0")
+assert_wrap(j.errorMessage() == "", "8.4: fresh instance errorMessage() empty")
+assert_wrap(j.parsedText() == "", "8.5: fresh instance parsedText() empty")
+
+// Successful parse.
+assert_wrap(j.parse("{\"k\":[1,2]}") == true, "8.6: parse() returns true on success")
+assert_wrap(j.errorLine() == 0, "8.7: errorLine() stays 0 after success")
+assert_wrap(j.errorMessage() == "", "8.8: errorMessage() empty after success")
+var jd = j.data()
+assert_wrap(jd != null, "8.9: data() is the parsed value")
+assert_wrap(jd["k"][0] == 1, "8.10: data() nested list element")
+
+// keepText=true preserves the original source.
+var ok = j.parse("[7,8,9]", true)
+assert_wrap(ok == true, "8.11: parse(text, true) succeeds")
+assert_wrap(j.parsedText() == "[7,8,9]", "8.12: parsedText() echoes input when keepText=true")
+assert_wrap(j.data()[0] == 7, "8.13: data() reflects the new parse")
+
+
+// ============================================================================
+// SECTION 9: JSON INSTANCE -- FAILURE PATH
+// ============================================================================
+print("--- [9] JSON instance: failure path ---")
+
+var jE = JSON.create()
+// First, succeed so we have stored data.
+jE.parse("{\"a\":1}")
+var prevData = jE.data()
+assert_wrap(prevData["a"] == 1, "9.1: pre-error data is stored")
+
+// Then fail. The parser only advances `errorLine` when it has actually
+// crossed a newline before the offending token, so single-line inputs may
+// keep `errorLine() == 0`; what is always populated on failure is
+// `errorMessage()`.
+var ok2 = jE.parse("oops")
+assert_wrap(ok2 == false, "9.2: parse() returns false on bad input")
+assert_wrap(jE.errorMessage() != "", "9.3: errorMessage() is set on failure")
+// Multi-line input: the offending token sits one newline in. The current
+// implementation reports the count of newlines crossed (0-indexed lines).
+var okML = jE.parse("[1,\noops]")
+assert_wrap(okML == false, "9.4: multi-line bad input returns false")
+assert_wrap(jE.errorLine() == 1, "9.5: errorLine() advances per newline crossed")
+
+// setData replaces the stored value.
+jE.setData([1, 2, 3])
+var d = jE.data()
+assert_wrap(length(d) == 3, "9.6: setData stored a list")
+assert_wrap(d[1] == 2, "9.7: setData list element survives")
+jE.setData("hello")
+assert_wrap(jE.data() == "hello", "9.8: setData accepts scalar")
+
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

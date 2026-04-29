@@ -28,6 +28,11 @@ endif()
 
 set(CMAKE_BUILD_TYPE Release)
 set(USE_COMPRESSION ON)
+# USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
+# on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
+# binary so engine-level error and warning output is suppressed at startup
+# (zym's own runtime errors are unaffected). See src/boot/register_core.cpp.
+set(USE_ENGINE_ERRORS OFF)
 
 cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)
@@ -65,6 +70,8 @@ set(ZYM_NATIVE_SOURCES
         src/natives/console.cpp
         src/natives/process.cpp
         src/natives/regex.cpp
+        src/natives/json.cpp
+        src/natives/crypto.cpp
 )
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and
@@ -84,6 +91,12 @@ if(ZYM_LTO_OK)
 endif()
 
 target_link_libraries(zym PRIVATE zym_core)
+
+if(USE_ENGINE_ERRORS)
+    target_compile_definitions(zym PRIVATE ZYM_ENGINE_ERRORS=1)
+else()
+    target_compile_definitions(zym PRIVATE ZYM_ENGINE_ERRORS=0)
+endif()
 
 # Godot static library integration.
 # ZYM_PRECOMPILE_GODOT: ON runs the platform script to build libgodot.a; OFF expects it on disk.
@@ -118,6 +131,7 @@ set(ZYM_GODOT_SUBLIBS
         "${ZYM_GODOT_BIN_DIR}/obj/drivers/libdrivers.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodules.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_regex.${ZYM_GODOT_LIB_SUFFIX}.a"
+        "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_mbedtls.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/core/libcore.${ZYM_GODOT_LIB_SUFFIX}.a"
 )
 
@@ -146,10 +160,24 @@ add_dependencies(zym godot_static_lib)
 target_include_directories(zym PRIVATE
         "${ZYM_GODOT_DIR}"
         "${ZYM_GODOT_DIR}/platform/linuxbsd"
+        # mbedtls thirdparty headers (`mbedtls/*.h`, `psa/*.h`) are needed by
+        # `src/boot/register_core.cpp` to bring up the mbedtls-backed crypto
+        # factories without going through the engine's `GLOBAL_DEF`-using
+        # registration wrapper.
+        "${ZYM_GODOT_DIR}/thirdparty/mbedtls/include"
 )
 # Must mirror the SCons CPPDEFINES that built libgodot.a or the header
 # virtual surface drifts and overrides fail to match. See godot/SConstruct.
 target_compile_definitions(zym PRIVATE
+        # Match the mbedTLS configuration the static archive was built
+        # with (godot/modules/mbedtls/SCsub). This in turn defines
+        # `MBEDTLS_THREADING_ALT` (under THREADS_ENABLED), which
+        # `src/boot/register_core.cpp` keys off to install the
+        # `godot_mbedtls_mutex_*` callbacks. Without this define,
+        # mbedtls headers see the stock config and the boot code never
+        # calls `mbedtls_threading_set_alt`, causing CTR_DRBG seeding to
+        # fail with `MBEDTLS_ERR_CTR_DRBG_ENTROPY_SOURCE_FAILED`.
+        "MBEDTLS_CONFIG_FILE=\"thirdparty/mbedtls/include/godot_module_mbedtls_config.h\""
         DISABLE_DEPRECATED
         LIBGODOT_ENABLED
         _3D_DISABLED

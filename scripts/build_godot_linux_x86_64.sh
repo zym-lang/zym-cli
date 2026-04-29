@@ -128,10 +128,12 @@ exec scons \
     tests=no \
     deprecated=no \
     minizip=no \
-    brotli=no \
+    brotli=yes \
     disable_exceptions=yes \
     \
     module_regex_enabled=yes \
+    module_mbedtls_enabled=yes \
+    #module_websocket_enabled=yes \
     \
     build_profile="../scripts/zym_profile.gdbuild" \
     ccflags="${ZYM_CCFLAGS}" \

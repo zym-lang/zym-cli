@@ -43,6 +43,17 @@ methods are invoked as `f.method(...)`.
 Availability of each algorithm depends on the build; unsupported algorithms
 cause the open call to fail (`null`).
 
+> **Brotli is decompress-only.** The underlying engine ships a brotli
+> decoder but no encoder, so `"brotli"` cannot be used with
+> `File.openCompressed` for round-trip I/O. Opening for write (`"w"` /
+> `"wr"`) succeeds, but the close step fails with
+> `"Only brotli decompression is supported."` and produces an empty file.
+> Opening for read (`"r"` / `"rw"`) only accepts streams in the engine's
+> own framed compressed-file container, which the engine itself cannot
+> produce — so there is currently no supported way to read a brotli
+> stream through this API. Use one of the other algorithms for
+> round-trip compression.
+
 ---
 
 ## Whole-file helpers

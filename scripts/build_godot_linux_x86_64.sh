@@ -130,6 +130,9 @@ exec scons \
     minizip=no \
     brotli=no \
     disable_exceptions=yes \
+    \
+    module_regex_enabled=yes \
+    \
     build_profile="../scripts/zym_profile.gdbuild" \
     ccflags="${ZYM_CCFLAGS}" \
     cxxflags="${ZYM_CXXFLAGS}" \

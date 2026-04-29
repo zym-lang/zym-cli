@@ -64,6 +64,7 @@ set(ZYM_NATIVE_SOURCES
         src/natives/dir.cpp
         src/natives/console.cpp
         src/natives/process.cpp
+        src/natives/regex.cpp
 )
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and
@@ -116,6 +117,7 @@ set(ZYM_GODOT_SUBLIBS
         "${ZYM_GODOT_BIN_DIR}/obj/servers/libservers.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/drivers/libdrivers.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodules.${ZYM_GODOT_LIB_SUFFIX}.a"
+        "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_regex.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/core/libcore.${ZYM_GODOT_LIB_SUFFIX}.a"
 )
 

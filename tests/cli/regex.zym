@@ -1,0 +1,299 @@
+// ============================================================================
+// COMPREHENSIVE RegEx NATIVE TEST SUITE
+// Exercises the `RegEx` global (constructors + statics) and the per-instance
+// API (compile/clear/search/searchAll/sub, group metadata) plus the
+// `RegExMatch` accessors (subject/groupCount/names/strings/string/start/end)
+// with both numeric and named-group lookup. PCRE2 syntax.
+// ============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+
+print("==========================================================")
+print("RegEx NATIVE TEST SUITE")
+print("==========================================================")
+
+
+// ============================================================================
+// SECTION 1: CONSTRUCTION
+// ============================================================================
+print("--- [1] Construction ---")
+
+var r1 = RegEx.create("\\d+")
+assert_wrap(r1 != null, "1.1: RegEx.create returns a handle for a valid pattern")
+assert_wrap(r1.isValid(), "1.2: created instance is valid")
+assert_wrap(r1.pattern() == "\\d+", "1.3: pattern() echoes source")
+
+// Invalid pattern -> null (no runtime error).
+var rBad = RegEx.create("([")
+assert_wrap(rBad == null, "1.4: RegEx.create returns null on bad pattern")
+
+// Empty constructor -> uncompiled handle.
+var rEmpty = RegEx.empty()
+assert_wrap(rEmpty != null, "1.5: RegEx.empty returns a handle")
+assert_wrap(rEmpty.isValid() == false, "1.6: empty handle is not valid")
+assert_wrap(rEmpty.pattern() == "", "1.7: empty handle has empty pattern")
+assert_wrap(rEmpty.groupCount() == 0, "1.8: empty handle reports 0 groups")
+
+
+// ============================================================================
+// SECTION 2: COMPILATION & STATE
+// ============================================================================
+print("--- [2] Compilation & state ---")
+
+var r2 = RegEx.empty()
+assert_wrap(r2.compile("\\w+") == true, "2.1: compile() returns true on success")
+assert_wrap(r2.isValid(), "2.2: compiled handle becomes valid")
+assert_wrap(r2.pattern() == "\\w+", "2.3: pattern() reflects compiled source")
+
+// Recompile replaces previous pattern.
+assert_wrap(r2.compile("[A-Z]+") == true, "2.4: recompile succeeds")
+assert_wrap(r2.pattern() == "[A-Z]+", "2.5: pattern() reflects recompile")
+
+// Bad pattern -> false, leaves handle invalid.
+assert_wrap(r2.compile("([") == false, "2.6: compile() returns false on bad pattern")
+assert_wrap(r2.isValid() == false, "2.7: failed compile leaves handle invalid")
+
+// clear() invalidates the handle (search/searchAll/sub will refuse it).
+var r2b = RegEx.create("foo")
+assert_wrap(r2b.isValid(), "2.8: pre-clear handle valid")
+r2b.clear()
+assert_wrap(r2b.isValid() == false, "2.9: clear() invalidates handle")
+assert_wrap(r2b.groupCount() == 0, "2.10: cleared handle reports 0 groups")
+
+
+// ============================================================================
+// SECTION 3: ALIAS SEMANTICS
+// ============================================================================
+print("--- [3] Alias semantics ---")
+
+// Plain assignment aliases the underlying compiled pattern; recompile
+// through one name is visible through the other.
+var rA = RegEx.create("\\d+")
+var rB = rA
+assert_wrap(rB.isValid(), "3.1: alias starts valid")
+assert_wrap(rB.pattern() == "\\d+", "3.2: alias sees original pattern")
+rB.compile("[a-z]+")
+assert_wrap(rA.pattern() == "[a-z]+", "3.3: recompile through alias is visible on source")
+rA.clear()
+assert_wrap(rB.isValid() == false, "3.4: clear through source is visible on alias")
+
+
+// ============================================================================
+// SECTION 4: GROUP METADATA
+// ============================================================================
+print("--- [4] Group metadata ---")
+
+var r4 = RegEx.create("(?<word>\\w+)\\s+(?<num>\\d+)")
+assert_wrap(r4.groupCount() == 2, "4.1: groupCount excludes whole match")
+
+// names() lists the named-capture identifiers declared by the pattern.
+var ns = r4.names()
+assert_wrap(length(ns) == 2, "4.2: names() has one entry per named group")
+// Order is not contractually fixed; check membership.
+var sawWord = false
+var sawNum = false
+for (var i = 0; i < length(ns); i = i + 1) {
+    if (ns[i] == "word") { sawWord = true }
+    if (ns[i] == "num")  { sawNum = true }
+}
+assert_wrap(sawWord, "4.3: names() contains \"word\"")
+assert_wrap(sawNum,  "4.4: names() contains \"num\"")
+
+// A pattern with no named groups produces an empty list.
+var rNoNames = RegEx.create("(\\w+)\\s+(\\d+)")
+assert_wrap(length(rNoNames.names()) == 0, "4.4b: names() empty when no named groups")
+
+// Pattern with no captures.
+var r4b = RegEx.create("\\d+")
+assert_wrap(r4b.groupCount() == 0, "4.5: groupCount() == 0 for no-capture pattern")
+
+
+// ============================================================================
+// SECTION 5: SEARCH (single)
+// ============================================================================
+print("--- [5] search ---")
+
+var r5 = RegEx.create("\\d+")
+var m5 = r5.search("hello 42 world 7")
+assert_wrap(m5 != null, "5.1: search returns a match")
+assert_wrap(m5.string(0) == "42", "5.2: first match string")
+assert_wrap(m5.start(0) == 6, "5.3: first match start offset")
+assert_wrap(m5.end(0) == 8, "5.4: first match end offset")
+
+// Subject with no match -> null.
+var m5b = r5.search("no digits here")
+assert_wrap(m5b == null, "5.5: no match returns null")
+
+// Optional offset: skip past the first match to find the second.
+var m5c = r5.search("hello 42 world 7", 8)
+assert_wrap(m5c != null, "5.6: search with offset finds later match")
+assert_wrap(m5c.string(0) == "7", "5.7: search with offset returns later digits")
+assert_wrap(m5c.start(0) == 15, "5.8: search with offset reports absolute start")
+
+// end argument bounds the search; end before the only digit -> null.
+var m5d = r5.search("hello 42 world 7", 0, 6)
+assert_wrap(m5d == null, "5.9: search with end before any digit -> null")
+
+
+// ============================================================================
+// SECTION 6: searchAll
+// ============================================================================
+print("--- [6] searchAll ---")
+
+var r6 = RegEx.create("\\d+")
+var hits = r6.searchAll("a1 bb 22 c 333")
+assert_wrap(length(hits) == 3, "6.1: searchAll returns every non-overlapping match")
+assert_wrap(hits[0].string(0) == "1",   "6.2: hit 0 is \"1\"")
+assert_wrap(hits[1].string(0) == "22",  "6.3: hit 1 is \"22\"")
+assert_wrap(hits[2].string(0) == "333", "6.4: hit 2 is \"333\"")
+
+// No match -> empty list (not null).
+var hits2 = r6.searchAll("no digits")
+assert_wrap(hits2 != null, "6.5: searchAll never returns null")
+assert_wrap(length(hits2) == 0, "6.6: searchAll returns empty list on no match")
+
+// Offset + end constrain searchAll the same way they constrain search.
+var r6b = RegEx.create("\\d+")
+var hits3 = r6b.searchAll("a1 bb 22 c 333", 2, 9)
+assert_wrap(length(hits3) == 1, "6.7: searchAll honors offset + end")
+assert_wrap(hits3[0].string(0) == "22", "6.8: searchAll bounded result content")
+
+
+// ============================================================================
+// SECTION 7: sub
+// ============================================================================
+print("--- [7] sub ---")
+
+var r7 = RegEx.create("\\d+")
+// Default (3rd arg false): replace only the first match.
+assert_wrap(r7.sub("hello 42 world 7", "X", false) == "hello X world 7",
+            "7.1: sub(all=false) replaces first match")
+// all=true: replace every non-overlapping match.
+assert_wrap(r7.sub("hello 42 world 7", "X", true) == "hello X world X",
+            "7.2: sub(all=true) replaces every match")
+// No match -> subject unchanged.
+assert_wrap(r7.sub("no digits", "X", true) == "no digits",
+            "7.3: sub leaves subject unchanged when nothing matches")
+
+// Back-references in the replacement: numeric and named.
+var r7b = RegEx.create("(?<w>\\w+)\\s+(\\d+)")
+assert_wrap(r7b.sub("hello 42", "$2-$1", false) == "42-hello",
+            "7.4: numeric back-reference")
+assert_wrap(r7b.sub("hello 42", "<${w}>", false) == "<hello>",
+            "7.5: named back-reference")
+
+// Offset bounds the substitution region.
+var r7c = RegEx.create("\\d+")
+assert_wrap(r7c.sub("a1 b2 c3", "X", true, 3) == "a1 bX cX",
+            "7.6: sub honors offset (left of offset is preserved)")
+
+
+// ============================================================================
+// SECTION 8: RegExMatch accessors
+// ============================================================================
+print("--- [8] RegExMatch accessors ---")
+
+var r8 = RegEx.create("(?<word>\\w+)\\s+(\\d+)")
+var m8 = r8.search("hello 42 trailing")
+assert_wrap(m8 != null, "8.1: search produced a match")
+assert_wrap(m8.subject() == "hello 42 trailing", "8.2: subject() echoes input")
+assert_wrap(m8.groupCount() == 2, "8.3: match.groupCount() excludes group 0")
+
+// strings(): [whole, group1, group2, ...].
+var ss = m8.strings()
+assert_wrap(length(ss) == 3, "8.4: strings() length includes group 0")
+assert_wrap(ss[0] == "hello 42", "8.5: strings()[0] is whole match")
+assert_wrap(ss[1] == "hello",    "8.6: strings()[1] is group 1")
+assert_wrap(ss[2] == "42",       "8.7: strings()[2] is group 2")
+
+// string(name): numeric and named lookup.
+assert_wrap(m8.string(0)      == "hello 42", "8.8: string(0) is whole match")
+assert_wrap(m8.string(1)      == "hello",    "8.9: string(1) by index")
+assert_wrap(m8.string("word") == "hello",    "8.10: string(\"word\") by name")
+assert_wrap(m8.string(2)      == "42",       "8.11: string(2) by index (unnamed)")
+
+// start/end agree with whole-match offsets and group-1 offsets.
+assert_wrap(m8.start(0) == 0, "8.12: start(0)")
+assert_wrap(m8.end(0)   == 8, "8.13: end(0)")
+assert_wrap(m8.start("word") == 0, "8.14: start(\"word\")")
+assert_wrap(m8.end("word")   == 5, "8.15: end(\"word\")")
+assert_wrap(m8.start(2) == 6, "8.16: start(2)")
+assert_wrap(m8.end(2)   == 8, "8.17: end(2)")
+
+// names() is a map of named-group identifier -> group index.
+var nmap = m8.names()
+assert_wrap(nmap["word"] == 1, "8.18: names()[\"word\"] == 1")
+
+
+// ============================================================================
+// SECTION 9: UNMATCHED / OPTIONAL GROUPS
+// ============================================================================
+print("--- [9] Optional/unmatched groups ---")
+
+// Optional second group; in "abc" it never participates.
+var r9 = RegEx.create("(\\w+)(\\d+)?")
+var m9 = r9.search("abc")
+assert_wrap(m9 != null, "9.1: optional-group pattern matches \"abc\"")
+assert_wrap(m9.string(1) == "abc", "9.2: group 1 captured the word")
+assert_wrap(m9.string(2) == "",    "9.3: unmatched optional group is empty string")
+var ss9 = m9.strings()
+assert_wrap(length(ss9) == 3, "9.4: strings() still slot every declared group")
+assert_wrap(ss9[2] == "",     "9.5: strings()[2] empty for unmatched group")
+
+
+// ============================================================================
+// SECTION 10: PCRE2 FEATURES
+// ============================================================================
+print("--- [10] PCRE2 features ---")
+
+// Inline (?i) flag: case-insensitive.
+var rIc = RegEx.create("(?i)hello")
+assert_wrap(rIc.search("HELLO world") != null, "10.1: (?i) makes match case-insensitive")
+assert_wrap(rIc.search("HeLLo")       != null, "10.2: (?i) on mixed case")
+
+// Lookahead.
+var rLA = RegEx.create("\\d+(?= dollars)")
+var mLA = rLA.search("I have 42 dollars and 7 cents")
+assert_wrap(mLA != null, "10.3: lookahead matches")
+assert_wrap(mLA.string(0) == "42", "10.4: lookahead does not consume \" dollars\"")
+
+// Lookbehind.
+var rLB = RegEx.create("(?<=\\$)\\d+")
+var mLB = rLB.search("price: $42 (was $7)")
+assert_wrap(mLB != null, "10.5: lookbehind matches")
+assert_wrap(mLB.string(0) == "42", "10.6: lookbehind matches first dollar amount")
+
+// Alternation + quantifier.
+var rAlt = RegEx.create("foo|bar")
+var hitsAlt = rAlt.searchAll("foo bar baz foo")
+assert_wrap(length(hitsAlt) == 3, "10.7: alternation across subject")
+assert_wrap(hitsAlt[0].string(0) == "foo", "10.8: alt hit 0")
+assert_wrap(hitsAlt[1].string(0) == "bar", "10.9: alt hit 1")
+assert_wrap(hitsAlt[2].string(0) == "foo", "10.10: alt hit 2")
+
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

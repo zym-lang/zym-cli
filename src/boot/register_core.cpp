@@ -31,7 +31,6 @@
 //   - resource_format_saver_crypto / resource_saver_json /
 //     resource_loader_gdextension / core_bind resource loader|saver
 //   - GDExtensionManager + ResourceUID singletons
-//   - IP::create()
 //   - Every GDREGISTER_* expansion (already noop'd by the class_db.h shim
 //     -- removing the call site here lets `--gc-sections` evict the
 //     entire register_core_types.cpp.o + transitively unreferenced
@@ -63,7 +62,9 @@
 // elsewhere in the build.
 #include "core/core_globals.h"
 #include "core/core_string_names.h"
+#include "core/io/ip.h"
 #include "core/object/object.h"
+#include "core/os/memory.h"
 #include "core/string/string_name.h"
 
 // mbedtls module owns the `_create` factories for `Crypto`, `CryptoKey`,
@@ -106,6 +107,9 @@ int  godot_mbedtls_mutex_unlock(mbedtls_threading_mutex_t *p_mutex);
 #endif
 
 namespace zym::boot {
+
+// Owned by `register_core_types()` / freed in `unregister_core_types()`.
+static IP *ip = nullptr;
 
 void register_core_types() {
 	// --- Build-time toggle: engine error/warning output ------------------
@@ -152,6 +156,16 @@ void register_core_types() {
 	StreamPeerMbedTLS::initialize_tls();
 	PacketPeerMbedDTLS::initialize_dtls();
 	DTLSServerMbedTLS::initialize();
+
+	// --- Additive batch #3: IP singleton --------------------------------
+	// `IP` is the engine's DNS/local-interface namespace and is the
+	// foundation for every networking native (TCP/UDP/TLS). On Linux
+	// `IP::create()` returns a fresh `IPUnix` (via the platform-side
+	// `_create` factory installed when `ip_unix.cpp` is linked into
+	// libcore). Without this, `IP::get_singleton()` is null and the
+	// IP native's `resolve` / `resolveAll` / `localAddresses` would
+	// crash on the very first call.
+	ip = IP::create();
 }
 
 void unregister_core_types() {
@@ -160,6 +174,10 @@ void unregister_core_types() {
 	// are intentionally not called from godot_host.cpp (see the long
 	// comment there) -- so the only state we need to tear down is the
 	// foundational state we set up above.
+	if (ip) {
+		memdelete(ip);
+		ip = nullptr;
+	}
 	DTLSServerMbedTLS::finalize();
 	PacketPeerMbedDTLS::finalize_dtls();
 	StreamPeerMbedTLS::finalize_tls();

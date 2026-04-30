@@ -14,3 +14,8 @@ ZymValue nativeProcess_create(ZymVM* vm);
 ZymValue nativeRegex_create(ZymVM* vm);
 ZymValue nativeJson_create(ZymVM* vm);
 ZymValue nativeCrypto_create(ZymVM* vm);
+ZymValue nativeRandom_create(ZymVM* vm);
+ZymValue nativeHash_create(ZymVM* vm);
+ZymValue nativeSystem_create(ZymVM* vm);
+ZymValue nativePath_create(ZymVM* vm);
+ZymValue nativeIp_create(ZymVM* vm);

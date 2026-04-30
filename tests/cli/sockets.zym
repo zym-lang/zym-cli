@@ -1,0 +1,115 @@
+// ============================================================================
+// COMPREHENSIVE Sockets NATIVE TEST SUITE
+// Currently exercises Phase 1: the `IP` global (DNS + local interfaces).
+// Sections for TCP / UDP / TLS / Sockets.waitAny will be added as each
+// phase lands.
+// ============================================================================
+var testsPassed = 0
+var testsFailed = 0
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+print("==========================================================")
+print("Sockets NATIVE TEST SUITE")
+print("==========================================================")
+
+// ----------------------------------------------------------------------------
+// SECTION 1: IP.resolve -- happy path
+// ----------------------------------------------------------------------------
+var lh = IP.resolve("localhost")
+assert_wrap(typeof(lh) == "string",                      "1.1: resolve('localhost') is a string")
+assert_wrap(lh == "127.0.0.1" || lh == "0:0:0:0:0:0:0:1" || lh == "::1", "1.2: resolve('localhost') is loopback")
+
+// Literal addresses round-trip cleanly.
+assert_wrap(IP.resolve("127.0.0.1") == "127.0.0.1",      "1.3: literal IPv4 round-trips")
+assert_wrap(IP.resolve("0:0:0:0:0:0:0:1") == "0:0:0:0:0:0:0:1", "1.4: literal IPv6 round-trips")
+
+// ----------------------------------------------------------------------------
+// SECTION 2: IP.resolve -- failure
+// ----------------------------------------------------------------------------
+// `.invalid` is RFC-2606-reserved; the resolver MUST NXDOMAIN it.
+var nx = IP.resolve("nxdomain-zym-test-xyz123.invalid")
+assert_wrap(nx == null,                                  "2.1: resolve('*.invalid') is null")
+
+// ----------------------------------------------------------------------------
+// SECTION 3: IP.resolveAll
+// ----------------------------------------------------------------------------
+var allLocal = IP.resolveAll("localhost")
+assert_wrap(typeof(allLocal) == "list",                  "3.1: resolveAll returns a list")
+assert_wrap(length(allLocal) >= 1,                        "3.2: resolveAll('localhost') has >=1 entry")
+// Every entry is a string.
+var allStrings = true
+for (var i = 0; i < length(allLocal); i = i + 1) {
+    if (typeof(allLocal[i]) != "string") { allStrings = false }
+}
+assert_wrap(allStrings,                                  "3.3: every resolveAll entry is a string")
+
+// At least one entry must be a recognizable loopback string.
+var hasLoopback = false
+for (var j = 0; j < length(allLocal); j = j + 1) {
+    var e = allLocal[j]
+    if (e == "127.0.0.1" || e == "::1" || e == "0:0:0:0:0:0:0:1") {
+        hasLoopback = true
+    }
+}
+assert_wrap(hasLoopback,                                 "3.4: resolveAll('localhost') includes loopback")
+
+// resolveAll on garbage returns an empty list, not null.
+var allNx = IP.resolveAll("nxdomain-zym-test-xyz456.invalid")
+assert_wrap(typeof(allNx) == "list",                     "3.5: resolveAll on garbage is still a list")
+assert_wrap(length(allNx) == 0,                           "3.6: resolveAll on garbage is empty")
+
+// ----------------------------------------------------------------------------
+// SECTION 4: IP.localAddresses
+// ----------------------------------------------------------------------------
+var locals = IP.localAddresses()
+assert_wrap(typeof(locals) == "list",                    "4.1: localAddresses returns a list")
+assert_wrap(length(locals) >= 1,                          "4.2: localAddresses returns >=1 entry")
+
+// Every entry is a non-empty string.
+var localsOk = true
+for (var k = 0; k < length(locals); k = k + 1) {
+    var e2 = locals[k]
+    if (typeof(e2) != "string" || e2 == "") { localsOk = false }
+}
+assert_wrap(localsOk,                                    "4.3: every localAddresses entry is a non-empty string")
+
+// At least one entry is loopback (127.0.0.1, ::1, or expanded form).
+var hasLocalLoop = false
+for (var m = 0; m < length(locals); m = m + 1) {
+    var e3 = locals[m]
+    if (e3 == "127.0.0.1" || e3 == "::1" || e3 == "0:0:0:0:0:0:0:1") {
+        hasLocalLoop = true
+    }
+}
+assert_wrap(hasLocalLoop,                                "4.4: localAddresses includes loopback")
+
+// ----------------------------------------------------------------------------
+// SECTION 5: IP surface presence
+// ----------------------------------------------------------------------------
+// All public methods are exposed at the expected names.
+assert_wrap(typeof(IP) == "map",                         "5.1: IP is a map")
+assert_wrap(typeof(IP.resolve) != "null",                "5.2: IP.resolve exposed")
+assert_wrap(typeof(IP.resolveAll) != "null",             "5.3: IP.resolveAll exposed")
+assert_wrap(typeof(IP.localAddresses) != "null",         "5.4: IP.localAddresses exposed")
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

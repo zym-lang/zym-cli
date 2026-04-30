@@ -12,4 +12,9 @@ void setupNatives(ZymVM* vm)
     zym_defineGlobal(vm, "RegEx", nativeRegex_create(vm));
     zym_defineGlobal(vm, "JSON", nativeJson_create(vm));
     zym_defineGlobal(vm, "Crypto", nativeCrypto_create(vm));
+    zym_defineGlobal(vm, "Random", nativeRandom_create(vm));
+    zym_defineGlobal(vm, "Hash", nativeHash_create(vm));
+    zym_defineGlobal(vm, "System", nativeSystem_create(vm));
+    zym_defineGlobal(vm, "Path", nativePath_create(vm));
+    zym_defineGlobal(vm, "IP", nativeIp_create(vm));
 }

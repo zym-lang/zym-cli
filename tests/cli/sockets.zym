@@ -294,18 +294,134 @@ var tlsFail = TLS.connect("127.0.0.1", 1, 300, { verify: false })
 assert_wrap(tlsFail == null,                             "12.17: TLS.connect to dead port returns null")
 
 // ----------------------------------------------------------------------------
-// SECTION 13: Surface presence
+// SECTION 13: UDP.listen + per-source accept (loopback)
 // ----------------------------------------------------------------------------
-assert_wrap(typeof(TCP) == "map",                        "13.1: TCP is a map")
-assert_wrap(typeof(TCP.connect) != "null",               "13.2: TCP.connect exposed")
-assert_wrap(typeof(TCP.listen) != "null",                "13.3: TCP.listen exposed")
-assert_wrap(typeof(UDP) == "map",                        "13.4: UDP is a map")
-assert_wrap(typeof(UDP.bind) != "null",                  "13.5: UDP.bind exposed")
-assert_wrap(typeof(Sockets) == "map",                    "13.6: Sockets is a map")
-assert_wrap(typeof(Sockets.waitAny) != "null",           "13.7: Sockets.waitAny exposed")
-assert_wrap(typeof(TLS) == "map",                        "13.8: TLS is a map")
-assert_wrap(typeof(TLS.connect) != "null",               "13.9: TLS.connect exposed")
-assert_wrap(typeof(TLS.accept) != "null",                "13.10: TLS.accept exposed")
+var us0 = UDP.listen("127.0.0.1", 0)
+assert_wrap(us0 != null,                                 "13.1: UDP.listen returns a handle")
+assert_wrap(us0.localPort() > 0,                         "13.2: UDP server got a port")
+// idle accept(0) returns null right away
+assert_wrap(us0.accept(0) == null,                       "13.3: UDP.listen idle accept(0) is null")
+// kick a datagram from a fresh source -> accept yields a per-source udp peer
+var udsPort = us0.localPort()
+var udSrc = UDP.bind("127.0.0.1", 0)
+var udSrcPort = udSrc.localPort()
+assert_wrap(udSrc.send(Buffer.fromString("hi"), "127.0.0.1", udsPort) == "ok",
+                                                         "13.4: source UDP send ok")
+var udPeer = us0.accept(2000)
+assert_wrap(udPeer != null,                              "13.5: UDP server.accept yields a peer")
+var udPeerRecv = udPeer.recv(500)
+assert_wrap(typeof(udPeerRecv) == "map",                 "13.6: peer.recv returns a map")
+assert_wrap(udPeerRecv["data"].size() == 2,              "13.7: peer.recv data size matches")
+assert_wrap(udPeerRecv["host"] == "127.0.0.1",           "13.8: peer.recv host matches source")
+assert_wrap(udPeerRecv["port"] == udSrcPort,             "13.9: peer.recv port matches source")
+udPeer.close()
+udSrc.close()
+us0.close()
+// ----------------------------------------------------------------------------
+// SECTION 14: DTLS in-process round-trip with a self-signed cert
+// ----------------------------------------------------------------------------
+// Reuse `crypto` from SECTION 12. Mint a fresh key/cert pair specifically
+// for DTLS so it's clear the cert-handling path is independent of the TLS one.
+var dtls_key = crypto.generateRsa(2048)
+var dtls_cert = crypto.generateSelfSignedCertificate(dtls_key, "CN=localhost", "20240101000000", "20440101000000")
+assert_wrap(dtls_key != null,                            "14.1: generated DTLS RSA key")
+assert_wrap(dtls_cert != null,                           "14.2: generated DTLS self-signed cert")
+var dtlsSrv = UDP.listen("127.0.0.1", 0)
+var dtlsPort = dtlsSrv.localPort()
+assert_wrap(dtlsPort > 0,                                "14.3: DTLS UDP listener bound")
+// Kick off the client (non-waiting); drive both sides via paired polls.
+var dtlsCli = DTLS.connect("127.0.0.1", dtlsPort, 0, { verify: false })
+assert_wrap(dtlsCli != null,                             "14.4: DTLS.connect returns a sock with timeoutMs=0")
+var dtlsSrvSock = null
+var diter = 0
+while (diter < 1000) {
+    dtlsCli.poll()
+    dtlsSrvSock = DTLS.accept(dtlsSrv, { key: dtls_key, cert: dtls_cert }, 0)
+    if (dtlsSrvSock != null) {
+        diter = 9999
+    }
+    diter = diter + 1
+    System.sleep(5)
+}
+assert_wrap(dtlsSrvSock != null,                         "14.5: DTLS.accept eventually returned a peer")
+// Bring client to "connected" too (server side already is).
+var diter2 = 0
+while (diter2 < 200 && dtlsCli.status() != "connected") {
+    dtlsCli.poll()
+    dtlsSrvSock.poll()
+    diter2 = diter2 + 1
+    System.sleep(5)
+}
+assert_wrap(dtlsCli.status() == "connected",             "14.6: client DTLS connected")
+assert_wrap(dtlsSrvSock.status() == "connected",         "14.7: server DTLS connected")
+// Round-trip a record each direction.
+assert_wrap(dtlsCli.send(Buffer.fromString("hello dtls")) == "ok",
+                                                         "14.8: client send -> server")
+// Drive server poll until packet arrives.
+var dr1 = null
+var diter3 = 0
+while (diter3 < 200 && dr1 == null) {
+    dtlsCli.poll()
+    dtlsSrvSock.poll()
+    if (dtlsSrvSock.available() > 0) {
+        dr1 = dtlsSrvSock.recv(0)
+    }
+    diter3 = diter3 + 1
+    System.sleep(5)
+}
+assert_wrap(typeof(dr1) == "map",                        "14.9: server recv'd a record")
+assert_wrap(dr1.size() == 10,                            "14.10: server payload size = 10")
+assert_wrap(dtlsSrvSock.send(Buffer.fromString("hi back")) == "ok",
+                                                         "14.11: server send -> client")
+var dr2 = null
+var diter4 = 0
+while (diter4 < 200 && dr2 == null) {
+    dtlsSrvSock.poll()
+    dtlsCli.poll()
+    if (dtlsCli.available() > 0) {
+        dr2 = dtlsCli.recv(0)
+    }
+    diter4 = diter4 + 1
+    System.sleep(5)
+}
+assert_wrap(typeof(dr2) == "map",                        "14.12: client recv'd a record")
+assert_wrap(dr2.size() == 7,                             "14.13: client payload size = 7")
+// peerAddress shape
+var pa = dtlsCli.peerAddress()
+assert_wrap(typeof(pa) == "map",                         "14.14: peerAddress returns a map")
+assert_wrap(pa["host"] == "127.0.0.1",                   "14.15: peerAddress host")
+assert_wrap(pa["port"] == dtlsPort,                      "14.16: peerAddress port")
+// Sockets.waitAny over a mixed bag including DTLS + UDP server
+var ww4 = Sockets.waitAny([dtlsCli, dtlsSrvSock, dtlsSrv], "write", 500)
+assert_wrap(typeof(ww4) == "map",                        "14.17: waitAny over DTLS works")
+// close + idempotency
+dtlsCli.close()
+dtlsSrvSock.close()
+dtlsCli.close()
+assert_wrap(true,                                        "14.18: DTLS double-close is silent")
+dtlsSrv.close()
+// connect-to-dead-port: bound up but no server. With a generous timeout
+// the handshake retries until deadline and returns null.
+var dtlsFail = DTLS.connect("127.0.0.1", 1, 800, { verify: false })
+assert_wrap(dtlsFail == null,                            "14.19: DTLS.connect to dead port returns null")
+// ----------------------------------------------------------------------------
+// SECTION 15: Surface presence
+// ----------------------------------------------------------------------------
+assert_wrap(typeof(TCP) == "map",                        "15.1: TCP is a map")
+assert_wrap(typeof(TCP.connect) != "null",               "15.2: TCP.connect exposed")
+assert_wrap(typeof(TCP.listen) != "null",                "15.3: TCP.listen exposed")
+assert_wrap(typeof(UDP) == "map",                        "15.4: UDP is a map")
+assert_wrap(typeof(UDP.bind) != "null",                  "15.5: UDP.bind exposed")
+assert_wrap(typeof(UDP.listen) != "null",                "15.6: UDP.listen exposed")
+assert_wrap(typeof(Sockets) == "map",                    "15.7: Sockets is a map")
+assert_wrap(typeof(Sockets.waitAny) != "null",           "15.8: Sockets.waitAny exposed")
+assert_wrap(typeof(TLS) == "map",                        "15.9: TLS is a map")
+assert_wrap(typeof(TLS.connect) != "null",               "15.10: TLS.connect exposed")
+assert_wrap(typeof(TLS.accept) != "null",                "15.11: TLS.accept exposed")
+assert_wrap(typeof(DTLS) == "map",                       "15.12: DTLS is a map")
+assert_wrap(typeof(DTLS.connect) != "null",              "15.13: DTLS.connect exposed")
+assert_wrap(typeof(DTLS.connectFrom) != "null",          "15.14: DTLS.connectFrom exposed")
+assert_wrap(typeof(DTLS.accept) != "null",               "15.15: DTLS.accept exposed")
 
 // ============================================================================
 // FINAL RESULTS

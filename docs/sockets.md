@@ -1,13 +1,14 @@
-# Networking (`IP`, `TCP`, `UDP`, `TLS`, `Sockets`)
+# Networking (`IP`, `TCP`, `UDP`, `TLS`, `DTLS`, `Sockets`)
 
-Cross-platform TCP / UDP / TLS sockets and DNS, exposed as a layered set
-of zym-flavored namespaces:
+Cross-platform TCP / UDP / TLS / DTLS sockets and DNS, exposed as a
+layered set of zym-flavored namespaces:
 
 - `IP` — DNS resolution and local-interface enumeration.
 - `TCP` — reliable byte streams; client `connect` + listening server.
-- `UDP` — unreliable datagrams; bound socket with `send` / `recv`.
+- `UDP` — unreliable datagrams; bound socket with `send` / `recv`, plus `UDP.listen` for per-source server-side demultiplexing.
 - `TLS` — encrypted TCP client and server over `X509Certificate` / `CryptoKey` from `Crypto`.
-- `Sockets` — `Sockets.waitAny(handles, mode, timeoutMs)` for multi-socket readiness.
+- `DTLS` — encrypted UDP (datagram TLS) client and server, layered over `UDP` + `Crypto` types.
+- `Sockets` — `Sockets.waitAny(handles, mode, timeoutMs)` for multi-socket readiness (TCP, UDP, TLS, DTLS, and server handles).
 
 ---
 
@@ -179,6 +180,7 @@ Unreliable datagrams. One static (`UDP.bind`) returns an instance with
 | Method | Returns | Notes |
 | --- | --- | --- |
 | `UDP.bind(host, port)` | udp \| `null` | Bind a UDP socket. `host == ""` or `"*"` binds all interfaces; `port == 0` lets the OS assign one. Returns `null` on bind failure. The returned handle is non-blocking. |
+| `UDP.listen(host, port)` | udp-server \| `null` | Bind a UDP socket and demultiplex incoming datagrams **per source** `(host, port)`. Each new source becomes a pending peer that you `accept(...)` to get a fresh `udp` handle bound to that one source. Used for stateful per-client UDP servers and as the entry point for `DTLS.accept`. Returns `null` on bind failure. |
 
 ### UDP instance methods
 
@@ -190,6 +192,19 @@ Unreliable datagrams. One static (`UDP.bind`) returns an instance with
 | `udp.localPort()` | number | The actually-bound local port. |
 | `udp.setBroadcast(b)` | `null` | Enable / disable `SO_BROADCAST`. Required to send to `255.255.255.255` or directed-broadcast addresses. |
 | `udp.close()` | `null` | Close the socket. Idempotent. |
+
+### UDP server instance methods
+
+The handle returned by `UDP.listen` exposes a small surface, focused on
+accepting per-source UDP peers. The accepted peer is a regular `udp`
+handle (same instance methods as `UDP.bind`-returned ones).
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `srv.accept()` | udp \| `null` | Block forever until a new source sends a datagram, then return a fresh `udp` peer bound to that source. Subsequent datagrams from the same source flow into that peer's queue. |
+| `srv.accept(timeoutMs)` | udp \| `null` | Same, bounded. `0` returns immediately (`null` if no pending source); `-1` is the same as no argument. |
+| `srv.localPort()` | number | The actually-bound port. `0` if not listening. |
+| `srv.close()` | `null` | Stop listening. Already-accepted peers remain usable until they themselves are closed. |
 
 ### Examples
 
@@ -387,3 +402,164 @@ primitives apply the same way. A TLS sock counts as readable when its
   opts)` shorthand; clients use `TCP.listen` + `srv.accept` + `TLS.accept`
   explicitly. This is deliberate — it keeps the TCP and TLS server
   surfaces composable.
+
+---
+
+## `DTLS`
+
+Datagram TLS (DTLS) is **TLS over UDP**. It provides confidentiality and
+integrity over a `UDP` association, with the same status / lifecycle
+shape as `TLS`, but a datagram-shaped data API (`send` / `recv`) instead
+of `TLS`'s stream-shaped one (`read` / `write`). Each `dtls.send(buf)`
+call corresponds to exactly one DTLS record on the wire.
+
+DTLS keeps UDP's lossy semantics for **application data**: packets can
+still be reordered, duplicated, or lost. DTLS does **not** retransmit
+your `send(...)` payloads — it only retransmits its own handshake
+messages. Use it where you need encryption + authentication on top of
+UDP, not where you need reliability.
+
+### `DTLS` statics
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `DTLS.connect(host, port)` | dtls \| `null` | Bind an ephemeral local UDP and run the client-side DTLS handshake to `host:port` with default options (system-CA verify). Blocks forever. Returns `null` on connect / handshake failure. |
+| `DTLS.connect(host, port, timeoutMs)` | dtls \| `null` | Same, bounded. `0` returns immediately in `"connecting"` so the caller can drive the handshake via `dtls.poll()`. `-1` blocks. |
+| `DTLS.connect(host, port, timeoutMs, opts)` | dtls \| `null` | With explicit client options (see below). |
+| `DTLS.connectFrom(udp, host, port [, timeoutMs, opts])` | dtls \| `null` | Like `DTLS.connect`, but the caller supplies the underlying `udp` (e.g. for source-port pinning). The `udp` must come from `UDP.bind`. The destination is set on the `udp` if it isn't already connected; further plain-`udp` use is undefined while DTLS is using it. |
+| `DTLS.accept(udpServer, opts [, timeoutMs])` | dtls \| `null` | Server-side handshake. `udpServer` is a handle from `UDP.listen(host, port)`. This call drives the entire DTLS-server flow internally — including the cookie exchange (HelloVerifyRequest) — and returns a fully-handshaken DTLS peer when one is ready, or `null` on timeout. Calling it repeatedly on the same `udpServer` accepts more peers; the server-side `DTLSServer` state (cookies, in-flight handshakes) is persisted on the `udpServer` handle for as long as it lives. `opts` is `{ key, cert }` (server-side, see TLS docs). |
+
+### `opts` shape (client)
+
+Same shape as `TLS.connect`'s client options:
+
+```
+{
+  verify:       bool                       = true,
+  trustedRoots: cert | [cert, ...] | null  = null,   // X509Certificate(s)
+  commonName:   string                     = ""      // override SNI / CN check
+}
+```
+
+`verify: false` disables certificate verification entirely (use only
+for self-signed test scenarios).
+
+### `opts` shape (server, for `DTLS.accept`)
+
+```
+{
+  key:  cryptoKey,    // CryptoKey from Crypto.generateRsa / loaded PEM
+  cert: x509          // X509Certificate matching the key
+}
+```
+
+### DTLS instance methods
+
+DTLS instances expose a UDP-shaped surface (`send` / `recv`), not a
+stream-shaped one. The status vocabulary matches TLS:
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `dtls.status()` | string | `"connecting"` (handshake in progress), `"connected"`, `"closed"`, or `"error"`. Hostname-mismatch and other handshake failures collapse onto `"error"`. |
+| `dtls.poll()` | string | Advance the DTLS state machine once and return the new status. Required during handshake on the client side when `DTLS.connect(... 0)` was used; safe to call any time. |
+| `dtls.available()` | number | Pending DTLS records (decrypted datagrams ready to read). |
+| `dtls.send(buf)` | status | Send `buf` as one DTLS record. Returns `"ok"`, `"busy"` if the handshake hasn't completed yet (caller should `poll()` and retry), `"closed"` if the peer is gone, or `"error"`. |
+| `dtls.recv()` | Buffer \| status | Block forever until a record arrives. Returns the decrypted payload as a `Buffer`. No source address — DTLS is point-to-point post-handshake. |
+| `dtls.recv(timeoutMs)` | Buffer \| status | Same, bounded. `"timeout"` on deadline; `"closed"` / `"error"` otherwise. |
+| `dtls.peerAddress()` | map | `{ host, port }` of the remote peer (the host string supplied at connect time on the client; the source address of the first ClientHello on the server). |
+| `dtls.close()` | `null` | Send a close-notify alert and tear down the underlying UDP. Idempotent. |
+
+### Examples
+
+#### Client (browser-style: trust the system CA bundle)
+
+```zym
+var c = DTLS.connect("dtls.example.com", 5684, 8000)
+if (c == null) {
+    print("connect / handshake failed")
+    return
+}
+c.send(Buffer.fromString("hello"))
+var reply = c.recv(2000)
+if (typeof(reply) == "map") {
+    print("got", reply.size(), "bytes back")
+}
+c.close()
+```
+
+#### In-process self-signed round-trip
+
+```zym
+// Mint a key + self-signed certificate via the Crypto native.
+var crypto = Crypto.create()
+var key  = crypto.generateRsa(2048)
+var cert = crypto.generateSelfSignedCertificate(
+    key,
+    "CN=localhost,O=zym,C=US",
+    "20230101000000",
+    "20330101000000")
+
+// Server: bind a UDP listener for per-source demux.
+var udps = UDP.listen("127.0.0.1", 0)
+var port = udps.localPort()
+
+// Client: kick off connect (non-waiting), then drive both sides in a
+// shared loop until the handshake completes.
+var dc = DTLS.connect("127.0.0.1", port, 0, { verify: false })
+var sd = null
+while (sd == null) {
+    dc.poll()
+    sd = DTLS.accept(udps, { key: key, cert: cert }, 0)
+    System.sleep(5)
+}
+while (dc.status() != "connected") {
+    dc.poll()
+    sd.poll()
+    System.sleep(5)
+}
+
+// Now we have an encrypted datagram channel.
+dc.send(Buffer.fromString("hello dtls"))
+sd.poll()
+print(sd.recv(1000).toString())     // -> "hello dtls"
+
+dc.close()
+sd.close()
+udps.close()
+```
+
+### `Sockets.waitAny` and DTLS / UDP server
+
+DTLS handles and UDP-server handles are valid `Sockets.waitAny`
+arguments. A DTLS sock counts as readable when a record is decrypted-
+and-ready or the connection terminated, and as writable when its
+status is `"connected"`. A `UDP.listen` server counts as readable
+when at least one new source has arrived (`is_connection_available()`).
+Mixing TCP, TLS, UDP, DTLS, TCP-server and UDP-server handles in one
+`waitAny` call is supported.
+
+### DTLS notes
+
+- The cookie exchange (RFC 6347 §4.2.1) is handled inside `DTLS.accept`.
+  Each call drives whatever progress the underlying state machine can
+  make in the available `timeoutMs`; the server's cookie key and any
+  in-flight client handshakes are persisted on the `udpServer` handle
+  itself, so calling `DTLS.accept(udpServer, ...)` repeatedly with
+  small timeouts is safe and is in fact the normal usage pattern.
+- The first call to `DTLS.accept(udpServer, opts, ...)` locks in the
+  server-side `{ key, cert }` for that `udpServer`. Subsequent calls
+  ignore the `opts` argument's key/cert pair — to switch credentials,
+  close the `udpServer` and start a new one.
+- `DTLS.connect`'s underlying UDP grace settles automatically; you do
+  not need to bind the source side yourself unless you want a specific
+  source port (use `DTLS.connectFrom`).
+- DTLS handshake timeouts: mbedTLS's internal retransmit timer starts
+  at ~1s and doubles on each retransmit, capped near 60s. Pick a
+  `timeoutMs` of at least 5–10 seconds for real-world peers; loopback
+  testing typically completes in well under 100ms.
+- `DTLS.send` / `dtls.recv` payloads are bounded by the path MTU. The
+  engine doesn't fragment application data — try to keep individual
+  records under ~1200 bytes for IPv4 internet paths.
+- DTLS does not retransmit application data. If reliability is needed,
+  either wrap a higher-level acknowledgement protocol on top, or use
+  `TLS` over `TCP` instead.

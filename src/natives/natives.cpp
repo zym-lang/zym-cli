@@ -20,5 +20,6 @@ void setupNatives(ZymVM* vm)
     zym_defineGlobal(vm, "TCP", nativeTcp_create(vm));
     zym_defineGlobal(vm, "UDP", nativeUdp_create(vm));
     zym_defineGlobal(vm, "TLS", nativeTls_create(vm));
+    zym_defineGlobal(vm, "DTLS", nativeDtls_create(vm));
     zym_defineGlobal(vm, "Sockets", nativeSockets_create(vm));
 }

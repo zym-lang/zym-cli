@@ -23,3 +23,4 @@ ZymValue nativeTcp_create(ZymVM* vm);
 ZymValue nativeUdp_create(ZymVM* vm);
 ZymValue nativeSockets_create(ZymVM* vm);
 ZymValue nativeTls_create(ZymVM* vm);
+ZymValue nativeDtls_create(ZymVM* vm);

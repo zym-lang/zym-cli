@@ -8,6 +8,9 @@
 //   "__tcp__"   -> TcpHandle*       (StreamPeerTCP)
 //   "__tcps__"  -> TcpsHandle*      (TCPServer)
 //   "__udp__"   -> UdpHandle*       (PacketPeerUDP)
+//   "__udps__"  -> UdpsHandle*      (UDPServer)
+//   "__tls__"   -> TlsHandle*       (StreamPeerTLS)
+//   "__dtls__"  -> DtlsHandle*      (PacketPeerDTLS)
 //
 // The model is non-blocking under the hood with `timeoutMs`-driven helpers
 // layered on top:
@@ -18,13 +21,16 @@
 // See docs/sockets.md and docs/conventions.md for the full surface.
 
 #include "core/crypto/crypto.h"
+#include "core/io/dtls_server.h"
 #include "core/io/ip.h"
 #include "core/io/ip_address.h"
 #include "core/io/net_socket.h"
+#include "core/io/packet_peer_dtls.h"
 #include "core/io/packet_peer_udp.h"
 #include "core/io/stream_peer_tcp.h"
 #include "core/io/stream_peer_tls.h"
 #include "core/io/tcp_server.h"
+#include "core/io/udp_server.h"
 #include "core/os/os.h"
 #include "core/string/ustring.h"
 #include "core/variant/variant.h"
@@ -40,16 +46,46 @@ extern bool zymExtractX509(ZymVM* vm, ZymValue v, Ref<X509Certificate>* out);
 struct TcpHandle  { Ref<StreamPeerTCP>  s; };
 struct TcpsHandle { Ref<TCPServer>      s; };
 struct UdpHandle  { Ref<PacketPeerUDP>  s; };
+// Server-side DTLS state lives on the UDP server handle so cookies and
+// in-flight handshakes persist across multiple `DTLS.accept` calls.
+// Lazily initialized on first DTLS.accept.
+struct DtlsPending {
+    Ref<PacketPeerUDP>  udp;
+    Ref<PacketPeerDTLS> dtls;
+    String              host;
+    int                 port = 0;
+};
+struct UdpsHandle {
+    Ref<UDPServer>      s;
+    Ref<DTLSServer>     dtls;
+    bool                dtlsSetUp = false;
+    Vector<DtlsPending> dtlsPending;
+};
 // TLS handle keeps the inner TCP alive in the same struct so it can't be
 // GC'd out from under the TLS layer (the StreamPeerTLS only holds a
 // Ref<StreamPeer> internally; we want a typed handle for setNoDelay /
 // localAddress / peerAddress / waitAny passthrough).
 struct TlsHandle  { Ref<StreamPeerTLS>  tls; Ref<StreamPeerTCP> base; };
+// DTLS handle similarly keeps the underlying UDP alive so the DTLS layer
+// can keep talking to it. `peerHost`/`peerPort` are remembered for
+// `peerAddress()` (PacketPeerDTLS doesn't surface them post-handshake).
+// `server` is set on server-side handles only -- the underlying UDP peer
+// shares its socket with this UDPServer, which must be poll()'d to flush
+// kernel-socket datagrams into the peer's queue.
+struct DtlsHandle {
+    Ref<PacketPeerDTLS> dtls;
+    Ref<PacketPeerUDP>  base;
+    Ref<UDPServer>      server; // null on client-side; non-null on server-side
+    String              peerHost;
+    int                 peerPort = 0;
+};
 
 static void tcpFinalizer (ZymVM*, void* d) { delete static_cast<TcpHandle*>(d); }
 static void tcpsFinalizer(ZymVM*, void* d) { delete static_cast<TcpsHandle*>(d); }
 static void udpFinalizer (ZymVM*, void* d) { delete static_cast<UdpHandle*>(d); }
+static void udpsFinalizer(ZymVM*, void* d) { delete static_cast<UdpsHandle*>(d); }
 static void tlsFinalizer (ZymVM*, void* d) { delete static_cast<TlsHandle*>(d); }
+static void dtlsFinalizer(ZymVM*, void* d) { delete static_cast<DtlsHandle*>(d); }
 
 // ---- value helpers ----
 
@@ -138,18 +174,22 @@ static ZymValue addrMap(ZymVM* vm, const IPAddress& ip, int port) {
 static TcpHandle*  unwrapTcp (ZymValue ctx) { return static_cast<TcpHandle* >(zym_getNativeData(ctx)); }
 static TcpsHandle* unwrapTcps(ZymValue ctx) { return static_cast<TcpsHandle*>(zym_getNativeData(ctx)); }
 static UdpHandle*  unwrapUdp (ZymValue ctx) { return static_cast<UdpHandle* >(zym_getNativeData(ctx)); }
+static UdpsHandle* unwrapUdps(ZymValue ctx) { return static_cast<UdpsHandle*>(zym_getNativeData(ctx)); }
 static TlsHandle*  unwrapTls (ZymValue ctx) { return static_cast<TlsHandle* >(zym_getNativeData(ctx)); }
+static DtlsHandle* unwrapDtls(ZymValue ctx) { return static_cast<DtlsHandle*>(zym_getNativeData(ctx)); }
 
 // Forward decls.
 static ZymValue makeTcpInstance(ZymVM* vm, Ref<StreamPeerTCP> s);
 static ZymValue makeTcpsInstance(ZymVM* vm, Ref<TCPServer> s);
 static ZymValue makeUdpInstance(ZymVM* vm, Ref<PacketPeerUDP> s);
+static ZymValue makeUdpsInstance(ZymVM* vm, Ref<UDPServer> s);
 static ZymValue makeTlsInstance(ZymVM* vm, Ref<StreamPeerTLS> tls, Ref<StreamPeerTCP> base);
-
+static ZymValue makeDtlsInstance(ZymVM* vm, Ref<PacketPeerDTLS> dtls, Ref<PacketPeerUDP> base, const String& peerHost, int peerPort, Ref<UDPServer> server = Ref<UDPServer>());
 ZymValue nativeTcp_create(ZymVM* vm);
 ZymValue nativeUdp_create(ZymVM* vm);
 ZymValue nativeSockets_create(ZymVM* vm);
 ZymValue nativeTls_create(ZymVM* vm);
+ZymValue nativeDtls_create(ZymVM* vm);
 
 // ============================================================================
 // TCP socket instance methods
@@ -1016,6 +1056,407 @@ static ZymValue f_tlsAccept(ZymVM* vm, ZymValue, ZymValue baseV, ZymValue optsV,
 }
 
 // ============================================================================
+// UDP server (per-source demux): UDP.listen / accept / poll / localPort / close
+// ============================================================================
+//
+// Wraps Godot's UDPServer, which buffers incoming datagrams keyed by source
+// (host, port) and produces a fresh `Ref<PacketPeerUDP>` per peer when
+// `take_connection()` is called. Each accepted peer is independent and can
+// be wrapped by `DTLS.accept` to layer DTLS on top.
+
+static ZymValue udps_localPort(ZymVM* vm, ZymValue ctx) {
+    UdpsHandle* h = unwrapUdps(ctx);
+    if (!h || h->s.is_null() || !h->s->is_listening()) return zym_newNumber(0.0);
+    return zym_newNumber((double)h->s->get_local_port());
+}
+
+static ZymValue udps_close(ZymVM* vm, ZymValue ctx) {
+    UdpsHandle* h = unwrapUdps(ctx);
+    if (h && h->s.is_valid()) h->s->stop();
+    return zym_newNull();
+}
+
+// accept(...) -> per-source UDP peer instance, or null if none ready before
+// the deadline. timeoutMs default = -1 (block forever); 0 = peek-only.
+static ZymValue udps_accept(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc) {
+    UdpsHandle* h = unwrapUdps(ctx);
+    if (!h || h->s.is_null()) return zym_newNull();
+    int64_t timeoutMs = -1;
+    if (optInt(vm, "UDP server.accept(...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
+    int64_t deadline = deadlineFor(timeoutMs);
+    while (true) {
+        h->s->poll();
+        if (h->s->is_connection_available()) {
+            Ref<PacketPeerUDP> peer = h->s->take_connection();
+            if (peer.is_valid()) return makeUdpInstance(vm, peer);
+        }
+        int rem = remainingMs(deadline);
+        if (timeoutMs >= 0 && rem == 0) return zym_newNull();
+        int q = (rem < 0 || rem > 20) ? 20 : rem;
+        OS::get_singleton()->delay_usec((uint32_t)q * 1000u);
+    }
+}
+
+static ZymValue f_udpListen(ZymVM* vm, ZymValue, ZymValue hostV, ZymValue portV) {
+    String host;  if (!reqStr(vm, hostV, "UDP.listen(host, port)", &host)) return ZYM_ERROR;
+    double portD; if (!reqNum(vm, portV, "UDP.listen(host, port)", &portD)) return ZYM_ERROR;
+    Ref<UDPServer> srv; srv.instantiate();
+    if (srv->listen((uint16_t)portD, parseBindHost(host)) != OK) return zym_newNull();
+    return makeUdpsInstance(vm, srv);
+}
+
+// ============================================================================
+// DTLS instance methods + factories
+// ============================================================================
+//
+// PacketPeerDTLS is a `PacketPeer` (datagram-shaped), not a `StreamPeer`, so
+// the surface mirrors UDP: send(buf) / recv() rather than read(n)/write(buf).
+// Each datagram is one DTLS record on the wire.
+
+static const char* dtlsStatusName(PacketPeerDTLS::Status s) {
+    switch (s) {
+        case PacketPeerDTLS::STATUS_DISCONNECTED:            return "closed";
+        case PacketPeerDTLS::STATUS_HANDSHAKING:             return "connecting";
+        case PacketPeerDTLS::STATUS_CONNECTED:               return "connected";
+        case PacketPeerDTLS::STATUS_ERROR:                   return "error";
+        case PacketPeerDTLS::STATUS_ERROR_HOSTNAME_MISMATCH: return "error";
+    }
+    return "error";
+}
+
+static ZymValue dtls_status(ZymVM* vm, ZymValue ctx) {
+    DtlsHandle* h = unwrapDtls(ctx);
+    if (!h || h->dtls.is_null()) return strZ(vm, String("error"));
+    return strZ(vm, String(dtlsStatusName(h->dtls->get_status())));
+}
+
+static ZymValue dtls_poll(ZymVM* vm, ZymValue ctx) {
+    DtlsHandle* h = unwrapDtls(ctx);
+    if (!h || h->dtls.is_null()) return strZ(vm, String("error"));
+    if (h->server.is_valid()) h->server->poll();
+    h->dtls->poll();
+    return strZ(vm, String(dtlsStatusName(h->dtls->get_status())));
+}
+
+static ZymValue dtls_available(ZymVM* vm, ZymValue ctx) {
+    DtlsHandle* h = unwrapDtls(ctx);
+    if (!h || h->dtls.is_null()) return zym_newNumber(0.0);
+    if (h->server.is_valid()) h->server->poll();
+    h->dtls->poll();
+    return zym_newNumber((double)h->dtls->get_available_packet_count());
+}
+
+// send(buf) -> "ok" | "busy" | "closed" | "error"
+// During handshake (status == "connecting") returns "busy" rather than
+// "error" so callers can poll until connected.
+static ZymValue dtls_send(ZymVM* vm, ZymValue ctx, ZymValue bufV) {
+    DtlsHandle* h = unwrapDtls(ctx);
+    PackedByteArray* pba; if (!reqBuf(vm, bufV, "DTLS.send(buf)", &pba)) return ZYM_ERROR;
+    if (!h || h->dtls.is_null()) return strZ(vm, String("closed"));
+    if (h->server.is_valid()) h->server->poll();
+    h->dtls->poll();
+    PacketPeerDTLS::Status st = h->dtls->get_status();
+    if (st == PacketPeerDTLS::STATUS_HANDSHAKING) return strZ(vm, String("busy"));
+    if (st == PacketPeerDTLS::STATUS_DISCONNECTED) return strZ(vm, String("closed"));
+    if (st != PacketPeerDTLS::STATUS_CONNECTED)    return strZ(vm, String("error"));
+    Error err = pba->size() == 0 ? OK : h->dtls->put_packet(pba->ptr(), pba->size());
+    if (err != OK) {
+        h->dtls->poll();
+        if (h->dtls->get_status() == PacketPeerDTLS::STATUS_DISCONNECTED) return strZ(vm, String("closed"));
+        return strZ(vm, String("error"));
+    }
+    return strZ(vm, String("ok"));
+}
+
+// recv(...) -> Buffer | "timeout" | "closed" | "error"
+// Post-handshake DTLS is a 1:1 association, so the source address isn't
+// returned (compare to UDP.recv which returns { data, host, port }).
+static ZymValue dtls_recv(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc) {
+    DtlsHandle* h = unwrapDtls(ctx);
+    if (!h || h->dtls.is_null()) return strZ(vm, String("closed"));
+    int64_t timeoutMs = -1;
+    if (optInt(vm, "DTLS.recv(...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
+    int64_t deadline = deadlineFor(timeoutMs);
+    while (true) {
+        if (h->server.is_valid()) h->server->poll();
+        h->dtls->poll();
+        PacketPeerDTLS::Status st = h->dtls->get_status();
+        if (st == PacketPeerDTLS::STATUS_DISCONNECTED) return strZ(vm, String("closed"));
+        if (st == PacketPeerDTLS::STATUS_ERROR ||
+            st == PacketPeerDTLS::STATUS_ERROR_HOSTNAME_MISMATCH) return strZ(vm, String("error"));
+        if (st == PacketPeerDTLS::STATUS_CONNECTED && h->dtls->get_available_packet_count() > 0) {
+            const uint8_t* data = nullptr;
+            int len = 0;
+            if (h->dtls->get_packet(&data, len) != OK) {
+                continue;
+            }
+            PackedByteArray buf;
+            if (len > 0) {
+                buf.resize(len);
+                memcpy(buf.ptrw(), data, len);
+            }
+            return makeBufferInstance(vm, buf);
+        }
+        int rem = remainingMs(deadline);
+        if (timeoutMs >= 0 && rem == 0) return strZ(vm, String("timeout"));
+        int q = (rem < 0 || rem > 20) ? 20 : rem;
+        OS::get_singleton()->delay_usec((uint32_t)q * 1000u);
+    }
+}
+
+static ZymValue dtls_peerAddress(ZymVM* vm, ZymValue ctx) {
+    DtlsHandle* h = unwrapDtls(ctx);
+    if (!h) return zym_newNull();
+    ZymValue m = zym_newMap(vm);
+    zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "host", strZ(vm, h->peerHost));
+    zym_mapSet(vm, m, "port", zym_newNumber((double)h->peerPort));
+    zym_popRoot(vm);
+    return m;
+}
+
+static ZymValue dtls_close(ZymVM* vm, ZymValue ctx) {
+    DtlsHandle* h = unwrapDtls(ctx);
+    if (h && h->dtls.is_valid()) h->dtls->disconnect_from_peer();
+    if (h && h->base.is_valid()) h->base->close();
+    return zym_newNull();
+}
+
+// Build a client-side TLSOptions for DTLS. Same shape as TLS.connect's opts:
+//   { verify: bool = true, trustedRoots: cert | [cert...] = null, commonName: string = "" }
+static Ref<TLSOptions> buildDtlsClientOpts(ZymVM* vm, ZymValue optsV) {
+    if (zym_isNull(optsV)) return TLSOptions::client();
+    if (!zym_isMap(optsV)) {
+        zym_runtimeError(vm, "DTLS.connect: opts must be a map { verify, trustedRoots, commonName }");
+        return Ref<TLSOptions>();
+    }
+    bool verify = true;
+    {
+        ZymValue v = zym_mapGet(vm, optsV, "verify");
+        if (v != ZYM_ERROR && !zym_isNull(v)) {
+            if (!zym_isBool(v)) { zym_runtimeError(vm, "DTLS.connect: opts.verify must be a bool"); return Ref<TLSOptions>(); }
+            verify = zym_asBool(v);
+        }
+    }
+    Ref<X509Certificate> trusted;
+    {
+        ZymValue v = zym_mapGet(vm, optsV, "trustedRoots");
+        if (v != ZYM_ERROR && !zym_isNull(v)) {
+            if (zym_isList(v)) {
+                int n = zym_listLength(v);
+                String combined;
+                for (int i = 0; i < n; i++) {
+                    ZymValue e = zym_listGet(vm, v, i);
+                    Ref<X509Certificate> one;
+                    if (!zymExtractX509(vm, e, &one)) {
+                        zym_runtimeError(vm, "DTLS.connect: opts.trustedRoots[%d] must be an X509Certificate", i);
+                        return Ref<TLSOptions>();
+                    }
+                    combined += one->save_to_string();
+                }
+                trusted = Ref<X509Certificate>(X509Certificate::create());
+                if (trusted->load_from_string(combined) != OK) {
+                    zym_runtimeError(vm, "DTLS.connect: failed to combine opts.trustedRoots");
+                    return Ref<TLSOptions>();
+                }
+            } else if (!zymExtractX509(vm, v, &trusted)) {
+                zym_runtimeError(vm, "DTLS.connect: opts.trustedRoots must be an X509Certificate or list of them");
+                return Ref<TLSOptions>();
+            }
+        }
+    }
+    String commonName;
+    {
+        ZymValue v = zym_mapGet(vm, optsV, "commonName");
+        if (v != ZYM_ERROR && !zym_isNull(v)) {
+            if (!zym_isString(v)) { zym_runtimeError(vm, "DTLS.connect: opts.commonName must be a string"); return Ref<TLSOptions>(); }
+            commonName = String::utf8(zym_asCString(v));
+        }
+    }
+    if (!verify) return TLSOptions::client_unsafe(trusted);
+    return TLSOptions::client(trusted, commonName);
+}
+
+// Internal: drive a DTLS handshake to completion (or deadline). Returns true
+// on STATUS_CONNECTED, false on terminal error / timeout.
+static bool driveDtlsHandshake(Ref<PacketPeerDTLS> dtls, int64_t timeoutMs) {
+    int64_t deadline = deadlineFor(timeoutMs);
+    while (true) {
+        dtls->poll();
+        PacketPeerDTLS::Status st = dtls->get_status();
+        if (st == PacketPeerDTLS::STATUS_CONNECTED) return true;
+        if (st == PacketPeerDTLS::STATUS_ERROR ||
+            st == PacketPeerDTLS::STATUS_ERROR_HOSTNAME_MISMATCH ||
+            st == PacketPeerDTLS::STATUS_DISCONNECTED) return false;
+        if (timeoutMs == 0) return st == PacketPeerDTLS::STATUS_CONNECTED;
+        int rem = remainingMs(deadline);
+        if (timeoutMs > 0 && rem == 0) return false;
+        int q = (rem < 0 || rem > 20) ? 20 : rem;
+        OS::get_singleton()->delay_usec((uint32_t)q * 1000u);
+    }
+}
+
+// DTLS.connect(host, port, [timeoutMs, opts]) — binds an ephemeral UDP and
+// runs the client-side handshake.
+static ZymValue f_dtlsConnect(ZymVM* vm, ZymValue, ZymValue hostV, ZymValue portV, ZymValue* vargs, int vargc) {
+    String host;  if (!reqStr(vm, hostV, "DTLS.connect(host, port, ...)", &host)) return ZYM_ERROR;
+    double portD; if (!reqNum(vm, portV, "DTLS.connect(host, port, ...)", &portD)) return ZYM_ERROR;
+    int64_t timeoutMs = -1;
+    if (optInt(vm, "DTLS.connect(host, port, ...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
+    ZymValue optsV = (vargc >= 2) ? vargs[1] : zym_newNull();
+    Ref<TLSOptions> opts = buildDtlsClientOpts(vm, optsV);
+    if (opts.is_null()) return ZYM_ERROR; // error already raised
+
+    IP* ip = IP::get_singleton();
+    if (!ip) { zym_runtimeError(vm, "DTLS.connect: IP singleton missing"); return ZYM_ERROR; }
+    IPAddress addr = host.is_valid_ip_address() ? IPAddress(host) : ip->resolve_hostname(host, IP::TYPE_ANY);
+    if (!addr.is_valid()) return zym_newNull();
+
+    Ref<PacketPeerUDP> base; base.instantiate();
+    if (base->connect_to_host(addr, (int)portD) != OK) return zym_newNull();
+
+    Ref<PacketPeerDTLS> dtls = Ref<PacketPeerDTLS>(PacketPeerDTLS::create());
+    if (dtls.is_null()) { zym_runtimeError(vm, "DTLS.connect: PacketPeerDTLS unavailable (mbedtls module not built?)"); return ZYM_ERROR; }
+    if (dtls->connect_to_peer(base, host, opts) != OK) return zym_newNull();
+
+    if (!driveDtlsHandshake(dtls, timeoutMs) && timeoutMs != 0) return zym_newNull();
+    return makeDtlsInstance(vm, dtls, base, host, (int)portD);
+}
+
+// DTLS.connectFrom(udp, host, port, [timeoutMs, opts]) — caller-supplied UDP
+// (e.g. for source-port pinning, multicast). The supplied UDP must be unbound
+// or only locally bound; we set its destination via connect_to_host.
+static ZymValue f_dtlsConnectFrom(ZymVM* vm, ZymValue, ZymValue udpV, ZymValue hostV, ZymValue portV, ZymValue* vargs, int vargc) {
+    if (!zym_isMap(udpV)) { zym_runtimeError(vm, "DTLS.connectFrom(udp, host, port, ...): udp must be a UDP socket"); return ZYM_ERROR; }
+    ZymValue uctx = zym_mapGet(vm, udpV, "__udp__");
+    if (uctx == ZYM_ERROR) { zym_runtimeError(vm, "DTLS.connectFrom: udp must be a UDP socket from UDP.bind / UDP.listen accept"); return ZYM_ERROR; }
+    UdpHandle* uh = unwrapUdp(uctx);
+    if (!uh || uh->s.is_null()) { zym_runtimeError(vm, "DTLS.connectFrom: udp socket is closed"); return ZYM_ERROR; }
+    String host;  if (!reqStr(vm, hostV, "DTLS.connectFrom(udp, host, port, ...)", &host)) return ZYM_ERROR;
+    double portD; if (!reqNum(vm, portV, "DTLS.connectFrom(udp, host, port, ...)", &portD)) return ZYM_ERROR;
+    int64_t timeoutMs = -1;
+    if (optInt(vm, "DTLS.connectFrom(udp, host, port, ...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
+    ZymValue optsV = (vargc >= 2) ? vargs[1] : zym_newNull();
+    Ref<TLSOptions> opts = buildDtlsClientOpts(vm, optsV);
+    if (opts.is_null()) return ZYM_ERROR;
+
+    // Set destination if not already connected to the right peer.
+    IP* ip = IP::get_singleton();
+    if (!ip) { zym_runtimeError(vm, "DTLS.connectFrom: IP singleton missing"); return ZYM_ERROR; }
+    IPAddress addr = host.is_valid_ip_address() ? IPAddress(host) : ip->resolve_hostname(host, IP::TYPE_ANY);
+    if (!addr.is_valid()) return zym_newNull();
+    if (!uh->s->is_socket_connected()) {
+        if (uh->s->connect_to_host(addr, (int)portD) != OK) return zym_newNull();
+    }
+
+    Ref<PacketPeerDTLS> dtls = Ref<PacketPeerDTLS>(PacketPeerDTLS::create());
+    if (dtls.is_null()) { zym_runtimeError(vm, "DTLS.connectFrom: PacketPeerDTLS unavailable"); return ZYM_ERROR; }
+    if (dtls->connect_to_peer(uh->s, host, opts) != OK) return zym_newNull();
+
+    if (!driveDtlsHandshake(dtls, timeoutMs) && timeoutMs != 0) return zym_newNull();
+    return makeDtlsInstance(vm, dtls, uh->s, host, (int)portD);
+}
+
+// DTLS.accept(udpServer, { key, cert }, [timeoutMs]) — server-side handshake.
+// `udpServer` is a UDP server handle from UDP.listen(...). This call drives
+// the entire DTLS-server cookie-exchange + handshake internally:
+//   - polls the underlying UDPServer for incoming packets
+//   - on a fresh source, runs DTLSServer::take_connection (which sends
+//     HelloVerifyRequest if no cookie); peers in HANDSHAKING are kept and
+//     their handshakes driven via poll() across iterations
+//   - returns the first DTLS peer that reaches CONNECTED, or null on timeout.
+// DTLSServer is server-side wrapping plumbing only -- not exposed to scripts.
+static ZymValue f_dtlsAccept(ZymVM* vm, ZymValue, ZymValue srvV, ZymValue optsV, ZymValue* vargs, int vargc) {
+    if (!zym_isMap(srvV)) { zym_runtimeError(vm, "DTLS.accept(udpServer, opts, ...): udpServer must be a UDP.listen() handle"); return ZYM_ERROR; }
+    ZymValue sctx = zym_mapGet(vm, srvV, "__udps__");
+    if (sctx == ZYM_ERROR) { zym_runtimeError(vm, "DTLS.accept: first arg must be a UDP server (UDP.listen(host, port))"); return ZYM_ERROR; }
+    UdpsHandle* sh = unwrapUdps(sctx);
+    if (!sh || sh->s.is_null() || !sh->s->is_listening()) { zym_runtimeError(vm, "DTLS.accept: UDP server is not listening"); return ZYM_ERROR; }
+    if (!zym_isMap(optsV)) { zym_runtimeError(vm, "DTLS.accept(udpServer, opts, ...): opts must be a map { key, cert }"); return ZYM_ERROR; }
+
+    Ref<CryptoKey> key;
+    Ref<X509Certificate> cert;
+    {
+        ZymValue v = zym_mapGet(vm, optsV, "key");
+        if (v == ZYM_ERROR || !zymExtractCryptoKey(vm, v, &key)) {
+            zym_runtimeError(vm, "DTLS.accept: opts.key must be a CryptoKey"); return ZYM_ERROR;
+        }
+    }
+    {
+        ZymValue v = zym_mapGet(vm, optsV, "cert");
+        if (v == ZYM_ERROR || !zymExtractX509(vm, v, &cert)) {
+            zym_runtimeError(vm, "DTLS.accept: opts.cert must be an X509Certificate"); return ZYM_ERROR;
+        }
+    }
+    int64_t timeoutMs = -1;
+    if (optInt(vm, "DTLS.accept(udpServer, opts, ...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
+
+    // Persist DTLSServer on the UdpsHandle so cookies survive across calls.
+    if (sh->dtls.is_null()) {
+        sh->dtls = Ref<DTLSServer>(DTLSServer::create());
+        if (sh->dtls.is_null()) { zym_runtimeError(vm, "DTLS.accept: DTLSServer unavailable (mbedtls module not built?)"); return ZYM_ERROR; }
+        sh->dtlsSetUp = false;
+    }
+    if (!sh->dtlsSetUp) {
+        Ref<TLSOptions> serverOpts = TLSOptions::server(key, cert);
+        if (serverOpts.is_null()) { zym_runtimeError(vm, "DTLS.accept: failed to build server TLSOptions"); return ZYM_ERROR; }
+        if (sh->dtls->setup(serverOpts) != OK) return zym_newNull();
+        sh->dtlsSetUp = true;
+    }
+    Ref<DTLSServer>& dsrv = sh->dtls;
+
+    int64_t deadline = deadlineFor(timeoutMs);
+    while (true) {
+        sh->s->poll();
+        // Pull every brand-new pending UDP peer out and run the first
+        // DTLS handshake step (which sends HelloVerifyRequest if no cookie).
+        while (sh->s->is_connection_available()) {
+            Ref<PacketPeerUDP> u = sh->s->take_connection();
+            if (u.is_null()) break;
+            String host = String(u->get_packet_address());
+            int    port = (int)u->get_packet_port();
+            Ref<PacketPeerDTLS> d = dsrv->take_connection(u);
+            if (d.is_null()) continue;
+            PacketPeerDTLS::Status st = d->get_status();
+            if (st == PacketPeerDTLS::STATUS_CONNECTED) {
+                DtlsPending p; p.udp = u; p.dtls = d; p.host = host; p.port = port;
+                // We do not append to dtlsPending — peer is being returned.
+                return makeDtlsInstance(vm, p.dtls, p.udp, p.host, p.port, sh->s);
+            }
+            if (st == PacketPeerDTLS::STATUS_HANDSHAKING) {
+                DtlsPending p; p.udp = u; p.dtls = d; p.host = host; p.port = port;
+                sh->dtlsPending.push_back(p);
+            }
+            // STATUS_ERROR (HELLO_VERIFY_REQUIRED) -> drop this attempt; the
+            // cookie-bearing ClientHello will arrive at the same source and
+            // produce a fresh pending UDP peer on the next UDPServer.poll().
+            // Note: dropping `u` here releases the UDPServer's peer slot via
+            // PacketPeerUDP::~PacketPeerUDP -> close -> remove_peer.
+        }
+        // Drive in-flight handshakes (persisted across calls on UdpsHandle).
+        for (int i = sh->dtlsPending.size() - 1; i >= 0; i--) {
+            Ref<PacketPeerDTLS> d = sh->dtlsPending[i].dtls;
+            d->poll();
+            PacketPeerDTLS::Status st = d->get_status();
+            if (st == PacketPeerDTLS::STATUS_CONNECTED) {
+                DtlsPending p = sh->dtlsPending[i];
+                sh->dtlsPending.remove_at(i);
+                return makeDtlsInstance(vm, p.dtls, p.udp, p.host, p.port, sh->s);
+            }
+            if (st == PacketPeerDTLS::STATUS_DISCONNECTED ||
+                st == PacketPeerDTLS::STATUS_ERROR ||
+                st == PacketPeerDTLS::STATUS_ERROR_HOSTNAME_MISMATCH) {
+                sh->dtlsPending.remove_at(i);
+            }
+        }
+        int rem = remainingMs(deadline);
+        if (timeoutMs >= 0 && rem == 0) return zym_newNull();
+        int q = (rem < 0 || rem > 20) ? 20 : rem;
+        OS::get_singleton()->delay_usec((uint32_t)q * 1000u);
+    }
+}
+
+// ============================================================================
 // Sockets.waitAny(handles, mode, timeoutMs)
 // ============================================================================
 //
@@ -1086,6 +1527,36 @@ static bool isReady(ZymVM* vm, ZymValue handle, WaitMode mode) {
                          st == StreamPeerTLS::STATUS_ERROR_HOSTNAME_MISMATCH);
             bool readable = dead || h->tls->get_available_bytes() > 0;
             bool writable = dead || st == StreamPeerTLS::STATUS_CONNECTED;
+            switch (mode) {
+                case WAIT_READ:  return readable;
+                case WAIT_WRITE: return writable;
+                case WAIT_ANY:   return readable || writable;
+            }
+        }
+    }
+    // UDP server
+    {
+        ZymValue ctx = zym_mapGet(vm, handle, "__udps__");
+        if (ctx != ZYM_ERROR) {
+            UdpsHandle* h = static_cast<UdpsHandle*>(zym_getNativeData(ctx));
+            if (!h || h->s.is_null()) return true;
+            h->s->poll();
+            return h->s->is_connection_available() || !h->s->is_listening();
+        }
+    }
+    // DTLS
+    {
+        ZymValue ctx = zym_mapGet(vm, handle, "__dtls__");
+        if (ctx != ZYM_ERROR) {
+            DtlsHandle* h = static_cast<DtlsHandle*>(zym_getNativeData(ctx));
+            if (!h || h->dtls.is_null()) return mode != WAIT_WRITE;
+            h->dtls->poll();
+            PacketPeerDTLS::Status st = h->dtls->get_status();
+            bool dead = (st == PacketPeerDTLS::STATUS_DISCONNECTED ||
+                         st == PacketPeerDTLS::STATUS_ERROR ||
+                         st == PacketPeerDTLS::STATUS_ERROR_HOSTNAME_MISMATCH);
+            bool readable = dead || h->dtls->get_available_packet_count() > 0;
+            bool writable = dead || st == PacketPeerDTLS::STATUS_CONNECTED;
             switch (mode) {
                 case WAIT_READ:  return readable;
                 case WAIT_WRITE: return writable;
@@ -1207,6 +1678,45 @@ static ZymValue makeUdpInstance(ZymVM* vm, Ref<PacketPeerUDP> s) {
     return obj;
 }
 
+static ZymValue makeUdpsInstance(ZymVM* vm, Ref<UDPServer> s) {
+    auto* data = new UdpsHandle{ s };
+    ZymValue ctx = zym_createNativeContext(vm, data, udpsFinalizer);
+    zym_pushRoot(vm, ctx);
+    ZymValue obj = zym_newMap(vm);
+    zym_pushRoot(vm, obj);
+    zym_mapSet(vm, obj, "__udps__", ctx);
+    MV(obj, ctx, "accept",    "accept(...)",   udps_accept);
+    M (obj, ctx, "localPort", "localPort()",   udps_localPort);
+    M (obj, ctx, "close",     "close()",       udps_close);
+    zym_popRoot(vm); // obj
+    zym_popRoot(vm); // ctx
+    return obj;
+}
+
+static ZymValue makeDtlsInstance(ZymVM* vm, Ref<PacketPeerDTLS> dtls, Ref<PacketPeerUDP> base, const String& peerHost, int peerPort, Ref<UDPServer> server) {
+    auto* data = new DtlsHandle();
+    data->dtls = dtls;
+    data->base = base;
+    data->server = server;
+    data->peerHost = peerHost;
+    data->peerPort = peerPort;
+    ZymValue ctx = zym_createNativeContext(vm, data, dtlsFinalizer);
+    zym_pushRoot(vm, ctx);
+    ZymValue obj = zym_newMap(vm);
+    zym_pushRoot(vm, obj);
+    zym_mapSet(vm, obj, "__dtls__", ctx);
+    M (obj, ctx, "status",      "status()",       dtls_status);
+    M (obj, ctx, "poll",        "poll()",         dtls_poll);
+    M (obj, ctx, "available",   "available()",    dtls_available);
+    M (obj, ctx, "send",        "send(buf)",      dtls_send);
+    MV(obj, ctx, "recv",        "recv(...)",      dtls_recv);
+    M (obj, ctx, "peerAddress", "peerAddress()",  dtls_peerAddress);
+    M (obj, ctx, "close",       "close()",        dtls_close);
+    zym_popRoot(vm); // obj
+    zym_popRoot(vm); // ctx
+    return obj;
+}
+
 static ZymValue makeTlsInstance(ZymVM* vm, Ref<StreamPeerTLS> tls, Ref<StreamPeerTCP> base) {
     auto* data = new TlsHandle{ tls, base };
     ZymValue ctx = zym_createNativeContext(vm, data, tlsFinalizer);
@@ -1273,11 +1783,37 @@ ZymValue nativeUdp_create(ZymVM* vm) {
     ZymValue obj = zym_newMap(vm);
     zym_pushRoot(vm, obj);
 
-    ZymValue cl = zym_createNativeClosure(vm, "bind(host, port)", (void*)f_udpBind, ctx);
-    zym_pushRoot(vm, cl);
-    zym_mapSet(vm, obj, "bind", cl);
-    zym_popRoot(vm);
+    {
+        ZymValue cl = zym_createNativeClosure(vm, "bind(host, port)", (void*)f_udpBind, ctx);
+        zym_pushRoot(vm, cl);
+        zym_mapSet(vm, obj, "bind", cl);
+        zym_popRoot(vm);
+    }
+    {
+        ZymValue cl = zym_createNativeClosure(vm, "listen(host, port)", (void*)f_udpListen, ctx);
+        zym_pushRoot(vm, cl);
+        zym_mapSet(vm, obj, "listen", cl);
+        zym_popRoot(vm);
+    }
 
+    zym_popRoot(vm); // obj
+    zym_popRoot(vm); // ctx
+    return obj;
+}
+
+ZymValue nativeDtls_create(ZymVM* vm) {
+    ZymValue ctx = zym_createNativeContext(vm, nullptr, nullptr);
+    zym_pushRoot(vm, ctx);
+    ZymValue obj = zym_newMap(vm);
+    zym_pushRoot(vm, obj);
+#define FV(name, sig, fn) do { \
+    ZymValue cl = zym_createNativeClosureVariadic(vm, sig, (void*)fn, ctx); \
+    zym_pushRoot(vm, cl); zym_mapSet(vm, obj, name, cl); zym_popRoot(vm); \
+} while (0)
+    FV("connect",     "connect(host, port, ...)",          f_dtlsConnect);
+    FV("connectFrom", "connectFrom(udp, host, port, ...)", f_dtlsConnectFrom);
+    FV("accept",      "accept(udpServer, opts, ...)",      f_dtlsAccept);
+#undef FV
     zym_popRoot(vm); // obj
     zym_popRoot(vm); // ctx
     return obj;

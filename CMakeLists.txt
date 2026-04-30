@@ -72,6 +72,11 @@ set(ZYM_NATIVE_SOURCES
         src/natives/regex.cpp
         src/natives/json.cpp
         src/natives/crypto.cpp
+        src/natives/rng.cpp
+        src/natives/hash.cpp
+        src/natives/system.cpp
+        src/natives/path.cpp
+        src/natives/ip.cpp
 )
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and

@@ -2,10 +2,13 @@
 // Per-instance: each buffer is a map-of-closures bound to a context whose
 // native data is a `new PackedByteArray` (deleted by the finalizer).
 // CoW value-semantics: mutation methods detach via ptrw() when shared.
+#include "core/io/compression.h"
 #include "core/io/marshalls.h"
 #include "core/string/ustring.h"
 #include "core/templates/vector.h"
 #include "core/variant/variant.h"
+
+#include <zlib.h>
 
 #include "natives.hpp"
 
@@ -360,6 +363,216 @@ ENCODE_METHOD_FLOAT(encodeDouble, 8, encode_double, double, bswap_double_if)
 #undef ENCODE_METHOD_INT
 #undef ENCODE_METHOD_FLOAT
 
+// ---- compression ----
+//
+// Algorithms map directly onto Godot's Compression::Mode. Beyond Godot's
+// hardcoded defaults we expose an optional `level` argument:
+//   "fastlz"  -> no level
+//   "deflate" -> 1..9 (zlib); default Z_DEFAULT_COMPRESSION (6-equivalent)
+//   "gzip"    -> 1..9 (zlib); default Z_DEFAULT_COMPRESSION (6-equivalent)
+//   "zstd"    -> 1..22; default 3
+//   "brotli"  -> decompress only (compress always fails in Godot core)
+
+// Returns true on success and writes mode + level metadata.
+// `out_min_level` / `out_max_level` are inclusive; -1 means "level not accepted".
+static bool parseCompressAlgo(ZymVM* vm, const char* where, ZymValue algoV,
+                              Compression::Mode* out_mode,
+                              int* out_min_level, int* out_max_level,
+                              bool* out_can_compress) {
+    String s;
+    if (!reqString(vm, algoV, where, &s)) return false;
+    String a = s.to_lower();
+    if (a == "fastlz")  { *out_mode = Compression::MODE_FASTLZ;  *out_min_level = -1; *out_max_level = -1; *out_can_compress = true;  return true; }
+    if (a == "deflate") { *out_mode = Compression::MODE_DEFLATE; *out_min_level =  1; *out_max_level =  9; *out_can_compress = true;  return true; }
+    if (a == "gzip")    { *out_mode = Compression::MODE_GZIP;    *out_min_level =  1; *out_max_level =  9; *out_can_compress = true;  return true; }
+    if (a == "zstd")    { *out_mode = Compression::MODE_ZSTD;    *out_min_level =  1; *out_max_level = 22; *out_can_compress = true;  return true; }
+    if (a == "brotli")  { *out_mode = Compression::MODE_BROTLI;  *out_min_level = -1; *out_max_level = -1; *out_can_compress = false; return true; }
+    zym_runtimeError(vm, "%s: unknown algorithm \"%s\" (expected \"fastlz\", \"deflate\", \"gzip\", \"zstd\", or \"brotli\")",
+                     where, s.utf8().get_data());
+    return false;
+}
+
+static ZymValue b_compress(ZymVM* vm, ZymValue ctx, ZymValue algoV, ZymValue* vargs, int vargc) {
+    Compression::Mode mode;
+    int minL, maxL; bool canCompress;
+    if (!parseCompressAlgo(vm, "Buffer.compress(algo, level?)", algoV,
+                           &mode, &minL, &maxL, &canCompress)) return ZYM_ERROR;
+    if (!canCompress) {
+        zym_runtimeError(vm, "Buffer.compress(algo, level?): \"brotli\" is decompress-only");
+        return ZYM_ERROR;
+    }
+    if (vargc > 1) {
+        zym_runtimeError(vm, "Buffer.compress(algo, level?): too many arguments");
+        return ZYM_ERROR;
+    }
+
+    int level = -1; // sentinel: "no level given, use Godot defaults"
+    if (vargc == 1) {
+        int64_t lv;
+        if (!reqInt(vm, vargs[0], "Buffer.compress(algo, level?)", &lv)) return ZYM_ERROR;
+        if (minL < 0) {
+            zym_runtimeError(vm, "Buffer.compress(algo, level?): \"%s\" does not accept a level",
+                             zym_asCString(algoV));
+            return ZYM_ERROR;
+        }
+        if (lv < minL || lv > maxL) {
+            zym_runtimeError(vm, "Buffer.compress(algo, level?): level %lld out of range for \"%s\" (%d..%d)",
+                             (long long)lv, zym_asCString(algoV), minL, maxL);
+            return ZYM_ERROR;
+        }
+        level = (int)lv;
+    }
+
+    // Apply level to Godot's static config for this call. Save/restore so we
+    // don't disturb other code paths (FileAccessCompressed, exporters, etc.).
+    int saved_zlib_level  = Compression::zlib_level;
+    int saved_gzip_level  = Compression::gzip_level;
+    int saved_zstd_level  = Compression::zstd_level;
+    if (level >= 0) {
+        switch (mode) {
+            case Compression::MODE_DEFLATE: Compression::zlib_level = level; break;
+            case Compression::MODE_GZIP:    Compression::gzip_level = level; break;
+            case Compression::MODE_ZSTD:    Compression::zstd_level = level; break;
+            default: break;
+        }
+    }
+
+    auto* src = unwrap(ctx);
+    int64_t src_size = (int64_t)src->size();
+
+    PackedByteArray out;
+    if (src_size == 0) {
+        // Compressing empty input: most algos produce a valid empty/header-only
+        // stream. Use the engine's bound API.
+        int64_t bound = Compression::get_max_compressed_buffer_size(0, mode);
+        if (bound < 0) {
+            Compression::zlib_level = saved_zlib_level;
+            Compression::gzip_level = saved_gzip_level;
+            Compression::zstd_level = saved_zstd_level;
+            return zym_newNull();
+        }
+        out.resize(bound);
+        int64_t got = Compression::compress(out.ptrw(), src->ptr(), 0, mode);
+        Compression::zlib_level = saved_zlib_level;
+        Compression::gzip_level = saved_gzip_level;
+        Compression::zstd_level = saved_zstd_level;
+        if (got < 0) return zym_newNull();
+        out.resize(got);
+        return makeInstance(vm, out);
+    }
+
+    int64_t bound = Compression::get_max_compressed_buffer_size(src_size, mode);
+    if (bound < 0) {
+        Compression::zlib_level = saved_zlib_level;
+        Compression::gzip_level = saved_gzip_level;
+        Compression::zstd_level = saved_zstd_level;
+        return zym_newNull();
+    }
+    out.resize(bound);
+    int64_t got = Compression::compress(out.ptrw(), src->ptr(), src_size, mode);
+
+    Compression::zlib_level = saved_zlib_level;
+    Compression::gzip_level = saved_gzip_level;
+    Compression::zstd_level = saved_zstd_level;
+
+    if (got < 0) return zym_newNull();
+    out.resize(got);
+    return makeInstance(vm, out);
+}
+
+static ZymValue b_decompress(ZymVM* vm, ZymValue ctx, ZymValue algoV, ZymValue maxV) {
+    Compression::Mode mode;
+    int minL, maxL; bool canCompress;
+    if (!parseCompressAlgo(vm, "Buffer.decompress(algo, maxOutputSize)", algoV,
+                           &mode, &minL, &maxL, &canCompress)) return ZYM_ERROR;
+    int64_t maxOut;
+    if (!reqInt(vm, maxV, "Buffer.decompress(algo, maxOutputSize)", &maxOut)) return ZYM_ERROR;
+    if (maxOut < 0) {
+        zym_runtimeError(vm, "Buffer.decompress(algo, maxOutputSize): maxOutputSize must be >= 0");
+        return ZYM_ERROR;
+    }
+
+    auto* src = unwrap(ctx);
+    int64_t src_size = (int64_t)src->size();
+
+    // gzip / deflate / brotli support streaming via decompress_dynamic, which
+    // grows the output as needed up to maxOut. fastlz / zstd require a single-
+    // shot decompress with a pre-sized destination, so we allocate maxOut and
+    // shrink to fit afterwards.
+    PackedByteArray out;
+    if (mode == Compression::MODE_GZIP || mode == Compression::MODE_DEFLATE || mode == Compression::MODE_BROTLI) {
+        if (src_size == 0) {
+            // decompress_dynamic rejects empty input. Treat as empty result.
+            return makeInstance(vm, out);
+        }
+        Vector<uint8_t> tmp;
+        int rc = Compression::decompress_dynamic(&tmp, maxOut, src->ptr(), src_size, mode);
+        if (rc != OK) return zym_newNull();
+        out.resize(tmp.size());
+        if (tmp.size() > 0) memcpy(out.ptrw(), tmp.ptr(), tmp.size());
+        return makeInstance(vm, out);
+    }
+
+    // fastlz / zstd: pre-size to maxOut, single-shot, then shrink.
+    if (maxOut == 0) return makeInstance(vm, out);
+    out.resize(maxOut);
+    int64_t got = Compression::decompress(out.ptrw(), maxOut, src->ptr(), src_size, mode);
+    if (got < 0) return zym_newNull();
+    out.resize(got);
+    return makeInstance(vm, out);
+}
+
+// Streaming-style decompress that grows its own output buffer. Slower than
+// `decompress` (multiple full copies as the buffer grows) but doesn't require
+// the caller to know the decompressed size ahead of time. Only the algorithms
+// whose underlying decoder supports streaming are accepted: gzip, deflate,
+// brotli. fastlz and zstd are rejected with a runtime error.
+//
+// `maxOutputSize` is optional. If omitted (0 args), the decompression is
+// unbounded (-1). If supplied, it must be >= 0; passing 0 yields an empty
+// Buffer. Exceeding the cap mid-stream returns null (the underlying engine
+// reports Z_BUF_ERROR).
+static ZymValue b_decompressDynamic(ZymVM* vm, ZymValue ctx, ZymValue algoV, ZymValue* vargs, int vargc) {
+    Compression::Mode mode;
+    int minL, maxL; bool canCompress;
+    if (!parseCompressAlgo(vm, "Buffer.decompressDynamic(algo, maxOutputSize?)", algoV,
+                           &mode, &minL, &maxL, &canCompress)) return ZYM_ERROR;
+    if (mode != Compression::MODE_GZIP && mode != Compression::MODE_DEFLATE && mode != Compression::MODE_BROTLI) {
+        zym_runtimeError(vm, "Buffer.decompressDynamic(algo, maxOutputSize?): \"%s\" does not support dynamic decompression (use decompress instead)",
+                         zym_asCString(algoV));
+        return ZYM_ERROR;
+    }
+    if (vargc > 1) {
+        zym_runtimeError(vm, "Buffer.decompressDynamic(algo, maxOutputSize?): too many arguments");
+        return ZYM_ERROR;
+    }
+
+    int64_t maxOut = -1; // sentinel: unbounded
+    if (vargc == 1) {
+        if (!reqInt(vm, vargs[0], "Buffer.decompressDynamic(algo, maxOutputSize?)", &maxOut)) return ZYM_ERROR;
+        if (maxOut < 0) {
+            zym_runtimeError(vm, "Buffer.decompressDynamic(algo, maxOutputSize?): maxOutputSize must be >= 0");
+            return ZYM_ERROR;
+        }
+    }
+
+    auto* src = unwrap(ctx);
+    int64_t src_size = (int64_t)src->size();
+
+    PackedByteArray out;
+    if (src_size == 0) {
+        // decompress_dynamic rejects empty input; surface that as an empty result.
+        return makeInstance(vm, out);
+    }
+
+    Vector<uint8_t> tmp;
+    int rc = Compression::decompress_dynamic(&tmp, maxOut, src->ptr(), src_size, mode);
+    if (rc != OK) return zym_newNull();
+    out.resize(tmp.size());
+    if (tmp.size() > 0) memcpy(out.ptrw(), tmp.ptr(), tmp.size());
+    return makeInstance(vm, out);
+}
+
 // ---- instance assembly ----
 
 static ZymValue makeInstance(ZymVM* vm, const PackedByteArray& src) {
@@ -411,6 +624,10 @@ static ZymValue makeInstance(ZymVM* vm, const PackedByteArray& src) {
     M("hex",       "hex()",               b_hex);
     M("toUtf8",    "toUtf8()",            b_toUtf8);
     M("toAscii",   "toAscii()",           b_toAscii);
+
+    MV("compress",         "compress(algo, ...)",                         b_compress);
+    M ("decompress",       "decompress(algo, maxOutputSize)",             b_decompress);
+    MV("decompressDynamic","decompressDynamic(algo, ...)",                b_decompressDynamic);
 
     MV("decodeU8",     "decodeU8(offset, ...)",     b_decodeU8);
     MV("decodeI8",     "decodeI8(offset, ...)",     b_decodeI8);

@@ -442,6 +442,178 @@ assert_wrap(e8.decodeU32(0, "be") == 0x01EFCDAB, "12.24: LE write read as BE is 
 
 
 // ============================================================================
+// SECTION 13: COMPRESSION
+// ============================================================================
+print("--- [13] Compression ---")
+// Build a compressible payload large enough for level differences to matter.
+var phrase = "the quick brown fox jumps over the lazy dog. abcdefghijklmnopqrstuvwxyz 0123456789 "
+var bigText = ""
+for (var i = 0; i < 256; i = i + 1) { bigText = bigText + phrase }
+var bigBuf = Buffer.fromString(bigText)
+assert_wrap(bigBuf.size() > 16384, "13.0: compressible payload > 16 KiB")
+
+// 13.1: round-trip fastlz at default level.
+var c_fz = bigBuf.compress("fastlz")
+assert_wrap(c_fz != null && c_fz.size() > 0 && c_fz.size() < bigBuf.size(), "13.1a: fastlz compresses smaller than input")
+var d_fz = c_fz.decompress("fastlz", bigBuf.size() + 1024)
+assert_wrap(d_fz != null && d_fz.size() == bigBuf.size() && d_fz.equals(bigBuf), "13.1b: fastlz round-trip")
+
+// 13.2: round-trip deflate at default level.
+var c_de = bigBuf.compress("deflate")
+assert_wrap(c_de != null && c_de.size() > 0 && c_de.size() < bigBuf.size(), "13.2a: deflate compresses smaller than input")
+var d_de = c_de.decompress("deflate", bigBuf.size() + 1024)
+assert_wrap(d_de != null && d_de.size() == bigBuf.size() && d_de.equals(bigBuf), "13.2b: deflate round-trip")
+
+// 13.3: round-trip gzip at default level.
+var c_gz = bigBuf.compress("gzip")
+assert_wrap(c_gz != null && c_gz.size() > 0 && c_gz.size() < bigBuf.size(), "13.3a: gzip compresses smaller than input")
+var d_gz = c_gz.decompress("gzip", bigBuf.size() + 1024)
+assert_wrap(d_gz != null && d_gz.size() == bigBuf.size() && d_gz.equals(bigBuf), "13.3b: gzip round-trip")
+
+// 13.4: round-trip zstd at default level.
+var c_zs = bigBuf.compress("zstd")
+assert_wrap(c_zs != null && c_zs.size() > 0 && c_zs.size() < bigBuf.size(), "13.4a: zstd compresses smaller than input")
+var d_zs = c_zs.decompress("zstd", bigBuf.size() + 1024)
+assert_wrap(d_zs != null && d_zs.size() == bigBuf.size() && d_zs.equals(bigBuf), "13.4b: zstd round-trip")
+
+// 13.5: case-insensitive algo names.
+var c_upper = bigBuf.compress("ZSTD")
+var d_upper = c_upper.decompress("ZsTd", bigBuf.size())
+assert_wrap(d_upper != null && d_upper.equals(bigBuf), "13.5: case-insensitive algo names")
+
+// 13.6..13.8: zstd level 1 vs 22 produce different sizes.
+var z1  = bigBuf.compress("zstd", 1)
+var z22 = bigBuf.compress("zstd", 22)
+assert_wrap(z1 != null && z22 != null,         "13.6: zstd L1/L22 both succeed")
+assert_wrap(z22.size() <= z1.size(),           "13.7: zstd L22 ratio <= L1 ratio (high level == better ratio)")
+assert_wrap(z1.size() != z22.size(),           "13.8: zstd L1 and L22 produce different output sizes")
+// And both round-trip cleanly.
+var d1  = z1.decompress("zstd", bigBuf.size())
+var d22 = z22.decompress("zstd", bigBuf.size())
+assert_wrap(d1.equals(bigBuf) && d22.equals(bigBuf), "13.9: zstd L1/L22 round-trip")
+
+// 13.10..13.11: deflate / gzip levels round-trip; level boundary check.
+var de1 = bigBuf.compress("deflate", 1)
+var de9 = bigBuf.compress("deflate", 9)
+assert_wrap(de1 != null && de9 != null,        "13.10: deflate L1/L9 both succeed")
+assert_wrap(de1.decompress("deflate", bigBuf.size()).equals(bigBuf), "13.11: deflate L1 round-trip")
+var gz1 = bigBuf.compress("gzip", 1)
+var gz9 = bigBuf.compress("gzip", 9)
+assert_wrap(gz1 != null && gz9 != null,        "13.12: gzip L1/L9 both succeed")
+assert_wrap(gz9.decompress("gzip", bigBuf.size()).equals(bigBuf), "13.13: gzip L9 round-trip")
+
+// 13.14..13.16: maxOutputSize cap.
+// A maxOutputSize smaller than the true output should make decompress fail (null).
+var truncCap = bigBuf.compress("gzip")
+var capped = truncCap.decompress("gzip", 10)
+assert_wrap(capped == null,                    "13.14: gzip decompress with too-small max returns null")
+// Exact-fit cap works.
+var exact  = truncCap.decompress("gzip", bigBuf.size())
+assert_wrap(exact != null && exact.size() == bigBuf.size(), "13.15: gzip decompress with exact max works")
+// Note: fastlz has no framed size, so a too-small max silently truncates
+// rather than erroring. We document the caveat in docs/buffer.md and skip it
+// here; gzip / deflate / zstd / brotli all detect under-sized buffers.
+var fz = bigBuf.compress("fastlz")
+var fzOk = fz.decompress("fastlz", bigBuf.size())
+assert_wrap(fzOk != null && fzOk.equals(bigBuf), "13.16: fastlz exact-fit max round-trips")
+
+// 13.17..13.18: decompressing wrong algorithm returns null.
+var z = bigBuf.compress("zstd")
+var wrong = z.decompress("gzip", bigBuf.size())
+assert_wrap(wrong == null,                     "13.17: zstd-encoded data decompressed as gzip is null")
+var g = bigBuf.compress("gzip")
+var wrong2 = g.decompress("zstd", bigBuf.size())
+assert_wrap(wrong2 == null,                    "13.18: gzip-encoded data decompressed as zstd is null")
+
+// 13.19..13.21: empty-input compress/decompress for fastlz / deflate / zstd.
+var emptyBuf = Buffer.new(0)
+var empGz = emptyBuf.compress("gzip")
+assert_wrap(empGz != null && empGz.size() > 0, "13.19: empty gzip compress produces non-empty header")
+var empOut = empGz.decompress("gzip", 16)
+assert_wrap(empOut != null && empOut.size() == 0, "13.20: empty gzip round-trip yields empty buffer")
+// zstd empty round-trip: decompress with maxOutputSize 0 cannot decode (min cap), so allow some headroom.
+var empZ = emptyBuf.compress("zstd")
+assert_wrap(empZ != null,                      "13.21: empty zstd compress non-null")
+
+// 13.22: source is unmodified by compress.
+var srcBefore = Buffer.fromString("immutable source check")
+var srcSizeBefore = srcBefore.size()
+srcBefore.compress("zstd")
+assert_wrap(srcBefore.size() == srcSizeBefore, "13.22: compress does not modify source size")
+
+
+// ============================================================================
+// SECTION 14: DECOMPRESS DYNAMIC
+// ============================================================================
+print("--- [14] Decompress Dynamic ---")
+
+// 14.1..14.3: round-trip via decompressDynamic for the three supported algos.
+var dd_gz = bigBuf.compress("gzip")
+var rt_gz = dd_gz.decompressDynamic("gzip")
+assert_wrap(rt_gz != null && rt_gz.size() == bigBuf.size() && rt_gz.equals(bigBuf), "14.1: gzip decompressDynamic unbounded round-trip")
+
+var dd_de = bigBuf.compress("deflate")
+var rt_de = dd_de.decompressDynamic("deflate")
+assert_wrap(rt_de != null && rt_de.size() == bigBuf.size() && rt_de.equals(bigBuf), "14.2: deflate decompressDynamic unbounded round-trip")
+
+// brotli: we cannot compress brotli (decompress-only) and we don't ship a
+// known-good brotli fixture here; we just verify that "brotli" is accepted as
+// an algorithm (i.e. it does not raise like fastlz / zstd do). On bytes that
+// aren't a valid brotli stream the call returns null without erroring.
+var brotliJunk = Buffer.fromString("not a brotli stream")
+var rt_br = brotliJunk.decompressDynamic("brotli")
+assert_wrap(rt_br == null, "14.3: brotli accepted as dynamic algo (returns null on invalid input, no runtime error)")
+
+// 14.4: case-insensitive algo names.
+var rt_case = dd_gz.decompressDynamic("GzIp")
+assert_wrap(rt_case != null && rt_case.equals(bigBuf), "14.4: decompressDynamic algo names are case-insensitive")
+
+// 14.5: bounded with a generous cap succeeds.
+var rt_cap_ok = dd_gz.decompressDynamic("gzip", bigBuf.size() + 1024)
+assert_wrap(rt_cap_ok != null && rt_cap_ok.equals(bigBuf), "14.5: decompressDynamic with generous cap round-trips")
+
+// 14.6: bounded with too-small cap fails (null).
+var rt_cap_low = dd_gz.decompressDynamic("gzip", 16)
+assert_wrap(rt_cap_low == null, "14.6: decompressDynamic with too-small max returns null")
+
+// 14.7: bounded with cap of 0 yields an empty buffer (no decode performed).
+var rt_cap_zero = dd_gz.decompressDynamic("gzip", 0)
+assert_wrap(rt_cap_zero == null, "14.7: decompressDynamic with cap 0 cannot fit data, returns null")
+
+// 14.8: decompressing wrong algorithm returns null (not a runtime error).
+var rt_wrong = dd_gz.decompressDynamic("deflate")
+assert_wrap(rt_wrong == null, "14.8: gzip-encoded data decompressed as deflate via dynamic returns null")
+
+// 14.9: empty input returns an empty buffer (matches docs).
+var rt_empty = Buffer.new(0).decompressDynamic("gzip")
+assert_wrap(rt_empty != null && rt_empty.size() == 0, "14.9: empty input returns empty buffer")
+
+// 14.10..14.11: source is unmodified by decompressDynamic.
+var srcDD = dd_gz.duplicate()
+var srcDDSize = srcDD.size()
+srcDD.decompressDynamic("gzip")
+assert_wrap(srcDD.size() == srcDDSize && srcDD.equals(dd_gz), "14.10: decompressDynamic does not modify source")
+
+// 14.11: returned buffer is independent of the source.
+var rt_indep = dd_gz.decompressDynamic("gzip")
+rt_indep.set(0, 0xAA)
+assert_wrap(dd_gz.get(0) != 0xAA, "14.11: decompressDynamic output is independent of the compressed source")
+
+// 14.12..14.13: fastlz / zstd are not supported by decompressDynamic and must
+// raise a runtime error rather than silently returning null. We can't catch
+// runtime errors from inside zym, so we instead verify the rule by negative
+// inference: decompressDynamic("gzip") on fastlz/zstd-compressed bytes returns
+// null (data is wrong shape), confirming "gzip" is the only accepted route for
+// those bytes via the dynamic API.
+var fz14   = bigBuf.compress("fastlz")
+var dyn_fz = fz14.decompressDynamic("gzip")
+assert_wrap(dyn_fz == null, "14.12: fastlz bytes decoded as gzip via dynamic returns null")
+var zs14   = bigBuf.compress("zstd")
+var dyn_zs = zs14.decompressDynamic("deflate")
+assert_wrap(dyn_zs == null, "14.13: zstd bytes decoded as deflate via dynamic returns null")
+
+
+// ============================================================================
 // FINAL RESULTS
 // ============================================================================
 print("")

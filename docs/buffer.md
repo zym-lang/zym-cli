@@ -143,6 +143,77 @@ accept `e` for API symmetry but ignore it.
 
 ---
 
+## Compression
+
+Buffers can be compressed and decompressed in-process. Output is always a new,
+independent buffer; the source is not modified.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `b.compress(algo)` | buffer or `null` | Compresses the buffer using `algo` at the default level. Returns `null` on failure. |
+| `b.compress(algo, level)` | buffer or `null` | Same, with an explicit compression level (see table below). |
+| `b.decompress(algo, maxOutputSize)` | buffer or `null` | Decompresses the buffer using `algo`, capping the output to `maxOutputSize` bytes. Returns `null` if the data is malformed, the wrong algorithm, or exceeds the cap. |
+| `b.decompressDynamic(algo)` | buffer or `null` | Decompresses without a known output size — the destination buffer grows automatically as data is produced. Slower than `decompress` (it may resize the output multiple times) but useful when the decompressed length is unknown. Only `"gzip"`, `"deflate"`, and `"brotli"` are supported; passing any other `algo` raises a runtime error. |
+| `b.decompressDynamic(algo, maxOutputSize)` | buffer or `null` | Same, with a hard cap on the output size. Returns `null` if the cap is exceeded mid-stream. `maxOutputSize` must be `>= 0` (passing `0` yields an empty buffer). |
+
+Algorithms (`algo` is matched case-insensitively):
+
+| `algo` | Compress | Decompress | Level range | Default level | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `"fastlz"`  | yes | yes | *(no level)*    | n/a   | LZ77-family, very fast, modest ratio. Limited to 2 GiB input. |
+| `"deflate"` | yes | yes | `1..9` (zlib)   | `6`   | Raw DEFLATE stream (no header). |
+| `"gzip"`    | yes | yes | `1..9` (zlib)   | `6`   | DEFLATE wrapped in a gzip header (`.gz`-compatible). |
+| `"zstd"`    | yes | yes | `1..22`         | `3`   | Modern algorithm; level has the largest visible effect on ratio vs. speed. Levels above ~19 are "ultra" (much slower for small extra gain). |
+| `"brotli"`  | **no** | yes | *(no level)*    | n/a   | Decompress-only — brotli writes are not supported. `b.compress("brotli")` raises a runtime error. |
+
+Notes:
+
+- **Level out of range** raises a runtime error of the form
+  `Buffer.compress(algo, level?): level N out of range for "<algo>" (lo..hi)`.
+- **Passing a level to `"fastlz"` or `"brotli"`** raises a runtime error
+  (`"<algo>" does not accept a level`).
+- **`maxOutputSize` is a hard cap** — if the decompressed data would exceed it,
+  `decompress` returns `null` rather than truncating, *with one exception*:
+  `"fastlz"` carries no framed size, so a too-small `maxOutputSize` silently
+  truncates the output instead of erroring. Always size `maxOutputSize` to the
+  known/expected uncompressed length when using `"fastlz"`. The other four
+  algorithms detect and reject under-sized buffers.
+- **Levels are applied per call.** Other compression paths (e.g.
+  `File.openCompressed`) are unaffected; defaults are restored before
+  `compress` returns.
+- **`decompressDynamic` vs `decompress`.** Use `decompress` when you know (or
+  have a tight upper bound on) the decompressed size — it allocates the output
+  once and is the faster path. Use `decompressDynamic` when the decompressed
+  size is unknown (e.g. arbitrary HTTP response bodies); it grows the output
+  as needed at the cost of repeated reallocations and copies. Only the
+  algorithms whose decoder is genuinely streaming are accepted
+  (`"gzip"`, `"deflate"`, `"brotli"`); `"fastlz"` and `"zstd"` raise a
+  runtime error and must go through `decompress`.
+- **Empty input.** `compress` on an empty buffer produces a valid empty/header
+  stream; `decompress` of empty input returns an empty buffer for
+  gzip/deflate/brotli (zero bytes cannot be inflated), and `null` for
+  fastlz/zstd (empty input is treated as malformed).
+- **Cross-tool compatibility.** `gzip` output is readable by the standard
+  `gzip` / `gunzip` tool; `zstd` output is readable by the `zstd` CLI;
+  `deflate` output is *raw* DEFLATE without a header and is **not** the same
+  as a `.gz` file; `fastlz` has no widely-used external tool.
+  `brotli` decompression accepts standard `.br` streams from `curl --compressed`,
+  the `brotli` CLI, etc.
+
+```zym
+// Build a compressible payload by repeating a short phrase.
+var phrase = "the quick brown fox jumps over the lazy dog. "
+var text = ""
+for (var i = 0; i < 64; i = i + 1) { text = text + phrase }
+
+var orig     = Buffer.fromString(text)
+var packed   = orig.compress("zstd", 19)
+var unpacked = packed.decompress("zstd", orig.size())
+print("orig=%n  packed=%n  match=%v", orig.size(), packed.size(), orig.equals(unpacked))
+```
+
+---
+
 ## Endianness
 
 Every multi-byte `decode*` / `encode*` method accepts an optional trailing

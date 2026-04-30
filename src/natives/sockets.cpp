@@ -43,7 +43,7 @@ extern bool zymExtractX509(ZymVM* vm, ZymValue v, Ref<X509Certificate>* out);
 
 // ---- handle plumbing ----
 
-struct TcpHandle  { Ref<StreamPeerTCP>  s; };
+struct TcpHandle  { Ref<StreamPeerTCP>  s; PackedByteArray pushback; };
 struct TcpsHandle { Ref<TCPServer>      s; };
 struct UdpHandle  { Ref<PacketPeerUDP>  s; };
 // Server-side DTLS state lives on the UDP server handle so cookies and
@@ -65,7 +65,7 @@ struct UdpsHandle {
 // GC'd out from under the TLS layer (the StreamPeerTLS only holds a
 // Ref<StreamPeer> internally; we want a typed handle for setNoDelay /
 // localAddress / peerAddress / waitAny passthrough).
-struct TlsHandle  { Ref<StreamPeerTLS>  tls; Ref<StreamPeerTCP> base; };
+struct TlsHandle  { Ref<StreamPeerTLS>  tls; Ref<StreamPeerTCP> base; PackedByteArray pushback; };
 // DTLS handle similarly keeps the underlying UDP alive so the DTLS layer
 // can keep talking to it. `peerHost`/`peerPort` are remembered for
 // `peerAddress()` (PacketPeerDTLS doesn't surface them post-handshake).
@@ -214,6 +214,37 @@ static int64_t deadlineFor(int64_t timeoutMs) {
     return now_ms() + timeoutMs;
 }
 
+// Consume up to `want` bytes from the front of `pb` into `dst`. Remaining bytes
+// stay in `pb`. Returns the number of bytes consumed. Used to drain readLine's
+// post-newline tail (and any other locally buffered bytes) before falling
+// through to the underlying StreamPeer.
+static int drainPB(PackedByteArray& pb, uint8_t* dst, int want) {
+    int have = pb.size();
+    if (have <= 0 || want <= 0) return 0;
+    int take = (want < have) ? want : have;
+    memcpy(dst, pb.ptr(), take);
+    if (take < have) {
+        PackedByteArray nb;
+        nb.resize(have - take);
+        memcpy(nb.ptrw(), pb.ptr() + take, have - take);
+        pb = nb;
+    } else {
+        pb.clear();
+    }
+    return take;
+}
+
+// Append the trailing bytes left over after a readLine `\n` back to the front
+// of the pushback (so the next read sees them first).
+static void prependPB(PackedByteArray& pb, const uint8_t* src, int len) {
+    if (len <= 0) return;
+    PackedByteArray nb;
+    nb.resize(len + pb.size());
+    memcpy(nb.ptrw(), src, len);
+    if (pb.size() > 0) memcpy(nb.ptrw() + len, pb.ptr(), pb.size());
+    pb = nb;
+}
+
 // Drain status from underlying sock. Calls poll() to advance state.
 static StreamPeerSocket::Status pollStatus(Ref<StreamPeerTCP>& s) {
     s->poll();
@@ -235,12 +266,12 @@ static ZymValue tcp_poll(ZymVM* vm, ZymValue ctx) {
     return strZ(vm, String(tcpStatusName(h->s->get_status())));
 }
 
-// available() -> integer bytes immediately readable
+// available() -> integer bytes immediately readable (incl. pushback)
 static ZymValue tcp_available(ZymVM* vm, ZymValue ctx) {
     TcpHandle* h = unwrapTcp(ctx);
     if (!h || h->s.is_null()) return zym_newNumber(0.0);
     h->s->poll();
-    return zym_newNumber((double)h->s->get_available_bytes());
+    return zym_newNumber((double)(h->pushback.size() + h->s->get_available_bytes()));
 }
 
 // readSome(n) -> Buffer (possibly 0 bytes); on closed/error returns null
@@ -249,15 +280,20 @@ static ZymValue tcp_readSome(ZymVM* vm, ZymValue ctx, ZymValue nV) {
     if (!h || h->s.is_null()) { zym_runtimeError(vm, "TCP.readSome(n) on closed socket"); return ZYM_ERROR; }
     double nd; if (!reqNum(vm, nV, "TCP.readSome(n)", &nd)) return ZYM_ERROR;
     if (nd < 0) { zym_runtimeError(vm, "TCP.readSome(n): n must be non-negative"); return ZYM_ERROR; }
-    h->s->poll();
-    if (h->s->get_status() != StreamPeerSocket::STATUS_CONNECTED) return zym_newNull();
     int n = (int)nd;
     if (n == 0) { PackedByteArray empty; return makeBufferInstance(vm, empty); }
     PackedByteArray buf; buf.resize(n);
-    int got = 0;
-    Error err = h->s->get_partial_data(buf.ptrw(), n, got);
-    if (err != OK) return zym_newNull();
-    buf.resize(got);
+    int filled = drainPB(h->pushback, buf.ptrw(), n);
+    h->s->poll();
+    if (filled < n && h->s->get_status() == StreamPeerSocket::STATUS_CONNECTED) {
+        int got = 0;
+        Error err = h->s->get_partial_data(buf.ptrw() + filled, n - filled, got);
+        if (err != OK && filled == 0) return zym_newNull();
+        if (err == OK) filled += got;
+    } else if (filled == 0 && h->s->get_status() != StreamPeerSocket::STATUS_CONNECTED) {
+        return zym_newNull();
+    }
+    buf.resize(filled);
     return makeBufferInstance(vm, buf);
 }
 
@@ -272,7 +308,7 @@ static ZymValue tcp_read(ZymVM* vm, ZymValue ctx, ZymValue nV, ZymValue* vargs, 
     int n = (int)nd;
     if (n == 0) { PackedByteArray empty; return makeBufferInstance(vm, empty); }
     PackedByteArray buf; buf.resize(n);
-    int filled = 0;
+    int filled = drainPB(h->pushback, buf.ptrw(), n);
     int64_t deadline = deadlineFor(timeoutMs);
     while (filled < n) {
         h->s->poll();
@@ -305,14 +341,35 @@ static ZymValue tcp_read(ZymVM* vm, ZymValue ctx, ZymValue nV, ZymValue* vargs, 
 
 // readLine(...) -> string (no terminator) | "timeout" | "eof" | "closed" | "error"
 // Strips both \r\n and \n. Returns "eof" if connection closed before any
-// terminator was seen (any partial bytes are discarded).
+// terminator was seen (any partial bytes are discarded). Bytes after the
+// terminating \n are saved in the handle's pushback so the next read sees them.
 static ZymValue tcp_readLine(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc) {
     TcpHandle* h = unwrapTcp(ctx);
     if (!h || h->s.is_null()) return strZ(vm, String("closed"));
     int64_t timeoutMs = -1;
     if (optInt(vm, "TCP.readLine(...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
     int64_t deadline = deadlineFor(timeoutMs);
-    PackedByteArray buf;
+    // Start with whatever's already in pushback so we don't miss \n that lives
+    // there from a previous readLine's tail.
+    PackedByteArray buf = h->pushback;
+    h->pushback.clear();
+    int scanFrom = 0;
+    // First, scan whatever we already have from pushback.
+    {
+        const uint8_t* p = buf.ptr();
+        for (int i = 0; i < buf.size(); i++) {
+            if (p[i] == '\n') {
+                int end = i;
+                if (end > 0 && p[end - 1] == '\r') end--;
+                String line = String::utf8((const char*)p, end);
+                int tailStart = i + 1;
+                int tailLen = buf.size() - tailStart;
+                if (tailLen > 0) prependPB(h->pushback, p + tailStart, tailLen);
+                return strZ(vm, line);
+            }
+        }
+        scanFrom = buf.size();
+    }
     while (true) {
         h->s->poll();
         StreamPeerSocket::Status st = h->s->get_status();
@@ -327,24 +384,28 @@ static ZymValue tcp_readLine(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc
                 Error err = h->s->get_partial_data(buf.ptrw() + prev, avail, got);
                 if (err != OK) { buf.resize(prev); continue; }
                 buf.resize(prev + got);
-                // scan for \n
                 const uint8_t* p = buf.ptr();
-                for (int i = prev; i < buf.size(); i++) {
+                for (int i = scanFrom; i < buf.size(); i++) {
                     if (p[i] == '\n') {
                         int end = i;
                         if (end > 0 && p[end - 1] == '\r') end--;
                         String line = String::utf8((const char*)p, end);
-                        // discard the consumed bytes (incl. \n); we don't keep
-                        // the tail because StreamPeer has no pushback channel.
-                        // Any trailing data after \n is lost -- documented.
+                        int tailStart = i + 1;
+                        int tailLen = buf.size() - tailStart;
+                        if (tailLen > 0) prependPB(h->pushback, p + tailStart, tailLen);
                         return strZ(vm, line);
                     }
                 }
+                scanFrom = buf.size();
                 continue;
             }
         }
         int rem = remainingMs(deadline);
-        if (timeoutMs >= 0 && rem == 0) return strZ(vm, String("timeout"));
+        if (timeoutMs >= 0 && rem == 0) {
+            // Save partial bytes back so caller doesn't lose them on retry.
+            if (buf.size() > 0) prependPB(h->pushback, buf.ptr(), buf.size());
+            return strZ(vm, String("timeout"));
+        }
         int q = (rem < 0 || rem > 20) ? 20 : rem;
         OS::get_singleton()->delay_usec((uint32_t)q * 1000u);
     }
@@ -357,7 +418,8 @@ static ZymValue tcp_readAll(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc)
     int64_t timeoutMs = -1;
     if (optInt(vm, "TCP.readAll(...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
     int64_t deadline = deadlineFor(timeoutMs);
-    PackedByteArray buf;
+    PackedByteArray buf = h->pushback;
+    h->pushback.clear();
     while (true) {
         h->s->poll();
         StreamPeerSocket::Status st = h->s->get_status();
@@ -664,7 +726,7 @@ static ZymValue tls_available(ZymVM* vm, ZymValue ctx) {
     TlsHandle* h = unwrapTls(ctx);
     if (!h || h->tls.is_null()) return zym_newNumber(0.0);
     h->tls->poll();
-    return zym_newNumber((double)h->tls->get_available_bytes());
+    return zym_newNumber((double)(h->pushback.size() + h->tls->get_available_bytes()));
 }
 
 static ZymValue tls_readSome(ZymVM* vm, ZymValue ctx, ZymValue nV) {
@@ -672,15 +734,20 @@ static ZymValue tls_readSome(ZymVM* vm, ZymValue ctx, ZymValue nV) {
     if (!h || h->tls.is_null()) { zym_runtimeError(vm, "TLS.readSome(n) on closed socket"); return ZYM_ERROR; }
     double nd; if (!reqNum(vm, nV, "TLS.readSome(n)", &nd)) return ZYM_ERROR;
     if (nd < 0) { zym_runtimeError(vm, "TLS.readSome(n): n must be non-negative"); return ZYM_ERROR; }
-    h->tls->poll();
-    if (h->tls->get_status() != StreamPeerTLS::STATUS_CONNECTED) return zym_newNull();
     int n = (int)nd;
     if (n == 0) { PackedByteArray empty; return makeBufferInstance(vm, empty); }
     PackedByteArray buf; buf.resize(n);
-    int got = 0;
-    Error err = h->tls->get_partial_data(buf.ptrw(), n, got);
-    if (err != OK) return zym_newNull();
-    buf.resize(got);
+    int filled = drainPB(h->pushback, buf.ptrw(), n);
+    h->tls->poll();
+    if (filled < n && h->tls->get_status() == StreamPeerTLS::STATUS_CONNECTED) {
+        int got = 0;
+        Error err = h->tls->get_partial_data(buf.ptrw() + filled, n - filled, got);
+        if (err != OK && filled == 0) return zym_newNull();
+        if (err == OK) filled += got;
+    } else if (filled == 0 && h->tls->get_status() != StreamPeerTLS::STATUS_CONNECTED) {
+        return zym_newNull();
+    }
+    buf.resize(filled);
     return makeBufferInstance(vm, buf);
 }
 
@@ -694,7 +761,7 @@ static ZymValue tls_read(ZymVM* vm, ZymValue ctx, ZymValue nV, ZymValue* vargs, 
     int n = (int)nd;
     if (n == 0) { PackedByteArray empty; return makeBufferInstance(vm, empty); }
     PackedByteArray buf; buf.resize(n);
-    int filled = 0;
+    int filled = drainPB(h->pushback, buf.ptrw(), n);
     int64_t deadline = deadlineFor(timeoutMs);
     while (filled < n) {
         h->tls->poll();
@@ -722,7 +789,24 @@ static ZymValue tls_readLine(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc
     int64_t timeoutMs = -1;
     if (optInt(vm, "TLS.readLine(...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
     int64_t deadline = deadlineFor(timeoutMs);
-    PackedByteArray buf;
+    PackedByteArray buf = h->pushback;
+    h->pushback.clear();
+    int scanFrom = 0;
+    {
+        const uint8_t* p = buf.ptr();
+        for (int i = 0; i < buf.size(); i++) {
+            if (p[i] == '\n') {
+                int end = i;
+                if (end > 0 && p[end - 1] == '\r') end--;
+                String line = String::utf8((const char*)p, end);
+                int tailStart = i + 1;
+                int tailLen = buf.size() - tailStart;
+                if (tailLen > 0) prependPB(h->pushback, p + tailStart, tailLen);
+                return strZ(vm, line);
+            }
+        }
+        scanFrom = buf.size();
+    }
     while (true) {
         h->tls->poll();
         StreamPeerTLS::Status st = h->tls->get_status();
@@ -739,19 +823,26 @@ static ZymValue tls_readLine(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc
                 if (err != OK) { buf.resize(prev); continue; }
                 buf.resize(prev + got);
                 const uint8_t* p = buf.ptr();
-                for (int i = prev; i < buf.size(); i++) {
+                for (int i = scanFrom; i < buf.size(); i++) {
                     if (p[i] == '\n') {
                         int end = i;
                         if (end > 0 && p[end - 1] == '\r') end--;
                         String line = String::utf8((const char*)p, end);
+                        int tailStart = i + 1;
+                        int tailLen = buf.size() - tailStart;
+                        if (tailLen > 0) prependPB(h->pushback, p + tailStart, tailLen);
                         return strZ(vm, line);
                     }
                 }
+                scanFrom = buf.size();
                 continue;
             }
         }
         int rem = remainingMs(deadline);
-        if (timeoutMs >= 0 && rem == 0) return strZ(vm, String("timeout"));
+        if (timeoutMs >= 0 && rem == 0) {
+            if (buf.size() > 0) prependPB(h->pushback, buf.ptr(), buf.size());
+            return strZ(vm, String("timeout"));
+        }
         int q = (rem < 0 || rem > 20) ? 20 : rem;
         OS::get_singleton()->delay_usec((uint32_t)q * 1000u);
     }
@@ -763,7 +854,8 @@ static ZymValue tls_readAll(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc)
     int64_t timeoutMs = -1;
     if (optInt(vm, "TLS.readAll(...)", vargs, vargc, 0, &timeoutMs) < 0) return ZYM_ERROR;
     int64_t deadline = deadlineFor(timeoutMs);
-    PackedByteArray buf;
+    PackedByteArray buf = h->pushback;
+    h->pushback.clear();
     while (true) {
         h->tls->poll();
         StreamPeerTLS::Status st = h->tls->get_status();

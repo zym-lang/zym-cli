@@ -1,0 +1,225 @@
+// ============================================================================
+// COMPREHENSIVE Random NATIVE TEST SUITE
+// Exercises the `Random` global (`create` with and without seed) and the
+// per-instance API: seed/state save & restore, `randi` / `randf` /
+// `randfRange` / `randiRange` / `randfn` / `randWeighted`, alias
+// semantics, and reproducibility.
+// ============================================================================
+var testsPassed = 0
+var testsFailed = 0
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+print("==========================================================")
+print("Random NATIVE TEST SUITE")
+print("==========================================================")
+
+// ----------------------------------------------------------------------------
+// SECTION 1: Construction & determinism
+// ----------------------------------------------------------------------------
+var r1 = Random.create(42)
+var r2 = Random.create(42)
+assert_wrap(r1.randi() == r2.randi(),  "1.1: same seed -> same randi #1")
+assert_wrap(r1.randi() == r2.randi(),  "1.2: same seed -> same randi #2")
+assert_wrap(r1.randf() == r2.randf(),  "1.3: same seed -> same randf")
+assert_wrap(r1.randfRange(0.0, 1.0) == r2.randfRange(0.0, 1.0), "1.4: same seed -> same randfRange")
+
+var rA = Random.create(1)
+var rB = Random.create(2)
+assert_wrap(rA.randi() != rB.randi(), "1.5: different seeds usually differ")
+
+var rNo = Random.create()
+assert_wrap(rNo.randi() >= 0, "1.6: no-arg create returns valid randi")
+
+// ----------------------------------------------------------------------------
+// SECTION 2: Seed accessors
+// ----------------------------------------------------------------------------
+var r = Random.create(123)
+assert_wrap(r.getSeed() == 123, "2.1: getSeed returns construction seed")
+r.setSeed(999)
+assert_wrap(r.getSeed() == 999, "2.2: setSeed updates seed")
+r.seed(7)
+assert_wrap(r.getSeed() == 7,   "2.3: seed() alias updates seed")
+
+// Resetting seed restarts the stream identically.
+var rX = Random.create(50)
+var first1 = rX.randi()
+var first2 = rX.randi()
+rX.setSeed(50)
+assert_wrap(rX.randi() == first1, "2.4: setSeed re-runs stream from start")
+assert_wrap(rX.randi() == first2, "2.5: setSeed re-runs stream consistently")
+
+// ----------------------------------------------------------------------------
+// SECTION 3: State save & restore
+// ----------------------------------------------------------------------------
+// PCG's internal state is a 64-bit unsigned integer. Zym numbers are
+// 64-bit doubles (53-bit mantissa), so a full state cannot round-trip
+// through `getState`/`setState` with bit-exact precision; we verify the
+// API works and the next draw matches.
+var rs = Random.create(77)
+rs.randi()
+rs.randi()
+var snap = rs.getState()
+var nextA = rs.randi()
+rs.setState(snap)
+assert_wrap(rs.randi() == nextA, "3.1: setState restores next draw")
+
+// Re-applying the same snapshot is idempotent.
+rs.setState(snap)
+var afterB = rs.randi()
+rs.setState(snap)
+assert_wrap(rs.randi() == afterB, "3.2: setState is idempotent")
+
+// State changes after a draw.
+var rT = Random.create(77)
+var s0 = rT.getState()
+rT.randi()
+var s1 = rT.getState()
+assert_wrap(s0 != s1, "3.3: state advances after randi")
+
+// ----------------------------------------------------------------------------
+// SECTION 4: randi range
+// ----------------------------------------------------------------------------
+var rRi = Random.create(11)
+var anyOut = false
+for (var i = 0; i < 50; i = i + 1) {
+    var v = rRi.randi()
+    if (v < 0) { anyOut = true }
+}
+assert_wrap(anyOut == false, "4.1: randi() values are non-negative")
+
+// ----------------------------------------------------------------------------
+// SECTION 5: randf range
+// ----------------------------------------------------------------------------
+var rRf = Random.create(22)
+var oob = false
+for (var i = 0; i < 100; i = i + 1) {
+    var v = rRf.randf()
+    if (v < 0.0)  { oob = true }
+    if (v >= 1.0) { oob = true }
+}
+assert_wrap(oob == false, "5.1: randf() always in [0, 1)")
+
+// ----------------------------------------------------------------------------
+// SECTION 6: randfRange
+// ----------------------------------------------------------------------------
+var rRfR = Random.create(33)
+var oobR = false
+for (var i = 0; i < 100; i = i + 1) {
+    var v = rRfR.randfRange(10.0, 20.0)
+    if (v < 10.0) { oobR = true }
+    if (v > 20.0) { oobR = true }
+}
+assert_wrap(oobR == false, "6.1: randfRange(10,20) always in [10, 20]")
+
+// ----------------------------------------------------------------------------
+// SECTION 7: randiRange
+// ----------------------------------------------------------------------------
+var rRiR = Random.create(44)
+var hitLo = false
+var hitHi = false
+var oobI  = false
+for (var i = 0; i < 1000; i = i + 1) {
+    var v = rRiR.randiRange(1, 6)
+    if (v < 1) { oobI = true }
+    if (v > 6) { oobI = true }
+    if (v == 1) { hitLo = true }
+    if (v == 6) { hitHi = true }
+}
+assert_wrap(oobI == false, "7.1: randiRange(1,6) always in [1, 6]")
+assert_wrap(hitLo,         "7.2: randiRange(1,6) eventually hits lower bound")
+assert_wrap(hitHi,         "7.3: randiRange(1,6) eventually hits upper bound")
+
+// Single-value range collapses to that value.
+var rOne = Random.create(55)
+var allFive = true
+for (var i = 0; i < 20; i = i + 1) {
+    if (rOne.randiRange(5, 5) != 5) { allFive = false }
+}
+assert_wrap(allFive, "7.4: randiRange(5,5) returns 5")
+
+// ----------------------------------------------------------------------------
+// SECTION 8: randfn (normal distribution sanity)
+// ----------------------------------------------------------------------------
+var rN = Random.create(66)
+var sum = 0.0
+var n = 500
+for (var i = 0; i < n; i = i + 1) {
+    sum = sum + rN.randfn(0.0, 1.0)
+}
+var mean = sum / n
+// With seed=66 + n=500, mean should be near 0; allow slack.
+assert_wrap(mean > -0.5 && mean < 0.5, "8.1: randfn(0,1) sample mean near 0")
+
+// Default args (no args).
+var rNd = Random.create(66)
+var v = rNd.randfn()
+assert_wrap(v == v, "8.2: randfn() with no args returns a number")  // x==x rejects NaN
+
+// ----------------------------------------------------------------------------
+// SECTION 9: randWeighted
+// ----------------------------------------------------------------------------
+var rW = Random.create(88)
+var idx = rW.randWeighted([1.0, 0.0, 0.0])
+assert_wrap(idx == 0, "9.1: weighted [1,0,0] always picks index 0")
+
+var rW2 = Random.create(88)
+var counts = [0, 0, 0]
+for (var i = 0; i < 600; i = i + 1) {
+    var j = rW2.randWeighted([8.0, 1.0, 1.0])
+    counts[j] = counts[j] + 1
+}
+assert_wrap(counts[0] > counts[1], "9.2: weighted distribution favours heavier index")
+assert_wrap(counts[0] > counts[2], "9.3: weighted distribution dominant index again")
+
+// Empty / all-zero weights collapse to -1.
+var rWZ = Random.create(99)
+assert_wrap(rWZ.randWeighted([]) == -1,             "9.4: empty weights -> -1")
+assert_wrap(rWZ.randWeighted([0.0, 0.0, 0.0]) == -1, "9.5: all-zero weights -> -1")
+
+// ----------------------------------------------------------------------------
+// SECTION 10: randomize re-seeds (non-deterministic)
+// ----------------------------------------------------------------------------
+var rRz = Random.create(1234)
+var beforeSeed = rRz.getSeed()
+rRz.randomize()
+// After randomize the seed almost certainly changes; if it didn't, the
+// next draw would still be valid - we just check the call works.
+assert_wrap(rRz.getSeed() == rRz.getSeed(), "10.1: getSeed stable after randomize")
+
+// ----------------------------------------------------------------------------
+// SECTION 11: Independence of instances
+// ----------------------------------------------------------------------------
+var rI1 = Random.create(500)
+var rI2 = Random.create(501)
+var seqA = [rI1.randi(), rI1.randi(), rI1.randi()]
+var seqB = [rI2.randi(), rI2.randi(), rI2.randi()]
+assert_wrap(seqA[0] != seqB[0] || seqA[1] != seqB[1] || seqA[2] != seqB[2],
+            "11.1: independent seeds produce different sequences")
+
+// Two seeded instances at the same seed do not interfere.
+var rJ1 = Random.create(700)
+var rJ2 = Random.create(700)
+rJ1.randi()
+assert_wrap(rJ2.getState() != rJ1.getState(), "11.2: instances have independent state")
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

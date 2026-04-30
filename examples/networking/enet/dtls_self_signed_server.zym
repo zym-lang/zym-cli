@@ -1,0 +1,78 @@
+// dtls_self_signed_server.zym
+//
+// What this does:    Same as echo_server.zym but every connection is
+//                    wrapped in DTLS. Mints an in-process self-signed
+//                    RSA key + cert, listens with `tls: { key, cert }`
+//                    in the opts map, then echoes records back.
+// How to run it:     zym examples/networking/enet/dtls_self_signed_server.zym -- 9102
+//                      port is optional; default 9102.
+//                    In another terminal:
+//                      zym examples/networking/enet/dtls_client.zym -- 127.0.0.1 9102 alpha bravo
+// What you'll see:   "minted self-signed key/cert"
+//                    "DTLS listening on 0.0.0.0:9102"
+//                    Per-event log lines as in echo_server, but every
+//                    record on the wire is encrypted.
+//                    Stop with Ctrl-C.
+//
+// Concepts introduced:
+//   * ENet.listen(host, port, maxPeers, channels, { tls: { key, cert } })
+//     wraps every datagram in DTLS. Above the socket layer everything
+//     looks identical to plain ENet.
+//   * Each new peer goes through a DTLS cookie exchange + handshake
+//     before its connect event is delivered. The server doesn't have
+//     to do anything different - service() will only emit the connect
+//     event once the handshake has completed successfully.
+//   * Reusing the Crypto native to mint a self-signed cert in-process.
+//     For real deployments you'd load a long-lived cert/key from disk
+//     instead.
+func main(argv) {
+    var port = 9102
+    if (length(argv) > 1) { port = num(argv[1]) }
+
+    // Mint a fresh RSA-2048 key + self-signed certificate. The validity
+    // window matches what tests/cli/sockets.zym uses; for production
+    // use, longer-lived material loaded from PEM is more typical.
+    var crypto = Crypto.create()
+    var key    = crypto.generateRsa(2048)
+    var cert   = crypto.generateSelfSignedCertificate(key, "CN=zym-enet-dtls",
+                                                      "20240101000000",
+                                                      "20340101000000")
+    if (key == null || cert == null) {
+        print("could not mint key/cert\n")
+        return 1
+    }
+    print("minted self-signed key/cert\n")
+
+    var srv = ENet.listen("0.0.0.0", port, 32, 4,
+                          { tls: { key: key, cert: cert } })
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("DTLS listening on 0.0.0.0:%n\n", srv.localPort())
+
+    while (true) {
+        // Slightly longer wake than the plain echo_server because DTLS
+        // handshake retransmissions are also driven on this tick. 200ms
+        // keeps the server responsive without busy-looping.
+        var ev = srv.service(200)
+        if (ev == null) { continue }
+        var t = ev["type"]
+        if (t == "connect") {
+            var pa = ev["peer"].peerAddress()
+            print("[%s:%n] DTLS handshake complete\n", pa["host"], pa["port"])
+        } else if (t == "disconnect") {
+            var pa = ev["peer"].peerAddress()
+            print("[%s:%n] disconnected\n", pa["host"], pa["port"])
+        } else if (t == "receive") {
+            var p   = ev["peer"]
+            var pa  = p.peerAddress()
+            var ch  = ev["channel"]
+            var msg = ev["data"].toUtf8()
+            print("[%s:%n] (ch=%n) %s\n", pa["host"], pa["port"], ch, msg)
+            p.send(Buffer.fromString(msg), ch, "reliable")
+            srv.flush()
+        }
+    }
+    return 0
+}

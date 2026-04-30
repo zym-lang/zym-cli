@@ -1,0 +1,81 @@
+// broadcast_server.zym
+//
+// What this does:    Listens for ENet peers and rebroadcasts every
+//                    message it receives to every connected peer using
+//                    host.broadcast(). Connect / disconnect events are
+//                    also announced to all peers as system messages.
+// How to run it:     zym examples/networking/enet/broadcast_server.zym -- 9101
+//                      port is optional; default 9101.
+//                    In several other terminals:
+//                      zym examples/networking/enet/broadcast_client.zym -- 127.0.0.1 9101 alice "hi all"
+//                      zym examples/networking/enet/broadcast_client.zym -- 127.0.0.1 9101 bob   "hi alice"
+// What you'll see:   "listening on 0.0.0.0:9101"
+//                    Per-event log lines for connect/disconnect/receive.
+//                    Stop with Ctrl-C.
+//
+// Concepts introduced:
+//   * host.broadcast(buf, channel, mode) - one call sends to every
+//     currently-connected peer; the server doesn't keep a peer list.
+//   * Synthesizing a small text protocol on top of raw ENet records:
+//     "JOIN:<name>" / "LEAVE:<name>" / "MSG:<name>:<text>".
+//     ENet doesn't care about the bytes; the framing convention is
+//     entirely a pair-with-the-client agreement.
+//   * Why broadcast() rather than iterating peers manually: the host
+//     already knows its peer set, and broadcast skips the dispatch
+//     overhead of N separate send() calls.
+func main(argv) {
+    var port = 9101
+    if (length(argv) > 1) { port = num(argv[1]) }
+    var srv = ENet.listen("0.0.0.0", port, 32, 4)
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n\n", srv.localPort())
+
+    // Keyed by "host:port" because peer handles compare by identity
+    // and we want to look up a name from a re-emitted peer object.
+    var names = {}
+
+    while (true) {
+        var ev = srv.service(500)
+        if (ev == null) { continue }
+        var t = ev["type"]
+        if (t == "connect") {
+            var pa = ev["peer"].peerAddress()
+            var key = pa["host"] + ":" + str(pa["port"])
+            // No display name known yet; the client's first message
+            // will be "HELLO:<name>" which we'll record then.
+            names[key] = key
+            print("[%s] connected\n", key)
+        } else if (t == "disconnect") {
+            var pa = ev["peer"].peerAddress()
+            var key = pa["host"] + ":" + str(pa["port"])
+            var who = names[key]
+            if (who == null) { who = key }
+            print("[%s] disconnected\n", who)
+            srv.broadcast(Buffer.fromString("LEAVE:" + who), 0, "reliable")
+            names[key] = null
+        } else if (t == "receive") {
+            var pa  = ev["peer"].peerAddress()
+            var key = pa["host"] + ":" + str(pa["port"])
+            var msg = ev["data"].toUtf8()
+            // If the message starts with "HELLO:", capture the suffix
+            // as the user's display name and announce them.
+            // Otherwise, broadcast it as a normal chat message.
+            if (startsWith(msg, "HELLO:")) {
+                var who = substr(msg, 6, length(msg))
+                names[key] = who
+                print("[%s] is now %s\n", key, who)
+                srv.broadcast(Buffer.fromString("JOIN:" + who), 0, "reliable")
+            } else {
+                var who = names[key]
+                if (who == null) { who = key }
+                print("[%s] %s\n", who, msg)
+                srv.broadcast(Buffer.fromString("MSG:" + who + ":" + msg), 0, "reliable")
+            }
+            srv.flush()
+        }
+    }
+    return 0
+}

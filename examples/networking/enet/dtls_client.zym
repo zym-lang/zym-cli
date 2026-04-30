@@ -1,0 +1,92 @@
+// dtls_client.zym
+//
+// What this does:    Connects to dtls_self_signed_server.zym over an
+//                    encrypted ENet+DTLS link, sends each argv[3..] as
+//                    a reliable record, and prints whatever the server
+//                    echoes back.
+// How to run it:     Start examples/networking/enet/dtls_self_signed_server.zym first.
+//                    Then in another terminal:
+//                      zym examples/networking/enet/dtls_client.zym -- 127.0.0.1 9102 alpha bravo charlie
+//                    Defaults: host = 127.0.0.1, port = 9102,
+//                    payload = ["ping"].
+// What you'll see:   "DTLS handshake complete" once the encrypted
+//                    channel is up, followed by per-line "->" / "<-"
+//                    pairs.
+//
+// Concepts introduced:
+//   * ENet.connect(..., { tls: { verify: false } }) - a thin trailing
+//     opts map is the only difference from plain ENet.connect. Every
+//     other instance method works identically.
+//   * verify: false is for in-process / self-signed demos. For real
+//     servers you'd either omit `tls` entirely (system CAs are used),
+//     pass `tls: { trustedRoots: [cert] }` to pin specific roots, or
+//     pass `tls: { commonName: "..." }` to override SNI.
+//   * The DTLS handshake takes a few extra service() ticks compared to
+//     plain ENet because of the cookie exchange round trip.
+func main(argv) {
+    var host    = "127.0.0.1"
+    var port    = 9102
+    var payload = ["ping"]
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    if (length(argv) > 3) {
+        payload = []
+        var i = 3
+        while (i < length(argv)) {
+            push(payload, argv[i])
+            i = i + 1
+        }
+    }
+
+    // verify: false because the server uses a self-signed cert we
+    // don't have a CA for. In production you would NOT use verify:false
+    // - either trust the system CAs (omit `tls` entirely) or pin the
+    // server's expected cert via `trustedRoots`.
+    var pair = ENet.connect(host, port, 4, { tls: { verify: false } })
+    if (pair == null) {
+        print("could not start ENet+DTLS client\n")
+        return 1
+    }
+    var cli  = pair["host"]
+    var peer = pair["peer"]
+
+    // Drive the handshake. 8s ceiling is generous - DTLS handshakes
+    // can take noticeably longer than plain ENet under packet loss.
+    var deadline = Time.ticksMsec() + 8000
+    while (Time.ticksMsec() < deadline && peer.status() != "connected") {
+        cli.service(50)
+    }
+    if (peer.status() != "connected") {
+        print("DTLS handshake failed (server not running, or cert/key invalid?)\n")
+        cli.close()
+        return 1
+    }
+    var pa = peer.peerAddress()
+    print("DTLS handshake complete; secure link to %s:%n\n", pa["host"], pa["port"])
+
+    var i = 0
+    while (i < length(payload)) {
+        print("-> %s\n", payload[i])
+        peer.send(Buffer.fromString(payload[i]), 0, "reliable")
+        cli.flush()
+        i = i + 1
+        cli.service(50)
+    }
+
+    var replies  = 0
+    deadline = Time.ticksMsec() + 3000
+    while (Time.ticksMsec() < deadline && replies < length(payload)) {
+        var ev = cli.service(100)
+        if (ev == null) { continue }
+        if (ev["type"] == "receive") {
+            print("<- %s\n", ev["data"].toUtf8())
+            replies = replies + 1
+        }
+    }
+
+    peer.disconnect()
+    cli.flush()
+    cli.service(50)
+    cli.close()
+    return 0
+}

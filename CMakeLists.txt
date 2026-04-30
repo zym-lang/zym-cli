@@ -27,7 +27,7 @@ elseif(PGO_MODE STREQUAL "USE")
 endif()
 
 set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION ON)
+set(USE_COMPRESSION OFF)
 # USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
 # on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
 # binary so engine-level error and warning output is suppressed at startup
@@ -78,6 +78,7 @@ set(ZYM_NATIVE_SOURCES
         src/natives/path.cpp
         src/natives/ip.cpp
         src/natives/sockets.cpp
+        src/natives/enet.cpp
 )
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and
@@ -138,6 +139,7 @@ set(ZYM_GODOT_SUBLIBS
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodules.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_regex.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_mbedtls.${ZYM_GODOT_LIB_SUFFIX}.a"
+        "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_enet.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/core/libcore.${ZYM_GODOT_LIB_SUFFIX}.a"
 )
 
@@ -171,6 +173,10 @@ target_include_directories(zym PRIVATE
         # factories without going through the engine's `GLOBAL_DEF`-using
         # registration wrapper.
         "${ZYM_GODOT_DIR}/thirdparty/mbedtls/include"
+        # enet thirdparty headers (`<enet/enet.h>`) are needed by
+        # `godot/modules/enet/enet_packet_peer.h` and `enet_connection.h`,
+        # which are themselves transitively included by `src/natives/enet.cpp`.
+        "${ZYM_GODOT_DIR}/thirdparty/enet"
 )
 # Must mirror the SCons CPPDEFINES that built libgodot.a or the header
 # virtual surface drifts and overrides fail to match. See godot/SConstruct.

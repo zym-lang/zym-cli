@@ -563,3 +563,217 @@ Mixing TCP, TLS, UDP, DTLS, TCP-server and UDP-server handles in one
 - DTLS does not retransmit application data. If reliability is needed,
   either wrap a higher-level acknowledgement protocol on top, or use
   `TLS` over `TCP` instead.
+
+## ENet — UDP with reliable + ordered + channels
+
+ENet is a transport that sits on top of UDP and adds reliability
+(per-packet, optional), packet ordering, multiplexed channels, and
+connection liveness — without giving up the datagram model. It is the
+right tool whenever you want game-style messaging from a script:
+multi-channel custom protocols, peer-to-peer relay, distributed CLI
+sync, or anything where TCP's single-stream byte semantics would force
+you to invent your own framing on top.
+
+> **ENet is its own wire protocol.** ENet endpoints can only talk to
+> other ENet endpoints. It is **not** a way to add reliability on top
+> of arbitrary UDP services — the bytes on the wire are an ENet-
+> specific framing that other UDP listeners cannot decode. Pair zym's
+> `ENet` against another zym `ENet`, or any C/C++ application using the
+> upstream `enet` library.
+
+### Statics
+
+| Method                                          | Returns                          | Notes                                                                                                                                                                       |
+|-------------------------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ENet.connect(host, port [, channels, opts])`         | `{ host, peer }` map, or `null`  | Non-blocking. `peer` is returned in `"connecting"` state; caller must drive `host.service(timeoutMs)` until the first `connect` event. Default `channels` = 8 (range 1–255). If `opts.tls` is provided, the host is wrapped with a DTLS client (see *ENet over DTLS* below). |
+| `ENet.listen(host, port [, maxPeers, channels, opts])`| ENet host, or `null`             | Binds and starts a host that accepts incoming peers via `service()` events. Default `maxPeers` = 32, `channels` = 8. If `opts.tls = { key, cert }` is provided, every inbound peer must complete a DTLS handshake before being delivered as a `connect` event.                |
+
+### Host instance methods (`__enet__`)
+
+| Method                                   | Returns                                                                | Notes                                                                                                                                                                                                                                                                                       |
+|------------------------------------------|------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `host.service(timeoutMs)`                | event map, or `null`                                                   | Pumps the host. Returns `null` if no event arrived within `timeoutMs` (clamped to 0). Event map: `{ type, peer, data, channel }`. `type` ∈ `"connect"`/`"disconnect"`/`"receive"`/`"error"`. For `"receive"`, `data` is a Buffer; otherwise `data` is the application-defined integer code. |
+| `host.flush()`                           | `null`                                                                 | Force-pushes outbound queues onto the wire without waiting for the next `service()`.                                                                                                                                                                                                        |
+| `host.localPort()`                       | port number                                                            | Useful with `listen("...", 0)` to discover the OS-assigned port.                                                                                                                                                                                                                            |
+| `host.broadcast(buf, channel, mode)`     | status string                                                          | Send `buf` to every connected peer on `channel` with `mode`. `mode` ∈ `"reliable"`/`"unreliable"`/`"unsequenced"`. Status is `"ok"`, `"error"`, or `"closed"`.                                                                                                                               |
+| `host.refuseNewConnections(refuse)`      | `null`                                                                 | When `refuse` is `true`, stop accepting new inbound connections; existing peers are unaffected. Useful for draining a server before shutdown (esp. with DTLS, where the cookie exchange is otherwise still served).                                                                          |
+| `host.close()`                           | `null`                                                                 | Tears down the host. Idempotent.                                                                                                                                                                                                                                                            |
+
+### Peer instance methods (`__enetp__`)
+
+| Method                                   | Returns                                                                | Notes                                                                                                                                                                                                  |
+|------------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `peer.status()`                          | `"connecting"` / `"connected"` / `"closed"` / `"error"`                | See `docs/conventions.md` for the shared status vocabulary.                                                                                                                                            |
+| `peer.send(buf, channel, mode)`          | status string                                                          | Send `buf` to this peer. `channel` must be in `[0, channelsAtConnect)`; out-of-range raises a runtime error. `mode` as in `broadcast`. Returns `"ok"`, `"closed"`, or `"error"`.                       |
+| `peer.peerAddress()`                     | `{ host, port }`                                                       | Remote address of the peer.                                                                                                                                                                            |
+| `peer.ping()`                            | `null`                                                                 | Force a ping packet immediately.                                                                                                                                                                       |
+| `peer.pingMs()`                          | number                                                                 | Most recent round-trip-time sample in milliseconds (`0` until a measurement exists).                                                                                                                   |
+| `peer.disconnect([data])`                | `null`                                                                 | Graceful disconnect: queues a disconnect packet that flushes after pending sends. Optional integer `data` is delivered to the peer's `disconnect` event.                                               |
+| `peer.disconnectNow([data])`             | `null`                                                                 | Immediate disconnect: drops everything pending and notifies the peer in one shot.                                                                                                                      |
+| `peer.close()`                           | `null`                                                                 | Local-only reset. Doesn't notify the remote (use `disconnect`/`disconnectNow` for that).                                                                                                               |
+
+### Service event shapes
+
+| `ev["type"]`   | Other fields                                                                |
+|----------------|-----------------------------------------------------------------------------|
+| `"connect"`    | `peer` (handle), `data` (integer code), `channel` (always 0)                |
+| `"disconnect"` | `peer` (handle), `data` (integer code), `channel` (always 0)                |
+| `"receive"`    | `peer` (handle), `data` (Buffer), `channel` (the channel the sender used)   |
+| `"error"`      | (no other fields)                                                           |
+
+### Examples
+
+#### Minimal echo server
+
+```
+func main(argv) {
+    var srv = ENet.listen("0.0.0.0", 9000, 32, 4)
+    while (true) {
+        var ev = srv.service(100)
+        if (ev == null) continue
+        if (ev["type"] == "receive") {
+            ev["peer"].send(ev["data"], ev["channel"], "reliable")
+        }
+    }
+}
+```
+
+#### Client with handshake loop
+
+```
+func main(argv) {
+    var r = ENet.connect("127.0.0.1", 9000, 4)
+    if (r == null) { print("connect failed\n"); return 1 }
+    var host = r["host"]
+    var peer = r["peer"]
+    while (peer.status() == "connecting") {
+        host.service(50)
+    }
+    if (peer.status() != "connected") { print("handshake failed\n"); return 1 }
+    peer.send(Buffer.fromString("hello"), 0, "reliable")
+    host.flush()
+    var ev = host.service(2000)
+    if (ev != null && ev["type"] == "receive") {
+        print("got: %s\n", ev["data"].toUtf8())
+    }
+    peer.disconnect()
+    host.flush()
+    host.service(50)
+    host.close()
+    return 0
+}
+```
+
+### Notes
+
+- **Channel count is fixed at handshake.** Both sides agree on the
+  channel count at `connect`/`listen` time. Sending on a channel index
+  outside `[0, channels)` raises a runtime error.
+- **Unreliable vs unsequenced.** `"unreliable"` packets are *sequenced*
+  (newer packets supersede older ones on the same channel) but may be
+  dropped. `"unsequenced"` packets are dropped *and* may be reordered;
+  use them only when you don't care about order at all.
+- **No retransmit of unreliable packets.** Reliability is opt-in per
+  packet. ENet does not promise delivery for `"unreliable"` or
+  `"unsequenced"` modes.
+- **`service(timeoutMs)` is the heartbeat.** ENet has no background
+  thread; **all** progress (handshake, retransmits, ack delivery,
+  disconnect notifications) happens during a `service()` call. Long
+  stretches without `service()` will trigger peer timeouts.
+- **`ENet.connect` is non-blocking on purpose.** Both ends must pump
+  `service()` for the handshake to advance — useful for in-process
+  loopback (one process drives both sides) and required for any
+  multi-peer client (one host serves many concurrent connections).
+- **`ENet` does not currently appear in `Sockets.waitAny`.** Use
+  `host.service(timeoutMs)` directly; the service call is itself a
+  multi-peer poll across every peer attached to that host.
+
+### ENet over DTLS
+
+Both `ENet.connect` and `ENet.listen` accept an optional trailing `opts`
+map whose `tls` field opts the host into DTLS. When set, every datagram
+the host sends or receives is wrapped in a DTLS record — the channel,
+ordering, reliability, and `service()` semantics are unchanged. Once
+the handshake completes, scripts use the same `host`/`peer` instance
+methods as for plain ENet.
+
+> **Still ENet on the wire.** ENet+DTLS talks only to other ENet+DTLS
+> peers. The encrypted bytes are an ENet-specific framing wrapped in
+> DTLS records — generic DTLS endpoints will not understand them. Pair
+> only against another ENet endpoint configured with the same DTLS
+> options.
+
+#### Client opts (`ENet.connect`)
+
+`opts.tls` accepts the same shape as `TLS.connect`:
+
+| Field          | Type                              | Default              | Notes                                                                                              |
+|----------------|-----------------------------------|----------------------|----------------------------------------------------------------------------------------------------|
+| `verify`       | bool                              | `true`               | When `false`, the server certificate is accepted without verification (useful for self-signed).    |
+| `trustedRoots` | `X509Certificate` or list thereof | system trust store   | Roots used to validate the server certificate. Ignored when `verify` is `false`.                   |
+| `commonName`   | string                            | the `host` argument  | Hostname used for SNI and certificate verification. Override when connecting by IP literal.        |
+
+#### Server opts (`ENet.listen`)
+
+`opts.tls` requires `{ key, cert }`:
+
+| Field   | Type                | Notes                                                                |
+|---------|---------------------|----------------------------------------------------------------------|
+| `key`   | `CryptoKey`         | Private key matching `cert`. Required.                               |
+| `cert`  | `X509Certificate`   | Server certificate. Required.                                        |
+
+Missing `key` or `cert` raises a runtime error. Both come from the
+`Crypto` native — see [crypto.md](crypto.md).
+
+#### Example: in-process self-signed handshake
+
+```
+func main(argv) {
+    var c = Crypto.create()
+    var key = c.generateRsa(2048)
+    var cert = c.generateSelfSignedCertificate(key, "CN=zym-test",
+                                               "20240101000000",
+                                               "20340101000000")
+
+    var srv = ENet.listen("127.0.0.1", 0, 4, 4,
+                          { tls: { key: key, cert: cert } })
+    var port = srv.localPort()
+
+    var pair = ENet.connect("127.0.0.1", port, 4,
+                            { tls: { verify: false } })
+    var host = pair["host"]
+    var peer = pair["peer"]
+
+    var serverPeer = null
+    while (peer.status() == "connecting" || serverPeer == null) {
+        var ev = srv.service(20)
+        if (ev != null && ev["type"] == "connect") { serverPeer = ev["peer"] }
+        host.service(20)
+    }
+
+    peer.send(Buffer.fromString("hello dtls"), 0, "reliable")
+    host.flush()
+    var ev = srv.service(500)
+    print("server got: %s\n", ev["data"].toUtf8())
+
+    peer.disconnect()
+    host.flush(); host.service(50)
+    host.close(); srv.close()
+    return 0
+}
+```
+
+#### Notes specific to ENet+DTLS
+
+- **Handshake takes one extra round trip** vs plain ENet because of
+  the DTLS cookie exchange (`HelloVerifyRequest`). Plan on a few
+  hundred milliseconds of `service()` driving on real networks before
+  the first application data flows.
+- **Self-signed certificates require `verify: false`.** Same as
+  `TLS.connect`; without it, the handshake fails with `"error"`.
+- **`refuseNewConnections(true)` is the graceful-drain knob.** With
+  DTLS this also stops the cookie machinery from responding to fresh
+  ClientHellos, which is usually what you want during shutdown.
+- **TLS bring-up is shared with the `Crypto` / `TLS` / `DTLS` natives.**
+  No extra initialization is required — the mbedTLS module is
+  already brought up at startup.

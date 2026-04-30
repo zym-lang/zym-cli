@@ -1,0 +1,107 @@
+// loopback.zym
+//
+// What this does:    Single-process ENet demo: starts a server on
+//                    127.0.0.1, connects a client to it, drives both
+//                    sides through the handshake, sends one reliable
+//                    record in each direction, and tears down cleanly.
+// How to run it:     zym examples/networking/enet/loopback.zym
+//                    No arguments. Picks an ephemeral port.
+// What you'll see:   Lines reporting the listening port, the handshake
+//                    completing, the round-trip records, and "done.".
+//
+// Concepts introduced:
+//   * ENet.listen(host, port, maxPeers, channels) and ENet.connect
+//   * The handshake is non-blocking: both ends must drive
+//     host.service(timeoutMs) until peer.status() == "connected"
+//     and the server has seen its "connect" event.
+//   * service(timeoutMs) returns one event at a time:
+//     { type: "connect"|"disconnect"|"receive"|"error", peer, data, channel }
+//   * peer.send(buf, channel, mode) with mode = "reliable"
+//   * host.flush() pushes pending sends out the wire NOW (otherwise
+//     they're buffered until the next service() call)
+func main(argv) {
+    // 4 channels, 4 max peers - small fixed budget for the loopback demo.
+    var srv = ENet.listen("127.0.0.1", 0, 4, 4)
+    if (srv == null) {
+        print("could not listen\n")
+        return 1
+    }
+    var port = srv.localPort()
+    print("listening on 127.0.0.1:%n\n", port)
+
+    // Non-blocking connect. The returned peer is in "connecting" state;
+    // the actual handshake happens during service() pumps below.
+    var pair = ENet.connect("127.0.0.1", port, 4)
+    if (pair == null) {
+        print("connect failed\n")
+        srv.close()
+        return 1
+    }
+    var cli     = pair["host"]
+    var cliPeer = pair["peer"]
+    print("client peer status (pre-handshake): %s\n", cliPeer.status())
+
+    // Drive both sides until handshake finishes.
+    //   - Server's connect event delivers the server-side peer.
+    //   - Client's peer flips to "connected" once the handshake
+    //     completes locally.
+    var srvPeer  = null
+    var deadline = Time.ticksMsec() + 5000
+    while (Time.ticksMsec() < deadline && (srvPeer == null || cliPeer.status() != "connected")) {
+        var ev = srv.service(20)
+        if (ev != null && ev["type"] == "connect") {
+            srvPeer = ev["peer"]
+            var pa = srvPeer.peerAddress()
+            print("server saw connect from %s:%n\n", pa["host"], pa["port"])
+        }
+        cli.service(20)
+    }
+    if (srvPeer == null || cliPeer.status() != "connected") {
+        print("handshake timed out\n")
+        cli.close()
+        srv.close()
+        return 1
+    }
+    print("handshake complete\n")
+
+    // Client -> server, reliable on channel 0.
+    cliPeer.send(Buffer.fromString("hello enet"), 0, "reliable")
+    cli.flush()
+
+    // Pump the server until the receive event arrives.
+    var srvGot   = null
+    deadline     = Time.ticksMsec() + 2000
+    while (Time.ticksMsec() < deadline && srvGot == null) {
+        var ev = srv.service(20)
+        if (ev != null && ev["type"] == "receive") {
+            srvGot = ev["data"].toUtf8()
+            print("server got: %s (channel %n)\n", srvGot, ev["channel"])
+        }
+    }
+
+    // Server -> client, reliable.
+    srvPeer.send(Buffer.fromString("hi back"), 0, "reliable")
+    srv.flush()
+
+    // Pump the client for the response.
+    var cliGot = null
+    deadline   = Time.ticksMsec() + 2000
+    while (Time.ticksMsec() < deadline && cliGot == null) {
+        var ev = cli.service(20)
+        if (ev != null && ev["type"] == "receive") {
+            cliGot = ev["data"].toUtf8()
+            print("client got: %s (channel %n)\n", cliGot, ev["channel"])
+        }
+    }
+
+    // Polite teardown: send a disconnect packet, give it a tick to flush.
+    cliPeer.disconnect()
+    cli.flush()
+    cli.service(50)
+    srv.service(50)
+
+    cli.close()
+    srv.close()
+    print("done.\n")
+    return 0
+}

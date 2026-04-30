@@ -10,7 +10,8 @@ and what to expect.
 ```
 examples/networking/
 ├─ tcp/    — reliable byte-stream sockets (TCP and TLS)
-└─ udp/    — datagram sockets (UDP and DTLS)
+├─ udp/    — datagram sockets (UDP and DTLS)
+└─ enet/   — reliable / unreliable / unsequenced over UDP via ENet (and ENet+DTLS)
 ```
 
 ## Recommended reading order
@@ -33,6 +34,10 @@ idea".
 | 10 | `tcp/https_get.zym`                                                | TLS as a drop-in for TCP; system-CA verify by default    |
 | 11 | `tcp/tls_self_signed_server.zym` + `tcp/tls_client.zym`            | Server-side TLS handshake; self-signed cert + `verify: false` |
 | 12 | `udp/dtls_self_signed_server.zym` + `udp/dtls_client.zym`          | Encrypted UDP: DTLS handshake on top of `UDP.listen`     |
+| 13 | `enet/loopback.zym`                                                | ENet handshake + reliable round-trip in a single process |
+| 14 | `enet/echo_server.zym` + `enet/echo_client.zym`                    | Reliable / unreliable / unsequenced sends across channels |
+| 15 | `enet/broadcast_server.zym` + `enet/broadcast_client.zym`          | `host.broadcast()` fan-out + tiny text framing protocol  |
+| 16 | `enet/dtls_self_signed_server.zym` + `enet/dtls_client.zym`        | Encrypted ENet: DTLS via `opts.tls` on `ENet.connect`/`listen` |
 
 ## How arguments work
 
@@ -101,7 +106,7 @@ kill %1
 
 For the underlying native APIs, see:
 
-- [`docs/sockets.md`](../../docs/sockets.md) - `IP`/`TCP`/`UDP`/`TLS`/`DTLS`/`Sockets.waitAny`
+- [`docs/sockets.md`](../../docs/sockets.md) - `IP`/`TCP`/`UDP`/`TLS`/`DTLS`/`ENet`/`Sockets.waitAny`
 - [`docs/buffer.md`](../../docs/buffer.md) - the byte type used by sockets
 - [`docs/conventions.md`](../../docs/conventions.md) - the status-string
   vocabulary (`"ok"`/`"busy"`/`"timeout"`/`"eof"`/`"closed"`/`"error"`)

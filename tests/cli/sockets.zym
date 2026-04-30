@@ -422,7 +422,147 @@ assert_wrap(typeof(DTLS) == "map",                       "15.12: DTLS is a map")
 assert_wrap(typeof(DTLS.connect) != "null",              "15.13: DTLS.connect exposed")
 assert_wrap(typeof(DTLS.connectFrom) != "null",          "15.14: DTLS.connectFrom exposed")
 assert_wrap(typeof(DTLS.accept) != "null",               "15.15: DTLS.accept exposed")
-
+assert_wrap(typeof(ENet) == "map",                       "15.16: ENet is a map")
+assert_wrap(typeof(ENet.connect) != "null",              "15.17: ENet.connect exposed")
+assert_wrap(typeof(ENet.listen) != "null",               "15.18: ENet.listen exposed")
+// ============================================================================
+// SECTION 16: ENet — in-process round-trip with reliable / unreliable /
+// unsequenced channels.
+// ============================================================================
+print("")
+print("--- SECTION 16: ENet ---")
+var enetSrv = ENet.listen("127.0.0.1", 0, 4, 4)
+assert_wrap(enetSrv != null,                             "16.1: ENet.listen succeeds")
+var enetPort = enetSrv.localPort()
+assert_wrap(enetPort > 0,                                "16.2: localPort reported")
+var conn = ENet.connect("127.0.0.1", enetPort, 4)
+assert_wrap(typeof(conn) == "map",                       "16.3: ENet.connect returns a map")
+var enetCli  = conn["host"]
+var enetCliP = conn["peer"]
+assert_wrap(enetCli != null,                             "16.4: returned map has host")
+assert_wrap(enetCliP != null,                            "16.5: returned map has peer")
+assert_wrap(enetCliP.status() == "connecting",           "16.6: peer starts in connecting state")
+// Drive both sides until the server's CONNECT event arrives and the
+// client's peer reports connected.
+var enetSrvP = null
+var enetDeadline = Time.ticksMsec() + 5000
+while (Time.ticksMsec() < enetDeadline && (enetSrvP == null || enetCliP.status() != "connected")) {
+    var ev = enetSrv.service(20)
+    if (ev != null && ev["type"] == "connect") enetSrvP = ev["peer"]
+    enetCli.service(20)
+}
+assert_wrap(enetSrvP != null,                            "16.7: server saw CONNECT event")
+assert_wrap(enetCliP.status() == "connected",            "16.8: client peer is connected")
+var pa2 = enetSrvP.peerAddress()
+assert_wrap(typeof(pa2) == "map",                        "16.9: peerAddress returns a map")
+assert_wrap(pa2["host"] == "127.0.0.1",                  "16.10: server-peer host = 127.0.0.1")
+// Send three records on three channels with three modes.
+assert_wrap(enetCliP.send(Buffer.fromString("rel"), 0, "reliable")    == "ok", "16.11: reliable send ok")
+assert_wrap(enetCliP.send(Buffer.fromString("unr"), 1, "unreliable")  == "ok", "16.12: unreliable send ok")
+assert_wrap(enetCliP.send(Buffer.fromString("uns"), 2, "unsequenced") == "ok", "16.13: unsequenced send ok")
+enetCli.flush()
+// Pump server until 3 receive events arrive (or deadline).
+var got = 0
+var gotCh = [false, false, false]
+enetDeadline = Time.ticksMsec() + 2000
+while (Time.ticksMsec() < enetDeadline && got < 3) {
+    var ev2 = enetSrv.service(20)
+    if (ev2 == null) continue
+    if (ev2["type"] == "receive") {
+        var ch = ev2["channel"]
+        if (ch >= 0 && ch < 3) gotCh[ch] = true
+        got = got + 1
+    }
+}
+assert_wrap(got == 3,                                    "16.14: server received 3 records")
+assert_wrap(gotCh[0],                                    "16.15: received on channel 0")
+assert_wrap(gotCh[1],                                    "16.16: received on channel 1")
+assert_wrap(gotCh[2],                                    "16.17: received on channel 2")
+// pingMs returns a number (initial sample may be 0 before any RTT measurement).
+assert_wrap(typeof(enetCliP.pingMs()) == "number",       "16.18: pingMs returns a number")
+// disconnect + close idempotency.
+enetCliP.disconnect()
+enetCli.flush()
+enetCli.service(20)
+enetSrv.service(20)
+enetCli.close()
+enetCli.close()
+assert_wrap(true,                                        "16.19: ENet host double-close is silent")
+enetSrv.close()
+// ============================================================================
+// SECTION 17: ENet over DTLS — in-process self-signed round-trip
+// ============================================================================
+print("")
+print("--- SECTION 17: ENet over DTLS ---")
+// Reuse `crypto` from SECTION 12. Mint a fresh key/cert pair specific to
+// this section so we don't entangle with TLS/DTLS sections above.
+var enetTlsKey  = crypto.generateRsa(2048)
+var enetTlsCert = crypto.generateSelfSignedCertificate(enetTlsKey, "CN=zym-enet-test", "20240101000000", "20340101000000")
+assert_wrap(enetTlsKey  != null,                         "17.1: RSA key minted")
+assert_wrap(enetTlsCert != null,                         "17.2: self-signed cert minted")
+var enetSrvT = ENet.listen("127.0.0.1", 0, 4, 4, { tls: { key: enetTlsKey, cert: enetTlsCert } })
+assert_wrap(enetSrvT != null,                            "17.3: ENet.listen with DTLS opts succeeds")
+var enetPortT = enetSrvT.localPort()
+assert_wrap(enetPortT > 0,                               "17.4: DTLS server localPort reported")
+var connT = ENet.connect("127.0.0.1", enetPortT, 4, { tls: { verify: false } })
+assert_wrap(typeof(connT) == "map",                      "17.5: ENet.connect with DTLS opts returns a map")
+var enetCliT  = connT["host"]
+var enetCliPT = connT["peer"]
+// Drive both sides through cookie exchange + handshake.
+var enetSrvPeerT = null
+var enetIter = 0
+while (enetIter < 200 && (enetCliPT.status() != "connected" || enetSrvPeerT == null)) {
+    var ev = enetSrvT.service(20)
+    if (ev != null) {
+        if (ev["type"] == "connect") { enetSrvPeerT = ev["peer"] }
+    }
+    enetCliT.service(20)
+    enetIter = enetIter + 1
+}
+assert_wrap(enetCliPT.status() == "connected",           "17.6: client peer reaches connected (DTLS)")
+assert_wrap(enetSrvPeerT != null,                        "17.7: server saw a connect event (DTLS)")
+// Reliable round-trip across the encrypted channel.
+enetCliPT.send(Buffer.fromString("hello dtls"), 0, "reliable")
+enetCliT.flush()
+var gotT = null
+enetIter = 0
+while (enetIter < 100 && gotT == null) {
+    var ev = enetSrvT.service(20)
+    if (ev != null && ev["type"] == "receive") { gotT = ev["data"] }
+    enetIter = enetIter + 1
+}
+assert_wrap(gotT != null,                                "17.8: server received DTLS record")
+assert_wrap(gotT.toUtf8() == "hello dtls",               "17.9: payload round-trips through DTLS")
+// Reverse direction.
+enetSrvPeerT.send(Buffer.fromString("hi back"), 0, "reliable")
+enetSrvT.flush()
+var backT = null
+enetIter = 0
+while (enetIter < 100 && backT == null) {
+    var ev = enetCliT.service(20)
+    if (ev != null && ev["type"] == "receive") { backT = ev["data"] }
+    enetIter = enetIter + 1
+}
+assert_wrap(backT != null,                               "17.10: client received DTLS record back")
+assert_wrap(backT.toUtf8() == "hi back",                 "17.11: reverse payload round-trips")
+// refuseNewConnections is callable on a DTLS server.
+enetSrvT.refuseNewConnections(true)
+assert_wrap(true,                                        "17.12: refuseNewConnections(true) returns cleanly")
+enetSrvT.refuseNewConnections(false)
+assert_wrap(true,                                        "17.13: refuseNewConnections(false) returns cleanly")
+// Missing cert/key on the server is a runtime error path → caller responsibility;
+// we only check that omitting opts.tls keeps plain ENet behavior.
+var enetSrvPlain2 = ENet.listen("127.0.0.1", 0, 2, 2)
+assert_wrap(enetSrvPlain2 != null,                       "17.14: plain ENet.listen still works alongside DTLS hosts")
+enetSrvPlain2.close()
+// Teardown.
+enetCliPT.disconnect()
+enetCliT.flush()
+enetCliT.service(20)
+enetSrvT.service(20)
+enetCliT.close()
+enetSrvT.close()
+assert_wrap(true,                                        "17.15: DTLS host clean teardown")
 // ============================================================================
 // FINAL RESULTS
 // ============================================================================

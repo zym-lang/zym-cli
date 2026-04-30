@@ -133,7 +133,7 @@ exec scons \
     \
     module_regex_enabled=yes \
     module_mbedtls_enabled=yes \
-    #module_websocket_enabled=yes \
+    module_enet_enabled=yes \
     \
     build_profile="../scripts/zym_profile.gdbuild" \
     ccflags="${ZYM_CCFLAGS}" \

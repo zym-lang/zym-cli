@@ -1,0 +1,69 @@
+// echo_server.zym
+//
+// What this does:    Listens for ENet peers and echoes every record back
+//                    on the same channel and same mode the client used.
+//                    Stays running until Ctrl-C; tracks an unlimited
+//                    number of concurrent peers using only host.service().
+// How to run it:     zym examples/networking/enet/echo_server.zym -- 9100
+//                      port is optional; default 9100; pass 0 for an
+//                      OS-assigned port.
+//                    In another terminal:
+//                      zym examples/networking/enet/echo_client.zym -- 127.0.0.1 9100
+// What you'll see:   "listening on 0.0.0.0:9100"
+//                    "[127.0.0.1:36330] (ch=1) hello"
+//                    Stop with Ctrl-C.
+//
+// Concepts introduced:
+//   * One service() loop drives ALL peers; ENet multiplexes internally.
+//     Unlike TCP/TLS you do not call accept() in a loop.
+//   * The receive event tells you the channel; it does NOT tell you the
+//     send mode (reliable / unreliable / unsequenced) - that's a transport
+//     concern, the payload bytes look identical on the receive side.
+//     If a client wants to demonstrate per-mode behaviour it must label
+//     its own messages (see echo_client.zym).
+//   * Connect / disconnect events are observed in the same stream as
+//     receive events.
+func main(argv) {
+    var port = 9100
+    if (length(argv) > 1) { port = num(argv[1]) }
+
+    // 32 max peers, 4 channels - typical "small game / small RPC" budget.
+    var srv = ENet.listen("0.0.0.0", port, 32, 4)
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n\n", srv.localPort())
+
+    while (true) {
+        // service(500) wakes every half-second so stdout / Ctrl-C feel
+        // responsive even when the link is idle.
+        var ev = srv.service(500)
+        if (ev == null) {
+            continue
+        }
+        var t = ev["type"]
+        if (t == "connect") {
+            var pa = ev["peer"].peerAddress()
+            print("[%s:%n] connected\n", pa["host"], pa["port"])
+        } else if (t == "disconnect") {
+            var pa = ev["peer"].peerAddress()
+            print("[%s:%n] disconnected\n", pa["host"], pa["port"])
+        } else if (t == "receive") {
+            var p   = ev["peer"]
+            var pa  = p.peerAddress()
+            var ch  = ev["channel"]
+            var msg = ev["data"].toUtf8()
+            print("[%s:%n] (ch=%n) %s\n", pa["host"], pa["port"], ch, msg)
+            // Echo back on the SAME channel. We always echo with
+            // "reliable" so the client can rely on every echo
+            // arriving even when it sent the original as
+            // "unreliable" / "unsequenced".
+            p.send(Buffer.fromString(msg), ch, "reliable")
+            srv.flush()
+        } else if (t == "error") {
+            print("error event\n")
+        }
+    }
+    return 0
+}

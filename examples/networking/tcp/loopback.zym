@@ -1,0 +1,66 @@
+// loopback.zym
+//
+// What this does:    Stands up a tiny TCP server and client in the same
+//                    process, exchanges one line in each direction, and
+//                    exits. The smallest possible "this is what a TCP
+//                    round-trip looks like" demo.
+// How to run it:     zym examples/networking/tcp/loopback.zym
+//                    (no args.)
+// What you'll see:   "client -> server: hello"
+//                    "server -> client: hi back"
+//                    "done."
+//
+// Concepts introduced:
+//   * TCP.listen / TCP.connect / srv.accept
+//   * Buffer.fromString to send a payload
+//   * readLine returns the line WITHOUT the trailing newline
+//   * close() on each end is idempotent
+
+func main(argv) {
+    // Bind to loopback on an OS-assigned port (0 means "you pick").
+    // Reading srv.localPort() back is what tells us where to dial.
+    var srv = TCP.listen("127.0.0.1", 0)
+    if (srv == null) {
+        print("failed to listen\n")
+        return 1
+    }
+    var port = srv.localPort()
+    print("listening on 127.0.0.1:%n\n", port)
+
+    // Synchronous connect with a 2s ceiling. On loopback this returns
+    // almost instantly. null = refused or timed out.
+    var client = TCP.connect("127.0.0.1", port, 2000)
+    if (client == null) {
+        print("connect failed\n")
+        srv.close()
+        return 1
+    }
+
+    // The accept side may not have run yet on slower machines; give it
+    // up to 2s. Loopback usually returns the accepted sock in <1ms.
+    var server_sock = srv.accept(2000)
+    if (server_sock == null) {
+        print("accept failed\n")
+        client.close()
+        srv.close()
+        return 1
+    }
+
+    // ---- Client -> server ----
+    client.write(Buffer.fromString("hello\n"), 1000)
+    var got1 = server_sock.readLine(1000)
+    print("client -> server: %s\n", got1)
+
+    // ---- Server -> client ----
+    server_sock.write(Buffer.fromString("hi back\n"), 1000)
+    var got2 = client.readLine(1000)
+    print("server -> client: %s\n", got2)
+
+    // Clean up. close() is idempotent; calling it twice is fine.
+    client.close()
+    server_sock.close()
+    srv.close()
+
+    print("done.\n")
+    return 0
+}

@@ -1,0 +1,68 @@
+// loopback.zym
+//
+// What this does:    Sends a single UDP datagram from one socket on
+//                    127.0.0.1 to another socket on 127.0.0.1, and
+//                    receives it back. Smallest possible "this is what
+//                    UDP looks like" example - one process, no client
+//                    or server roles.
+// How to run it:     zym examples/networking/udp/loopback.zym
+//                    No arguments. Both sockets get OS-assigned ports.
+// What you'll see:   "sender bound on ...", "receiver bound on ...",
+//                    then "got <n> bytes from 127.0.0.1:<port> -> <text>"
+//                    and "done."
+//
+// Concepts introduced:
+//   * UDP.bind(host, 0) lets the OS pick a port; localPort() reports it
+//   * UDP is connectionless - send() takes the destination directly
+//   * recv() returns a map: { data: Buffer, host, port }
+//   * with a single host (loopback), there's no packet loss to worry about
+//
+// UDP differences vs TCP to keep in mind:
+//   * No accept / handshake. Either side can send first.
+//   * No streaming - one send() == one datagram == one recv().
+//   * No reliability guarantee. (On 127.0.0.1 it's effectively reliable,
+//     but across a real network UDP can drop, reorder, or duplicate.)
+
+func main(argv) {
+    // Receiver first - so its port is already bound when the sender writes.
+    var receiver = UDP.bind("127.0.0.1", 0)
+    if (receiver == null) {
+        print("could not bind receiver\n")
+        return 1
+    }
+    print("receiver bound on 127.0.0.1:%n\n", receiver.localPort())
+
+    var sender = UDP.bind("127.0.0.1", 0)
+    if (sender == null) {
+        print("could not bind sender\n")
+        receiver.close()
+        return 1
+    }
+    print("sender bound on 127.0.0.1:%n\n", sender.localPort())
+
+    // Send one datagram. The status string tells us if the kernel
+    // accepted the packet for delivery (it doesn't tell us anything
+    // about whether it was actually delivered - this is UDP).
+    var w = sender.send(Buffer.fromString("hello udp"), "127.0.0.1", receiver.localPort())
+    if (w != "ok") {
+        print("send failed: %s\n", w)
+        sender.close()
+        receiver.close()
+        return 1
+    }
+
+    // Wait up to 1 second for the datagram. recv returns a map on success
+    // ({ data, host, port }) or one of the status strings on timeout/error.
+    var r = receiver.recv(1000)
+    if (r == "timeout" || r == "error") {
+        print("recv failed: %s\n", r)
+    } else {
+        print("got %n bytes from %s:%n -> %s\n",
+              r["data"].size(), r["host"], r["port"], r["data"].toUtf8())
+    }
+
+    sender.close()
+    receiver.close()
+    print("done.\n")
+    return 0
+}

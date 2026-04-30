@@ -1,0 +1,77 @@
+// echo_server.zym
+//
+// What this does:    Listens for TCP connections and echoes every line
+//                    each client sends back to that same client. Serves
+//                    one client at a time (sequential accept loop).
+// How to run it:     zym examples/networking/tcp/echo_server.zym -- 9000
+//                      port is optional; default 9000; pass 0 for an
+//                      OS-assigned port.
+//                    In another terminal:
+//                      zym examples/networking/tcp/echo_client.zym -- 127.0.0.1 9000 "hello"
+// What you'll see:   "listening on 0.0.0.0:9000"
+//                    Per-client lines like "[127.0.0.1:54321] hello"
+//                    Stop with Ctrl-C (the kernel reclaims the socket).
+//
+// Concepts introduced:
+//   * accept loop with a per-iteration timeout (lets stdout/Ctrl-C feel responsive)
+//   * peerAddress() returns { host, port } - useful for logging
+//   * "eof" / "closed" status strings on readLine signal client hangup
+//   * one bug to know: Buffer.fromString does not append "\n" automatically;
+//     a TCP echo server has to add it back if the client expects line-framed I/O
+
+func main(argv) {
+    // Default port. Override via:  zym ... -- <port>
+    var port = 9000
+    if (length(argv) > 1) {
+        port = num(argv[1])
+    }
+
+    var srv = TCP.listen("0.0.0.0", port)
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n\n", srv.localPort())
+
+    // Outer loop: accept one client at a time, forever.
+    // accept(500) wakes every half-second so stdout flushes / Ctrl-C
+    // is felt promptly. accept(-1) would block forever which feels
+    // dead in a terminal.
+    while (true) {
+        var sock = srv.accept(500)
+        if (sock == null) {
+            // No pending connection in the last 500ms. Loop and retry.
+            continue
+        }
+        var pa = sock.peerAddress()
+        print("client connected from %s:%n\n", pa["host"], pa["port"])
+
+        // Inner loop: echo lines until the peer closes.
+        while (true) {
+            var line = sock.readLine(-1)
+            // readLine returns the bare line on success, or one of the
+            // status strings: "timeout", "eof", "closed", "error".
+            if (line == "eof" || line == "closed" || line == "error") {
+                print("client %s:%n disconnected (%s)\n", pa["host"], pa["port"], line)
+                break
+            }
+            print("[%s:%n] %s\n", pa["host"], pa["port"], line)
+
+            // Echo back. Note the explicit "\n" - the network has no
+            // concept of a line; readLine is just "give me bytes up to
+            // the next \n". We have to put one back on.
+            var w = sock.write(Buffer.fromString(line + "\n"), 1000)
+            if (w != "ok") {
+                print("write failed (%s); dropping client\n", w)
+                break
+            }
+        }
+        sock.close()
+    }
+
+    // Unreachable in this example, but here for symmetry. A version of
+    // this server that supports clean shutdown would set a flag from a
+    // signal handler and break out of the outer while.
+    srv.close()
+    return 0
+}

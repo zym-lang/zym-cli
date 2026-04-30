@@ -1,0 +1,101 @@
+// dtls_self_signed_server.zym
+//
+// What this does:    Stands up a DTLS server with a freshly-minted RSA
+//                    keypair + self-signed cert, accepts DTLS clients
+//                    over UDP, and echoes every datagram back to its
+//                    sender. The DTLS counterpart of
+//                    tls_self_signed_server.zym.
+// How to run it:     zym examples/networking/udp/dtls_self_signed_server.zym -- 9684
+//                      argv[1] = port (default 9684; pass 0 for OS-assigned)
+//                    Then in another terminal:
+//                    zym examples/networking/udp/dtls_client.zym -- 127.0.0.1 9684 hello world
+// What you'll see:   For each connecting client, the DTLS handshake
+//                    driving to completion (cookie exchange + key
+//                    exchange) and every datagram received before the
+//                    client closes.
+//
+// Concepts introduced:
+//   * DTLS server is layered on UDP.listen, not on UDP.bind. UDP.listen
+//     gives per-source demultiplexing - which DTLS needs because each
+//     client-server pair has its own crypto state.
+//   * DTLS.accept(udpServer, { key, cert }, timeoutMs) drives the
+//     server-side handshake. With timeoutMs=0 the call returns null
+//     until enough handshake datagrams have arrived; you keep calling
+//     it from a poll loop until it returns a peer.
+//   * DTLS preserves UDP's datagram boundaries: send / recv work in
+//     whole records, no read / readLine / readAll - those are
+//     stream-only concepts.
+//   * DTLS is unreliable for *application* data (UDP underneath), but
+//     the handshake itself is internally retransmitted by mbedTLS.
+//
+// Note: the matching client must use { verify: false } because the cert
+//       is self-signed and not in any trust store. Real deployments use
+//       a CA-issued cert and the default verify=true.
+func main(argv) {
+    var port = 9684
+    if (length(argv) > 1) { port = num(argv[1]) }
+    print("minting self-signed RSA-2048 key + cert (CN=localhost)...\n")
+    var crypto = Crypto.create()
+    var key = crypto.generateRsa(2048)
+    var cert = crypto.generateSelfSignedCertificate(key, "CN=localhost",
+                                                    "20240101000000",
+                                                    "20440101000000")
+    if (key == null || cert == null) {
+        print("failed to mint key+cert\n")
+        return 1
+    }
+    var srv = UDP.listen("0.0.0.0", port)
+    if (srv == null) {
+        print("could not listen on udp port %n (port already in use?)\n", port)
+        return 1
+    }
+    var bound = srv.localPort()
+    print("DTLS server listening on udp/0.0.0.0:%n (Ctrl-C to stop)\n", bound)
+    // Server loop. Each iteration: try to advance any in-flight DTLS
+    // handshakes via DTLS.accept, then service the connected peers.
+    // Both share the same UDP server's per-source demux.
+    var peers = []
+    while (true) {
+        // DTLS.accept consumes the UDP server's pending datagrams
+        // internally to drive any in-flight handshake. With timeoutMs=0
+        // it returns null until a brand-new client's ClientHello +
+        // cookie round-trip + key exchange has completed - then it
+        // returns a connected peer ready to send / recv.
+        var newPeer = DTLS.accept(srv, { key: key, cert: cert }, 0)
+        if (newPeer != null) {
+            var pa = newPeer.peerAddress()
+            print("[server] DTLS handshake complete from %s:%n\n",
+                  pa["host"], pa["port"])
+            push(peers, newPeer)
+        }
+        // Service every connected peer: poll, drain, echo.
+        var i = 0
+        while (i < length(peers)) {
+            var peer = peers[i]
+            peer.poll()
+            if (peer.status() != "connected") {
+                var pa = peer.peerAddress()
+                print("[server] peer %s:%n disconnected (%s)\n",
+                      pa["host"], pa["port"], peer.status())
+                peer.close()
+                remove(peers, i)
+                // don't advance i; the next peer is now at i
+                continue
+            }
+            while (peer.available() > 0) {
+                var rec = peer.recv(0)
+                if (typeof(rec) == "map") {
+                    var msg = rec.toUtf8()
+                    var pa = peer.peerAddress()
+                    print("[server] <- %s:%n %s\n",
+                          pa["host"], pa["port"], msg)
+                    peer.send(rec)
+                }
+            }
+            i = i + 1
+        }
+        // Don't burn CPU between idle ticks.
+        System.sleep(20)
+    }
+    return 0
+}

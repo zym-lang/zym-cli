@@ -1,0 +1,90 @@
+// https_get.zym
+//
+// What this does:    Same shape as http_get.zym, but speaks HTTPS by
+//                    using TLS.connect instead of TCP.connect. The point
+//                    is the side-by-side comparison: every other line of
+//                    code is identical. TLS handles cert verification,
+//                    hostname checking, and the encrypted record stream
+//                    on top of an underlying TCP transport.
+// How to run it:     zym examples/networking/tcp/https_get.zym -- example.com
+//                    zym examples/networking/tcp/https_get.zym -- example.com 443 /
+//                    zym examples/networking/tcp/https_get.zym -- www.google.com 443 /
+//                      argv[1] = host (default example.com)
+//                      argv[2] = port (default 443)
+//                      argv[3] = path (default /)
+// What you'll see:   The plaintext request that was sent (encrypted on
+//                    the wire), then the response status line, headers,
+//                    and body.
+//
+// Concepts introduced (over http_get.zym):
+//   * TLS.connect(host, port, timeoutMs) is a drop-in for TCP.connect.
+//     It also performs the TLS handshake before returning, so when the
+//     call succeeds the sock is "connected" and any write() is encrypted.
+//   * Default opts verify the server's certificate against the system
+//     trust store and check hostname == SAN/CN. No setup required.
+//   * Same readAll / split / framing logic as http_get.zym - once the
+//     handshake is done, the byte-stream API is identical.
+//
+// Note: passing { verify: false } would skip cert + hostname checks.
+//       Use that ONLY for tests against self-signed peers you control;
+//       see tls_self_signed_server.zym + tls_client.zym for that path.
+func main(argv) {
+    var host = "example.com"
+    var port = 443
+    var path = "/"
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    if (length(argv) > 3) { path = argv[3] }
+    print("connecting to %s:%n over TLS ...\n", host, port)
+    var sock = TLS.connect(host, port, 10000)
+    if (sock == null) {
+        print("TLS connect failed (DNS / refused / handshake / hostname mismatch)\n")
+        return 1
+    }
+    print("handshake ok, status=%s\n", sock.status())
+    var req = "GET " + path + " HTTP/1.0\r\n" +
+              "Host: " + host + "\r\n" +
+              "User-Agent: zym-https-get/1.0\r\n" +
+              "Accept: */*\r\n" +
+              "Connection: close\r\n" +
+              "\r\n"
+    print("---- request ----\n%s", req)
+    var w = sock.write(Buffer.fromString(req), 5000)
+    if (w != "ok") {
+        print("write failed: %s\n", w)
+        sock.close()
+        return 1
+    }
+    var bodyBuf = sock.readAll(15000)
+    sock.close()
+    if (bodyBuf == "timeout" || bodyBuf == "error" || bodyBuf == "closed") {
+        print("read failed: %s\n", bodyBuf)
+        return 1
+    }
+    var raw = bodyBuf.toUtf8()
+    var sep = "\r\n\r\n"
+    var parts = split(raw, sep)
+    if (length(parts) < 2) {
+        print("malformed response: no header/body separator found\n")
+        print("%s\n", raw)
+        return 1
+    }
+    var headerBlock = parts[0]
+    var body = parts[1]
+    var i = 2
+    while (i < length(parts)) {
+        body = body + sep + parts[i]
+        i = i + 1
+    }
+    print("---- response headers ----\n")
+    var lines = split(headerBlock, "\r\n")
+    var j = 0
+    while (j < length(lines)) {
+        print("%s\n", lines[j])
+        j = j + 1
+    }
+    print("---- response body ----\n")
+    print("%s\n", body)
+    print("---- end (%n bytes total) ----\n", bodyBuf.size())
+    return 0
+}

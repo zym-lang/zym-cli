@@ -1,0 +1,69 @@
+// tls_client.zym
+//
+// What this does:    Connects to a TLS server (typically the matching
+//                    tls_self_signed_server.zym), sends each argv line
+//                    as one chat line, and prints the echoed reply.
+//                    The TLS counterpart of echo_client.zym.
+// How to run it:     # Terminal A
+//                    zym examples/networking/tcp/tls_self_signed_server.zym -- 9443
+//
+//                    # Terminal B
+//                    zym examples/networking/tcp/tls_client.zym -- 127.0.0.1 9443 hello world
+//                      argv[1] = host (default 127.0.0.1)
+//                      argv[2] = port (default 9443)
+//                      argv[3+] = lines to send (default ["ping"])
+// What you'll see:   For each line, the line being sent and the
+//                    server's echoed reply.
+//
+// Concepts introduced (over echo_client.zym):
+//   * TLS.connect with { verify: false } - required when the peer
+//     presents a self-signed cert and you don't have its trust anchor
+//     installed. The connection still encrypts traffic, it just skips
+//     identity validation. Pair with a known peer or trustedRoots in
+//     production.
+//   * Once handshake completes, TLS sock has the same byte-stream API
+//     as TCP: write / readLine / readAll / readSome / close.
+func main(argv) {
+    var host = "127.0.0.1"
+    var port = 9443
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    var lines = []
+    if (length(argv) > 3) {
+        var i = 3
+        while (i < length(argv)) {
+            push(lines, argv[i])
+            i = i + 1
+        }
+    } else {
+        push(lines, "ping")
+    }
+    print("connecting to %s:%n over TLS (verify=false) ...\n", host, port)
+    var sock = TLS.connect(host, port, 8000, { verify: false })
+    if (sock == null) {
+        print("could not connect (refused / handshake / timeout)\n")
+        return 1
+    }
+    print("handshake complete, status=%s\n", sock.status())
+    var i = 0
+    while (i < length(lines)) {
+        var msg = lines[i]
+        print("-> %s\n", msg)
+        var w = sock.write(Buffer.fromString(msg + "\n"), 2000)
+        if (w != "ok") {
+            print("write failed: %s\n", w)
+            break
+        }
+        var reply = sock.readLine(2000)
+        if (reply == "timeout" || reply == "eof" ||
+            reply == "closed" || reply == "error") {
+            print("read failed: %s\n", reply)
+            break
+        }
+        print("<- %s\n", reply)
+        i = i + 1
+    }
+    sock.close()
+    print("done.\n")
+    return 0
+}

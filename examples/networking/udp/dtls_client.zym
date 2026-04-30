@@ -1,0 +1,84 @@
+// dtls_client.zym
+//
+// What this does:    Connects to a DTLS server (typically the matching
+//                    dtls_self_signed_server.zym), sends each argv line
+//                    as one DTLS record, and prints the server's echoed
+//                    reply for each one. The DTLS counterpart of
+//                    udp/echo_client.zym.
+// How to run it:     # Terminal A
+//                    zym examples/networking/udp/dtls_self_signed_server.zym -- 9684
+//
+//                    # Terminal B
+//                    zym examples/networking/udp/dtls_client.zym -- 127.0.0.1 9684 hello world
+//                      argv[1] = host (default 127.0.0.1)
+//                      argv[2] = port (default 9684)
+//                      argv[3+] = lines to send (default ["ping"])
+// What you'll see:   For each line, the line being sent and the
+//                    server's encrypted echo reply.
+//
+// Concepts introduced:
+//   * DTLS.connect(host, port, timeoutMs, opts) is the client factory.
+//     It binds an ephemeral UDP, runs the handshake, and returns a
+//     handle whose API mirrors UDP's: send / recv / poll / close.
+//     No read / readLine / readAll - DTLS is datagram, not stream.
+//   * { verify: false } skips cert+hostname checks against a
+//     self-signed peer. Same caveat as TLS: only do this against peers
+//     you control.
+//   * recv(timeoutMs) returns a Buffer (not a { data, host, port }
+//     map - DTLS is point-to-point post-handshake, the source is
+//     always the same peer).
+func main(argv) {
+    var host = "127.0.0.1"
+    var port = 9684
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    var lines = []
+    if (length(argv) > 3) {
+        var i = 3
+        while (i < length(argv)) {
+            push(lines, argv[i])
+            i = i + 1
+        }
+    } else {
+        push(lines, "ping")
+    }
+    print("DTLS-connecting to %s:%n (verify=false) ...\n", host, port)
+    var sock = DTLS.connect(host, port, 8000, { verify: false })
+    if (sock == null) {
+        print("could not connect (refused / handshake / timeout)\n")
+        return 1
+    }
+    print("handshake complete, status=%s\n", sock.status())
+    var i = 0
+    while (i < length(lines)) {
+        var msg = lines[i]
+        print("-> %s\n", msg)
+        var w = sock.send(Buffer.fromString(msg))
+        if (w != "ok") {
+            print("send failed: %s\n", w)
+            break
+        }
+        // Wait briefly for the echo. DTLS is unreliable for app data so
+        // we accept that the reply might not show up; treat that as a
+        // soft warning rather than a hard failure.
+        var got = null
+        var t = 0
+        while (t < 100 && got == null) {
+            sock.poll()
+            if (sock.available() > 0) {
+                got = sock.recv(0)
+            }
+            t = t + 1
+            System.sleep(10)
+        }
+        if (typeof(got) == "map") {
+            print("<- %s\n", got.toUtf8())
+        } else {
+            print("<- (no reply within 1s; status=%s)\n", sock.status())
+        }
+        i = i + 1
+    }
+    sock.close()
+    print("done.\n")
+    return 0
+}

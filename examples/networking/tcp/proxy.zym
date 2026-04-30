@@ -1,0 +1,140 @@
+// proxy.zym
+//
+// What this does:    A single-file TCP forwarder. Listens on a local
+//                    port; for every incoming client, opens a fresh
+//                    TCP connection to a configured upstream host:port
+//                    and shovels bytes between the two sockets in
+//                    both directions until either side closes. Serves
+//                    one client at a time (sequential).
+// How to run it:     zym examples/networking/tcp/proxy.zym -- 9300 example.com 80
+//                      argv[1] = local listen port (default 9300)
+//                      argv[2] = upstream host    (default 127.0.0.1)
+//                      argv[3] = upstream port    (default 9000)
+//                    Then point a client at the local port:
+//                      zym examples/networking/tcp/http_get.zym -- 127.0.0.1 9300 /
+//                    or just curl/nc.
+// What you'll see:   "listening on 0.0.0.0:9300, forwarding to example.com:80"
+//                    Per-connection logs of bytes shoveled in each
+//                    direction, and a closing summary.
+//
+// Concepts introduced:
+//   * Bidirectional forwarding with Sockets.waitAny on TWO sockets:
+//     this is the entire kernel of a TCP proxy, NAT, port forwarder,
+//     mitm tool, sidecar, etc. It is the smallest non-trivial use of
+//     waitAny.
+//   * readSome(n) returns whatever bytes are immediately available
+//     (possibly 0). It NEVER waits. Pair it with waitAny to get
+//     "block until something is ready, then drain everything ready."
+//   * Half-close semantics are intentionally NOT modeled: as soon as
+//     either side closes, we tear down both. Production proxies care
+//     about half-close; example proxies should not pretend to.
+
+func forward(client, upstream) {
+    var bytesC2U = 0   // client -> upstream
+    var bytesU2C = 0   // upstream -> client
+    var buf16 = 16384
+
+    while (true) {
+        var w = Sockets.waitAny([client, upstream], "read", 1000)
+
+        // Idle ticks just loop. Real proxies might add an idle timeout
+        // here; this example doesn't.
+        if (w["timedOut"]) {
+            // Re-check status: a peer may have closed without bytes.
+            if (client.status() == "closed" || upstream.status() == "closed") {
+                break
+            }
+            if (client.status() == "error" || upstream.status() == "error") {
+                break
+            }
+            continue
+        }
+
+        var ready = w["ready"]
+        var done = false
+
+        var k = 0
+        while (k < length(ready)) {
+            var src = ready[k]
+            var dst = upstream
+            var dir = "c->u"
+            if (src == upstream) {
+                dst = client
+                dir = "u->c"
+            }
+
+            var data = src.readSome(buf16)
+            if (data == null) {
+                // readSome returns null when the source has closed or
+                // errored. Tear down the whole pair.
+                print("[%s] peer closed\n", dir)
+                done = true
+                k = length(ready)
+            } else {
+                var n = data.size()
+                if (n > 0) {
+                    if (dir == "c->u") { bytesC2U = bytesC2U + n }
+                    else               { bytesU2C = bytesU2C + n }
+                    var ws = dst.write(data, 5000)
+                    if (ws != "ok") {
+                        print("[%s] write to other side failed (%s)\n", dir, ws)
+                        done = true
+                        k = length(ready)
+                    }
+                }
+                // n == 0 is normal: waitAny says "ready" sometimes when
+                // a peer half-closes; we'll catch the actual close on
+                // the next iteration via status().
+                k = k + 1
+            }
+        }
+
+        if (done) {
+            break
+        }
+    }
+
+    print("connection closed (c->u %n bytes, u->c %n bytes)\n", bytesC2U, bytesU2C)
+}
+
+func main(argv) {
+    var listenPort = 9300
+    if (length(argv) > 1) { listenPort = num(argv[1]) }
+    var upHost = "127.0.0.1"
+    if (length(argv) > 2) { upHost = argv[2] }
+    var upPort = 9000
+    if (length(argv) > 3) { upPort = num(argv[3]) }
+
+    var srv = TCP.listen("0.0.0.0", listenPort)
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", listenPort)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n, forwarding to %s:%n\n",
+          srv.localPort(), upHost, upPort)
+
+    while (true) {
+        var client = srv.accept(500)
+        if (client == null) {
+            continue
+        }
+        var pa = client.peerAddress()
+        print("+ client %s:%n -> dialing upstream %s:%n\n",
+              pa["host"], pa["port"], upHost, upPort)
+
+        var upstream = TCP.connect(upHost, upPort, 5000)
+        if (upstream == null) {
+            print("- upstream connect failed; dropping client\n")
+            client.close()
+            continue
+        }
+
+        forward(client, upstream)
+
+        client.close()
+        upstream.close()
+    }
+
+    srv.close()
+    return 0
+}

@@ -1,0 +1,124 @@
+// multi_client_server.zym
+//
+// What this does:    A UDP server that keeps PER-CLIENT state across
+//                    datagrams. Each unique sender (host:port) gets a
+//                    fresh peer handle the first time it shows up; from
+//                    there, every datagram from that source flows into
+//                    that one handle's queue. The handler tracks how
+//                    many messages it has seen from each client and
+//                    replies with a numbered ACK like "ack #3: <msg>".
+// How to run it:     zym examples/networking/udp/multi_client_server.zym -- 9200
+//                      port is optional; default 9200.
+//                    In another terminal (or several):
+//                      zym examples/networking/udp/multi_client_client.zym -- 127.0.0.1 9200 hi there
+//                    Stop with Ctrl-C.
+// What you'll see:   "listening on 0.0.0.0:9200"
+//                    "+ new client 127.0.0.1:54321"
+//                    "[127.0.0.1:54321 #1] hi"
+//                    Each client gets its own counter that increments
+//                    independently of the others.
+//
+// Concepts introduced:
+//   * UDP.listen(host, port) returns a "udp server" that demultiplexes
+//     datagrams BY SOURCE address. Each new (host:port) becomes its own
+//     accepted peer with its own recv queue.
+//   * Sockets.waitAny(...) is used to wait on the server AND every
+//     accepted peer at once with a single timeout - the closest thing
+//     to select(2) in zym.
+//   * Per-client state lives in a map keyed by "host:port". This is
+//     where you'd put session info, sequence numbers, auth tokens,
+//     game-state cursors, etc.
+//
+// Compare against echo_server.zym, which uses one UDP.bind socket and
+// reads from all senders into one queue. That works fine for
+// stateless echo; UDP.listen + waitAny is what you reach for once you
+// need to remember anything about each sender.
+
+func main(argv) {
+    var port = 9200
+    if (length(argv) > 1) {
+        port = num(argv[1])
+    }
+
+    var srv = UDP.listen("0.0.0.0", port)
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n\n", srv.localPort())
+
+    // peers maps "host:port" -> { peer: udp, count: number }.
+    // We keep a parallel `peerList` because waitAny wants a list of handles.
+    var peers    = {}
+    var peerList = []
+
+    while (true) {
+        // Watch the server (for new clients) AND every existing peer
+        // (for new datagrams from already-known clients) in one call.
+        var watch = [srv]
+        var i = 0
+        while (i < length(peerList)) {
+            push(watch, peerList[i])
+            i = i + 1
+        }
+
+        var w = Sockets.waitAny(watch, "read", 500)
+        if (w["timedOut"]) {
+            // Nothing happened in 500ms; loop back to allow Ctrl-C.
+            continue
+        }
+
+        var ready = w["ready"]
+        var k = 0
+        while (k < length(ready)) {
+            var h = ready[k]
+
+            if (h == srv) {
+                // A new source has shown up. Take it as a fresh peer.
+                var newPeer = srv.accept(0)
+                if (newPeer != null) {
+                    push(peerList, newPeer)
+                    // We don't yet know the source - it gets revealed
+                    // when we recv() from this peer. Just register
+                    // the handle for now.
+                }
+            } else {
+                var r = h.recv(0)
+                if (r == "timeout" || r == "error") {
+                    // Spurious wake-up or transient; ignore.
+                    k = k + 1
+                    continue
+                }
+
+                var key = r["host"] + ":" + str(r["port"])
+                // Map lookup of an absent key returns null in zym, so a
+                // simple null-check is the idiomatic "is this key here?"
+                if (peers[key] == null) {
+                    print("+ new client %s\n", key)
+                    peers[key] = { count: 0 }
+                }
+                peers[key]["count"] = peers[key]["count"] + 1
+                var n = peers[key]["count"]
+
+                var msg = r["data"].toUtf8()
+                print("[%s #%n] %s\n", key, n, msg)
+
+                // Reply with a numbered ACK back to the same source.
+                var ack = "ack #" + str(n) + ": " + msg
+                h.send(Buffer.fromString(ack), r["host"], r["port"])
+            }
+
+            k = k + 1
+        }
+    }
+
+    // Unreachable in this example; here for symmetry with a graceful
+    // shutdown variant.
+    var j = 0
+    while (j < length(peerList)) {
+        peerList[j].close()
+        j = j + 1
+    }
+    srv.close()
+    return 0
+}

@@ -1,0 +1,74 @@
+// echo_client.zym
+//
+// What this does:    Connects to a TCP echo server, sends each remaining
+//                    argv[3..] argument as one line, and prints whatever
+//                    the server echoes back.
+// How to run it:     Start examples/networking/tcp/echo_server.zym first.
+//                    Then in another terminal:
+//                      zym examples/networking/tcp/echo_client.zym -- 127.0.0.1 9000 "hello"
+//                      zym examples/networking/tcp/echo_client.zym -- 127.0.0.1 9000 "one" "two" "three"
+//                    Default host = 127.0.0.1, default port = 9000, default
+//                    payload = "ping".
+// What you'll see:   "connected to 127.0.0.1:9000 from ...:54321"
+//                    Per-line "<- <reply>" for each message you sent.
+//
+// Concepts introduced:
+//   * non-zero connect timeout - returns null instead of hanging if the
+//     server isn't there
+//   * pairing each write() with a readLine() (lockstep request/reply)
+//   * how to send N messages from N argv entries
+
+func main(argv) {
+    var host    = "127.0.0.1"
+    var port    = 9000
+    var payload = ["ping"]
+
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    if (length(argv) > 3) {
+        payload = []
+        var i = 3
+        while (i < length(argv)) {
+            push(payload, argv[i])
+            i = i + 1
+        }
+    }
+
+    // 5s connect ceiling. On a host that isn't listening this returns
+    // null immediately (TCP RST); on an unreachable host it gives the
+    // OS up to 5s to give up.
+    var sock = TCP.connect(host, port, 5000)
+    if (sock == null) {
+        print("could not connect to %s:%n (server not running?)\n", host, port)
+        return 1
+    }
+
+    var pa = sock.peerAddress()
+    var la = sock.localAddress()
+    print("connected to %s:%n from %s:%n\n", pa["host"], pa["port"], la["host"], la["port"])
+
+    // Send each message in turn, then wait for its echo.
+    var i = 0
+    while (i < length(payload)) {
+        var msg = payload[i]
+        print("-> %s\n", msg)
+
+        var w = sock.write(Buffer.fromString(msg + "\n"), 2000)
+        if (w != "ok") {
+            print("write failed: %s\n", w)
+            break
+        }
+
+        var reply = sock.readLine(2000)
+        if (reply == "timeout" || reply == "eof" || reply == "closed" || reply == "error") {
+            print("read failed: %s\n", reply)
+            break
+        }
+        print("<- %s\n", reply)
+
+        i = i + 1
+    }
+
+    sock.close()
+    return 0
+}

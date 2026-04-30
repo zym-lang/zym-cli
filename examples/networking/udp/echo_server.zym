@@ -1,0 +1,67 @@
+// echo_server.zym
+//
+// What this does:    Listens for UDP datagrams and bounces each one
+//                    straight back to the sender. Stateless - one recv
+//                    per datagram, one send back. Serves any number of
+//                    senders interleaved (UDP has no "connection").
+// How to run it:     zym examples/networking/udp/echo_server.zym -- 9100
+//                      port is optional; default 9100; pass 0 for an
+//                      OS-assigned port.
+//                    In another terminal:
+//                      zym examples/networking/udp/echo_client.zym -- 127.0.0.1 9100 hello world
+//                    Stop with Ctrl-C.
+// What you'll see:   "listening on 0.0.0.0:9100"
+//                    Per-datagram lines like "[127.0.0.1:54321] (5 bytes) hello"
+//
+// Concepts introduced:
+//   * UDP server-side: a single bound socket handles ALL senders
+//   * recv() returns the source address - that's what you reply to
+//   * recv(timeoutMs) lets the loop wake up periodically so Ctrl-C feels
+//     responsive
+//   * unlike TCP, there's no accept loop - one bind, then loop on recv
+//
+// UDP servers are usually NOT a good fit for stateful per-client logic.
+// If you need that, see multi_client_server.zym which uses UDP.listen
+// to demultiplex datagrams per source.
+
+func main(argv) {
+    var port = 9100
+    if (length(argv) > 1) {
+        port = num(argv[1])
+    }
+
+    var sock = UDP.bind("0.0.0.0", port)
+    if (sock == null) {
+        print("could not bind 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n\n", sock.localPort())
+
+    while (true) {
+        // Wake every 500ms so the script feels responsive to Ctrl-C
+        // and so any future "should I shut down" flag could be checked.
+        var r = sock.recv(500)
+        if (r == "timeout") { continue }
+        if (r == "error") {
+            print("recv failed; bailing out\n")
+            break
+        }
+
+        var data = r["data"]
+        var host = r["host"]
+        var src  = r["port"]
+
+        print("[%s:%n] (%n bytes) %s\n", host, src, data.size(), data.toUtf8())
+
+        // Echo straight back to the source. send() returns "ok"/"busy"/"error".
+        var w = sock.send(data, host, src)
+        if (w != "ok") {
+            print("echo back to %s:%n failed: %s\n", host, src, w)
+            // Don't break - the next datagram is from a different source.
+            continue
+        }
+    }
+
+    sock.close()
+    return 0
+}

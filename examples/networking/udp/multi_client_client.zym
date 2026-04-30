@@ -1,0 +1,77 @@
+// multi_client_client.zym
+//
+// What this does:    A small UDP client meant to be run alongside
+//                    multi_client_server.zym. Sends each post-`--`
+//                    argument as one datagram, with a small delay
+//                    between sends, and prints the numbered ACK the
+//                    server returns. Run it twice (in two terminals)
+//                    against one server and you'll see each client
+//                    gets its own independently-incrementing counter.
+// How to run it:     Start examples/networking/udp/multi_client_server.zym first.
+//                    Then in another terminal:
+//                      zym examples/networking/udp/multi_client_client.zym -- 127.0.0.1 9200 hi there hello
+//                    Defaults: host=127.0.0.1, port=9200, payload=["hi","there"].
+// What you'll see:   "client running on 0.0.0.0:<localport>"
+//                    Per-line "-> <msg>" then "<- ack #N: <msg>".
+//
+// Concepts introduced:
+//   * Same UDP client shape as udp/echo_client.zym, but pointed at the
+//     UDP.listen-based server. Notice that the API is identical from
+//     the client's point of view - the demultiplexing is purely a
+//     server-side concern.
+//   * System.sleep(ms) between sends, so when you run two clients in
+//     parallel against the same server, the server's log interleaves
+//     them in a visible way.
+
+func main(argv) {
+    var host    = "127.0.0.1"
+    var port    = 9200
+    var payload = ["hi", "there"]
+
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    if (length(argv) > 3) {
+        payload = []
+        var i = 3
+        while (i < length(argv)) {
+            push(payload, argv[i])
+            i = i + 1
+        }
+    }
+
+    var sock = UDP.bind("0.0.0.0", 0)
+    if (sock == null) {
+        print("could not bind UDP socket\n")
+        return 1
+    }
+    print("client running on 0.0.0.0:%n -> %s:%n\n", sock.localPort(), host, port)
+
+    var i = 0
+    while (i < length(payload)) {
+        var msg = payload[i]
+        print("-> %s\n", msg)
+
+        var w = sock.send(Buffer.fromString(msg), host, port)
+        if (w != "ok") {
+            print("send failed: %s\n", w)
+            break
+        }
+
+        var r = sock.recv(2000)
+        if (r == "timeout") {
+            print("<- (no reply within 2s)\n")
+        } else if (r == "error") {
+            print("recv failed: error\n")
+            break
+        } else {
+            print("<- %s\n", r["data"].toUtf8())
+        }
+
+        // Small gap so two parallel clients interleave in the server log.
+        System.sleep(150)
+        i = i + 1
+    }
+
+    sock.close()
+    return 0
+}

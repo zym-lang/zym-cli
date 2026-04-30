@@ -1,0 +1,111 @@
+// http_get.zym
+//
+// What this does:    Fetches a URL over plain HTTP/1.0 using only the
+//                    TCP native - no TLS, no helper. The point is to
+//                    demystify "what does the wire look like" by writing
+//                    out the request manually and showing the raw
+//                    response split into status line + headers + body.
+// How to run it:     zym examples/networking/tcp/http_get.zym -- example.com
+//                    zym examples/networking/tcp/http_get.zym -- example.com 80 /
+//                    zym examples/networking/tcp/http_get.zym -- neverssl.com 80 /
+//                      argv[1] = host (default example.com)
+//                      argv[2] = port (default 80)
+//                      argv[3] = path (default /)
+// What you'll see:   The request that was sent, then the status line +
+//                    response headers as the server returned them, then
+//                    the response body in full.
+//
+// Concepts introduced:
+//   * Composing a Buffer payload with explicit "\r\n" framing
+//   * readAll(timeoutMs) accumulates everything until the peer closes
+//     - this is the HTTP/1.0 way; HTTP/1.1 would need Content-Length
+//   * Splitting a buffer's text on "\r\n\r\n" to separate headers from body
+//   * split(str, delimiter) for parsing line-oriented text
+//
+// Note: this connects in cleartext on TCP/80. For HTTPS see https_get.zym
+//       (a session-C example using the TLS native).
+
+func main(argv) {
+    var host = "example.com"
+    var port = 80
+    var path = "/"
+
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    if (length(argv) > 3) { path = argv[3] }
+
+    print("connecting to %s:%n ...\n", host, port)
+    var sock = TCP.connect(host, port, 5000)
+    if (sock == null) {
+        print("connect failed\n")
+        return 1
+    }
+
+    // Build the HTTP/1.0 request. Crucially:
+    //   * lines end with CRLF, not just LF
+    //   * an empty line ("\r\n" right after the last header) terminates the headers
+    //   * Connection: close lets the server signal end-of-body via FIN
+    var req = "GET " + path + " HTTP/1.0\r\n" +
+              "Host: " + host + "\r\n" +
+              "User-Agent: zym-http-get/1.0\r\n" +
+              "Accept: */*\r\n" +
+              "Connection: close\r\n" +
+              "\r\n"
+
+    print("---- request ----\n%s", req)
+    var w = sock.write(Buffer.fromString(req), 5000)
+    if (w != "ok") {
+        print("write failed: %s\n", w)
+        sock.close()
+        return 1
+    }
+
+    // Read the entire response in one go. readAll waits until the peer
+    // closes (FIN) or the timeout elapses. For HTTP/1.0 with
+    // "Connection: close" the server sends its full body then closes,
+    // which is exactly what readAll consumes.
+    var bodyBuf = sock.readAll(15000)
+    sock.close()
+
+    // readAll returns a Buffer on success, or one of the status strings
+    // if the deadline was hit before the peer closed.
+    if (bodyBuf == "timeout" || bodyBuf == "error" || bodyBuf == "closed") {
+        print("read failed: %s\n", bodyBuf)
+        return 1
+    }
+    var raw = bodyBuf.toUtf8()
+
+    // HTTP separates headers from body with a blank line: "\r\n\r\n".
+    // Find that boundary and slice the response in two.
+    var sep = "\r\n\r\n"
+    var parts = split(raw, sep)
+    if (length(parts) < 2) {
+        print("malformed response: no header/body separator found\n")
+        print("%s\n", raw)
+        return 1
+    }
+
+    var headerBlock = parts[0]
+    // Re-glue everything after the first separator in case the body
+    // itself contained "\r\n\r\n" (rare on /).
+    var body = parts[1]
+    var i = 2
+    while (i < length(parts)) {
+        body = body + sep + parts[i]
+        i = i + 1
+    }
+
+    // Print headers line by line.
+    print("---- response headers ----\n")
+    var lines = split(headerBlock, "\r\n")
+    var j = 0
+    while (j < length(lines)) {
+        print("%s\n", lines[j])
+        j = j + 1
+    }
+
+    print("---- response body ----\n")
+    print("%s\n", body)
+    print("---- end (%n bytes total) ----\n", bodyBuf.size())
+    return 0
+}

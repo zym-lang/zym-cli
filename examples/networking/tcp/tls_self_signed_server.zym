@@ -1,0 +1,104 @@
+// tls_self_signed_server.zym
+//
+// What this does:    Stands up a TLS server with a freshly-minted RSA
+//                    keypair + self-signed certificate, accepts TLS
+//                    clients forever, and echoes every line back to its
+//                    sender (TLS-flavored echo_server). Demonstrates the
+//                    server-side handshake path: TCP.listen + TCP.accept
+//                    to get the raw transport, then TLS.accept(tcp,
+//                    { key, cert }) to upgrade it to a TLS sock.
+// How to run it:     zym examples/networking/tcp/tls_self_signed_server.zym -- 9443
+//                      argv[1] = port (default 9443; pass 0 for OS-assigned)
+//                    Then in another terminal:
+//                    zym examples/networking/tcp/tls_client.zym -- 127.0.0.1 9443 hello world
+// What you'll see:   Each connection logs the TLS handshake driving to
+//                    completion and every line received before EOF.
+//
+// Concepts introduced:
+//   * Crypto.create() + generateRsa(2048) + generateSelfSignedCertificate
+//     to mint key+cert in-process. Handy for tests, demos, internal
+//     mTLS, and anything where you don't have a real CA-issued cert.
+//   * TCP.listen + TCP.accept first, then TLS.accept(tcp, {key, cert})
+//     - the server-side TLS handshake is layered on top of TCP, not
+//     baked into the listener. That keeps the API symmetric with how
+//     TLS.connect layers on top of TCP for clients.
+//   * timeoutMs=0 + a poll loop on TLS.accept's returned sock = the
+//     pattern for "drive a non-blocking handshake to completion".
+//
+// Note: a self-signed cert means the matching client must use
+//       { verify: false } (or pass this cert in trustedRoots). Real
+//       deployments use a CA-issued cert and the default verify=true.
+func main(argv) {
+    var port = 9443
+    if (length(argv) > 1) { port = num(argv[1]) }
+    print("minting self-signed RSA-2048 key + cert (CN=localhost)...\n")
+    var crypto = Crypto.create()
+    var key = crypto.generateRsa(2048)
+    var cert = crypto.generateSelfSignedCertificate(key, "CN=localhost",
+                                                    "20240101000000",
+                                                    "20440101000000")
+    if (key == null || cert == null) {
+        print("failed to mint key+cert\n")
+        return 1
+    }
+    var srv = TCP.listen("0.0.0.0", port)
+    if (srv == null) {
+        print("could not listen on port %n (port already in use?)\n", port)
+        return 1
+    }
+    var bound = srv.localPort()
+    print("TLS server listening on 0.0.0.0:%n (Ctrl-C to stop)\n", bound)
+    while (true) {
+        // Wait briefly for an inbound TCP. timeoutMs=500 keeps the loop
+        // responsive to Ctrl-C.
+        var tcp = srv.accept(500)
+        if (tcp == null) {
+            // No client this tick - just spin again.
+            continue
+        }
+        var pa = tcp.peerAddress()
+        print("[server] TCP accepted from %s:%n, upgrading to TLS...\n",
+              pa["host"], pa["port"])
+        // Kick off the server-side handshake non-blocking.
+        var tls = TLS.accept(tcp, { key: key, cert: cert }, 0)
+        if (tls == null) {
+            print("[server]   TLS.accept failed\n")
+            tcp.close()
+            continue
+        }
+        // Drive handshake up to ~5s.
+        var h = 0
+        while (h < 200 && tls.status() != "connected") {
+            tls.poll()
+            if (tls.status() == "error" || tls.status() == "closed") {
+                h = 9999
+            }
+            h = h + 1
+            System.sleep(25)
+        }
+        if (tls.status() != "connected") {
+            print("[server]   handshake failed (status=%s)\n", tls.status())
+            tls.close()
+            continue
+        }
+        print("[server]   TLS handshake complete\n")
+        // Echo loop. Same shape as plain echo_server.zym, just on a TLS
+        // sock - byte-stream API is identical post-handshake.
+        while (true) {
+            var line = tls.readLine(500)
+            if (line == "timeout") { continue }
+            if (line == "eof" || line == "closed" || line == "error") {
+                print("[server]   client done (%s)\n", line)
+                break
+            }
+            print("[server]   <- %s\n", line)
+            var w = tls.write(Buffer.fromString(line + "\n"), 1000)
+            if (w != "ok") {
+                print("[server]   write failed (%s), dropping\n", w)
+                break
+            }
+        }
+        tls.close()
+    }
+    return 0
+}

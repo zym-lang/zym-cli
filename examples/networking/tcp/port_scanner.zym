@@ -1,0 +1,54 @@
+// port_scanner.zym
+//
+// What this does:    Walks a port range on a host and prints which ports
+//                    accept a TCP connection. The point isn't security
+//                    research - it's to show how the timeoutMs argument
+//                    on TCP.connect makes a real difference.
+// How to run it:     zym examples/networking/tcp/port_scanner.zym -- 127.0.0.1 1 1024
+//                    zym examples/networking/tcp/port_scanner.zym -- example.com 80 90 200
+//                      argv[1] = host       (default 127.0.0.1)
+//                      argv[2] = first port (default 1)
+//                      argv[3] = last port  (default 1024, inclusive)
+//                      argv[4] = per-port timeout in ms (default 200)
+// What you'll see:   "scanning 127.0.0.1:1..1024 (200ms each)"
+//                    A line per OPEN port: "    22  open"
+//                    Final summary: "scanned 1024 ports in N ms; 1 open"
+//
+// Concepts introduced:
+//   * TCP.connect's third arg (timeoutMs) - smaller -> faster scan, but
+//     misses slow-to-respond firewalled ports
+//   * null return = refused / unreachable / timed out (we don't try to
+//     distinguish; that's what raw IP probes are for)
+//   * Time.ticksMsec for measuring elapsed wall-clock
+
+func main(argv) {
+    var host    = "127.0.0.1"
+    var first   = 1
+    var last    = 1024
+    var timeout = 200
+
+    if (length(argv) > 1) { host    = argv[1] }
+    if (length(argv) > 2) { first   = num(argv[2]) }
+    if (length(argv) > 3) { last    = num(argv[3]) }
+    if (length(argv) > 4) { timeout = num(argv[4]) }
+
+    print("scanning %s:%n..%n (%nms each)\n", host, first, last, timeout)
+    var started = Time.ticksMsec()
+
+    var openCount = 0
+    var p = first
+    while (p <= last) {
+        var sock = TCP.connect(host, p, timeout)
+        if (sock != null) {
+            print("  %n  open\n", p)
+            openCount = openCount + 1
+            sock.close()
+        }
+        p = p + 1
+    }
+
+    var elapsed = Time.ticksMsec() - started
+    var total = (last - first) + 1
+    print("scanned %n ports in %nms; %n open\n", total, elapsed, openCount)
+    return 0
+}

@@ -1,0 +1,98 @@
+// chat_client.zym
+//
+// What this does:    Connects to chat_server.zym, sends a nickname and
+//                    one or more chat lines, then "lingers" for a few
+//                    seconds reading any broadcast traffic from other
+//                    connected users before disconnecting.
+// How to run it:     zym examples/networking/tcp/chat_client.zym -- 127.0.0.1 9100 alice hello world
+//                      argv[1] = host (default 127.0.0.1)
+//                      argv[2] = port (default 9100)
+//                      argv[3] = nickname (default "anon")
+//                      argv[4+]= one chat line per arg
+//                    Run several at once (one per terminal) against a
+//                    single chat_server.zym to see the broadcast.
+// What you'll see:   "connected to 127.0.0.1:9100 as alice"
+//                    "<- welcome, alice"          (server's hello)
+//                    "<- bob: hi-alice"           (someone else's line)
+//                    "lingering 3s for late traffic..."
+//                    "done."
+//
+// Concepts introduced:
+//   * The chat protocol is implicit and line-framed: every line is one
+//     message; the first line is the nickname.
+//   * "lingering" after sending: many real protocols want to keep
+//     reading after they've stopped sending, until either a deadline
+//     or "eof"/"closed". This is the basic shape.
+//   * readLine(timeoutMs) returns either the line, or one of the
+//     status strings "timeout" / "eof" / "closed" / "error". Branch on
+//     it; never assume a string is data.
+
+func main(argv) {
+    var host = "127.0.0.1"
+    if (length(argv) > 1) { host = argv[1] }
+    var port = 9100
+    if (length(argv) > 2) { port = num(argv[2]) }
+    var nick = "anon"
+    if (length(argv) > 3) { nick = argv[3] }
+
+    var sock = TCP.connect(host, port, 5000)
+    if (sock == null) {
+        print("connect failed (%s:%n)\n", host, port)
+        return 1
+    }
+    print("connected to %s:%n as %s\n", host, port, nick)
+
+    // Send the nickname as the first line.
+    var w = sock.write(Buffer.fromString(nick + "\n"), 1000)
+    if (w != "ok") {
+        print("could not send nick (%s)\n", w)
+        sock.close()
+        return 1
+    }
+
+    // Send each remaining argv as one chat line, with a small pause
+    // between each so the server can broadcast in order.
+    var i = 4
+    while (i < length(argv)) {
+        var msg = argv[i]
+        var w2 = sock.write(Buffer.fromString(msg + "\n"), 1000)
+        if (w2 != "ok") {
+            print("write failed (%s); aborting\n", w2)
+            sock.close()
+            return 1
+        }
+        // Drain any pending broadcasts between sends so the print
+        // order is interleaved with what other clients are saying.
+        var line = sock.readLine(50)
+        while (line != "timeout" && line != "eof" && line != "closed" && line != "error") {
+            print("<- %s\n", line)
+            line = sock.readLine(0)
+        }
+        i = i + 1
+    }
+
+    // Linger for a few seconds to pick up broadcast traffic from any
+    // other connected clients.
+    print("lingering 3s for late traffic...\n")
+    var deadline = Time.ticksMsec() + 3000
+    while (Time.ticksMsec() < deadline) {
+        var rem = deadline - Time.ticksMsec()
+        if (rem <= 0) { rem = 1 }
+        var line = sock.readLine(rem)
+        if (line == "timeout") {
+            // Loop back; the deadline check will exit on its own.
+            continue
+        }
+        if (line == "eof" || line == "closed" || line == "error") {
+            print("server hung up (%s)\n", line)
+            sock.close()
+            print("done.\n")
+            return 0
+        }
+        print("<- %s\n", line)
+    }
+
+    sock.close()
+    print("done.\n")
+    return 0
+}

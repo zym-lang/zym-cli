@@ -1,0 +1,174 @@
+// chat_server.zym
+//
+// What this does:    A multi-client TCP chat hub. Every line a client
+//                    sends is broadcast back out to every OTHER
+//                    connected client. The first line a client sends
+//                    is treated as that client's nickname; subsequent
+//                    lines are messages.
+// How to run it:     zym examples/networking/tcp/chat_server.zym -- 9100
+//                      port is optional; default 9100; pass 0 for an
+//                      OS-assigned port.
+//                    In two more terminals:
+//                      zym examples/networking/tcp/chat_client.zym -- 127.0.0.1 9100 alice hello
+//                      zym examples/networking/tcp/chat_client.zym -- 127.0.0.1 9100 bob   hi-alice
+//                    Stop with Ctrl-C.
+// What you'll see:   "listening on 0.0.0.0:9100"
+//                    "+ alice joined (127.0.0.1:54321)"
+//                    "alice: hello"
+//                    Each connected client also sees every OTHER
+//                    client's lines in the same "<nick>: <msg>" format.
+//
+// Concepts introduced:
+//   * Sockets.waitAny([srv, c1, c2, ...], "read", timeoutMs) is the only
+//     practical way to multiplex many clients in a single-threaded
+//     script. This is the example that motivates why waitAny exists.
+//   * Per-client state (nickname, pending output buffer) lives in a
+//     parallel map keyed by an integer client id; the id is what we
+//     parallel-array-style join up with the handle list.
+//   * The first readLine from a fresh client is the nickname; the
+//     readLines after that are chat messages. State machines on
+//     accepted sockets are extremely common - this is the pattern.
+//
+// Compare against echo_server.zym, which serves one client at a time
+// and has no notion of "the other clients".
+
+func main(argv) {
+    var port = 9100
+    if (length(argv) > 1) {
+        port = num(argv[1])
+    }
+
+    var srv = TCP.listen("0.0.0.0", port)
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n\n", srv.localPort())
+
+    // Parallel structures so waitAny can hand us back a handle and we
+    // can find the matching client id. clients[id] is a map with:
+    //   { sock, nick, peer }
+    var clients   = {}
+    var clientIds = []      // ordered list of integer ids
+    var sockList  = []      // ordered list of sock handles (same order)
+    var nextId    = 1
+
+    while (true) {
+        // Build the watch list: server + every client socket.
+        var watch = [srv]
+        var i = 0
+        while (i < length(sockList)) {
+            push(watch, sockList[i])
+            i = i + 1
+        }
+
+        var w = Sockets.waitAny(watch, "read", 500)
+        if (w["timedOut"]) {
+            continue
+        }
+
+        var ready = w["ready"]
+        var k = 0
+        while (k < length(ready)) {
+            var h = ready[k]
+
+            if (h == srv) {
+                // New connection.
+                var sock = srv.accept(0)
+                if (sock != null) {
+                    var pa = sock.peerAddress()
+                    var id = nextId
+                    nextId = nextId + 1
+                    clients[str(id)] = { sock: sock, nick: null, peer: pa }
+                    push(clientIds, id)
+                    push(sockList,  sock)
+                    print("? unnamed client connected from %s:%n (id=%n)\n",
+                          pa["host"], pa["port"], id)
+                }
+            } else {
+                // Find which client id matches this handle.
+                var idx = 0
+                var found = -1
+                while (idx < length(sockList)) {
+                    if (sockList[idx] == h) {
+                        found = idx
+                        idx = length(sockList)
+                    } else {
+                        idx = idx + 1
+                    }
+                }
+                if (found < 0) {
+                    k = k + 1
+                    continue
+                }
+                var cid = clientIds[found]
+                var rec = clients[str(cid)]
+
+                // readLine(0) drains whatever full lines arrived. If
+                // only partial bytes are present, the native saves
+                // them in its own pushback so the next iteration sees
+                // them again.
+                var line = rec["sock"].readLine(0)
+
+                if (line == "eof" || line == "closed" || line == "error") {
+                    var who = rec["nick"]
+                    if (who == null) { who = "(unnamed)" }
+                    print("- %s left (%s:%n)\n", who, rec["peer"]["host"], rec["peer"]["port"])
+                    rec["sock"].close()
+                    // Drop this client out of the parallel arrays.
+                    clients[str(cid)] = null
+                    var newIds = []
+                    var newSocks = []
+                    var j = 0
+                    while (j < length(clientIds)) {
+                        if (j != found) {
+                            push(newIds, clientIds[j])
+                            push(newSocks, sockList[j])
+                        }
+                        j = j + 1
+                    }
+                    clientIds = newIds
+                    sockList  = newSocks
+                    k = k + 1
+                    continue
+                }
+                if (line == "timeout" || line == "busy") {
+                    // Spurious or partial; nothing to do this tick.
+                    k = k + 1
+                    continue
+                }
+
+                // Real line.
+                if (rec["nick"] == null) {
+                    rec["nick"] = line
+                    print("+ %s joined (%s:%n)\n",
+                          line, rec["peer"]["host"], rec["peer"]["port"])
+                    var w0 = "welcome, " + line + "\n"
+                    rec["sock"].write(Buffer.fromString(w0), 1000)
+                } else {
+                    var nick = rec["nick"]
+                    print("%s: %s\n", nick, line)
+
+                    // Broadcast to every OTHER connected client.
+                    var broadcast = nick + ": " + line + "\n"
+                    var bbuf = Buffer.fromString(broadcast)
+                    var t = 0
+                    while (t < length(clientIds)) {
+                        if (clientIds[t] != cid) {
+                            var other = clients[str(clientIds[t])]
+                            if (other != null) {
+                                other["sock"].write(bbuf, 1000)
+                            }
+                        }
+                        t = t + 1
+                    }
+                }
+            }
+
+            k = k + 1
+        }
+    }
+
+    srv.close()
+    return 0
+}

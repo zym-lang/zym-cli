@@ -98,6 +98,215 @@ assert_wrap(typeof(IP.resolve) != "null",                "5.2: IP.resolve expose
 assert_wrap(typeof(IP.resolveAll) != "null",             "5.3: IP.resolveAll exposed")
 assert_wrap(typeof(IP.localAddresses) != "null",         "5.4: IP.localAddresses exposed")
 
+// ----------------------------------------------------------------------------
+// SECTION 6: TCP listen + connect + accept (loopback)
+// ----------------------------------------------------------------------------
+var srv = TCP.listen("127.0.0.1", 0)
+assert_wrap(typeof(srv) == "map",                        "6.1: TCP.listen returns a server handle")
+var port = srv.localPort()
+assert_wrap(typeof(port) == "number" && port > 0,        "6.2: server has an OS-assigned port")
+
+var client = TCP.connect("127.0.0.1", port, 2000)
+assert_wrap(typeof(client) == "map",                     "6.3: TCP.connect returns a sock handle")
+assert_wrap(client.status() == "connected",              "6.4: client is connected")
+
+var server_sock = srv.accept(2000)
+assert_wrap(typeof(server_sock) == "map",                "6.5: srv.accept returns a sock handle")
+assert_wrap(server_sock.status() == "connected",         "6.6: accepted sock is connected")
+
+// ----------------------------------------------------------------------------
+// SECTION 7: TCP write + readLine round-trip
+// ----------------------------------------------------------------------------
+var w = client.write(Buffer.fromString("hello tcp\n"), 1000)
+assert_wrap(w == "ok",                                   "7.1: write returns ok")
+
+var line = server_sock.readLine(1000)
+assert_wrap(line == "hello tcp",                         "7.2: server readLine returns payload without terminator")
+
+// Bidirectional
+var w2 = server_sock.write(Buffer.fromString("hi back\n"), 1000)
+assert_wrap(w2 == "ok",                                  "7.3: server write returns ok")
+var line2 = client.readLine(1000)
+assert_wrap(line2 == "hi back",                          "7.4: client readLine receives reply")
+
+// ----------------------------------------------------------------------------
+// SECTION 8: TCP exact-bytes read + readSome + addresses
+// ----------------------------------------------------------------------------
+client.write(Buffer.fromString("abcdef"), 1000)
+var bytes = server_sock.read(6, 1000)
+assert_wrap(typeof(bytes) == "map",                      "8.1: read(n, ms) returns a Buffer on success")
+assert_wrap(bytes.size() == 6,                           "8.2: read(6, ms) returns exactly 6 bytes")
+assert_wrap(bytes.get(0) == 97,                          "8.3: first byte is 'a'")
+
+// readSome on a quiet socket returns an empty buffer (not null).
+var quick = client.readSome(64)
+assert_wrap(typeof(quick) == "map",                      "8.4: readSome on quiet socket returns Buffer")
+assert_wrap(quick.size() == 0,                           "8.5: readSome returned 0 bytes")
+
+// peerAddress / localAddress
+var pa = client.peerAddress()
+assert_wrap(typeof(pa) == "map" && pa["port"] == port,    "8.6: peerAddress reports server port")
+var la = client.localAddress()
+assert_wrap(typeof(la) == "map" && typeof(la["port"]) == "number", "8.7: localAddress shape")
+
+// ----------------------------------------------------------------------------
+// SECTION 9: TCP close behavior
+// ----------------------------------------------------------------------------
+client.close()
+// After client closes, server eventually sees EOF on next read attempt.
+var eofProbe = server_sock.read(1, 500)
+assert_wrap(eofProbe == "eof" || eofProbe == "closed",   "9.1: server read after peer close yields eof/closed")
+server_sock.close()
+srv.close()
+
+// double-close is a no-op
+client.close()
+srv.close()
+assert_wrap(true,                                        "9.2: double close is silent")
+
+// connect to a closed port returns null within the timeout.
+var fail = TCP.connect("127.0.0.1", 1, 200)
+assert_wrap(fail == null,                                "9.3: connect to refused/closed port returns null")
+
+// ----------------------------------------------------------------------------
+// SECTION 10: UDP bind + send + recv (loopback)
+// ----------------------------------------------------------------------------
+var u1 = UDP.bind("127.0.0.1", 0)
+var u2 = UDP.bind("127.0.0.1", 0)
+assert_wrap(typeof(u1) == "map",                         "10.1: UDP.bind returns a handle")
+assert_wrap(u1.localPort() > 0,                          "10.2: u1 got an OS port")
+assert_wrap(u2.localPort() > 0,                          "10.3: u2 got an OS port")
+
+var s = u1.send(Buffer.fromString("hello udp"), "127.0.0.1", u2.localPort())
+assert_wrap(s == "ok",                                   "10.4: UDP.send returns ok")
+
+var r = u2.recv(2000)
+assert_wrap(typeof(r) == "map",                          "10.5: UDP.recv returns a result map")
+assert_wrap(r["host"] == "127.0.0.1",                    "10.6: recv reports source host")
+assert_wrap(r["port"] == u1.localPort(),                 "10.7: recv reports source port")
+assert_wrap(r["data"].size() == 9,                       "10.8: payload size matches sent")
+
+// recv timeout
+var u3 = UDP.bind("127.0.0.1", 0)
+var rt = u3.recv(50)
+assert_wrap(rt == "timeout",                             "10.9: recv on idle socket returns timeout")
+u3.close()
+u1.close()
+u2.close()
+
+// ----------------------------------------------------------------------------
+// SECTION 11: Sockets.waitAny
+// ----------------------------------------------------------------------------
+var srv2 = TCP.listen("127.0.0.1", 0)
+var c2 = TCP.connect("127.0.0.1", srv2.localPort(), 1000)
+var s2 = srv2.accept(1000)
+
+// Both connected sockets are immediately writable.
+var ww = Sockets.waitAny([c2, s2], "write", 200)
+assert_wrap(typeof(ww) == "map",                         "11.1: waitAny returns a map")
+assert_wrap(length(ww["ready"]) == 2,                    "11.2: both sockets writable")
+assert_wrap(ww["timedOut"] == false,                     "11.3: not timed out")
+
+// "read" mode times out when no data is pending and sockets are connected.
+var rr = Sockets.waitAny([c2, s2], "read", 50)
+assert_wrap(length(rr["ready"]) == 0,                    "11.4: read-readiness empty on quiet sockets")
+assert_wrap(rr["timedOut"] == true,                      "11.5: read-readiness timed out")
+
+// After a write, the receiving side becomes readable.
+c2.write(Buffer.fromString("ping"), 500)
+var rr2 = Sockets.waitAny([c2, s2], "read", 1000)
+assert_wrap(length(rr2["ready"]) >= 1,                   "11.6: receiver becomes readable after write")
+
+c2.close()
+s2.close()
+srv2.close()
+
+// ----------------------------------------------------------------------------
+// SECTION 12: TLS in-process round-trip with a self-signed cert
+// ----------------------------------------------------------------------------
+// Mint a fresh RSA keypair + self-signed cert, stand up a TCP listener,
+// drive client + server TLS handshakes concurrently from a single
+// thread, then round-trip a line in each direction.
+var crypto = Crypto.create()
+var tls_key = crypto.generateRsa(2048)
+var tls_cert = crypto.generateSelfSignedCertificate(tls_key, "CN=localhost", "20240101000000", "20440101000000")
+assert_wrap(tls_key != null,                             "12.1: generated RSA key")
+assert_wrap(tls_cert != null,                            "12.2: generated self-signed cert")
+
+var tlsSrv = TCP.listen("127.0.0.1", 0)
+var tlsPort = tlsSrv.localPort()
+assert_wrap(tlsPort > 0,                                 "12.3: TLS listener bound")
+
+// Kick off non-blocking client + server handshakes (timeoutMs=0).
+var tlsCli = TLS.connect("127.0.0.1", tlsPort, 0, { verify: false })
+assert_wrap(tlsCli != null,                              "12.4: TLS.connect returns a sock with timeoutMs=0")
+
+var tcpAccepted = tlsSrv.accept(2000)
+assert_wrap(tcpAccepted != null,                         "12.5: TCP.accept caught the TLS client TCP")
+
+var tlsSrvSock = TLS.accept(tcpAccepted, { key: tls_key, cert: tls_cert }, 0)
+assert_wrap(tlsSrvSock != null,                          "12.6: TLS.accept returns a sock with timeoutMs=0")
+
+// Drive both sides for up to ~5s.
+var iter = 0
+while (iter < 200) {
+    tlsCli.poll()
+    tlsSrvSock.poll()
+    if (tlsCli.status() == "connected" && tlsSrvSock.status() == "connected") {
+        iter = 9999
+    }
+    iter = iter + 1
+    System.sleep(25)
+}
+assert_wrap(tlsCli.status() == "connected",              "12.7: client handshake completed")
+assert_wrap(tlsSrvSock.status() == "connected",          "12.8: server handshake completed")
+
+// Round-trip a line in each direction (also exercises encrypted I/O).
+var w1 = tlsCli.write(Buffer.fromString("hello tls\n"), 1000)
+assert_wrap(w1 == "ok",                                  "12.9: client write through TLS returns ok")
+var got = tlsSrvSock.readLine(1000)
+assert_wrap(got == "hello tls",                          "12.10: server received the encrypted line")
+
+var w2 = tlsSrvSock.write(Buffer.fromString("hi back\n"), 1000)
+assert_wrap(w2 == "ok",                                  "12.11: server write through TLS returns ok")
+var rep = tlsCli.readLine(1000)
+assert_wrap(rep == "hi back",                            "12.12: client received the encrypted reply")
+
+// peerAddress / localAddress on a TLS sock delegate to the TCP transport.
+var pa_tls = tlsCli.peerAddress()
+assert_wrap(typeof(pa_tls) == "map" && pa_tls["port"] == tlsPort, "12.13: TLS peerAddress reports the listener port")
+
+// Sockets.waitAny accepts TLS handles too.
+var any = Sockets.waitAny([tlsCli, tlsSrvSock], "write", 200)
+assert_wrap(typeof(any) == "map",                        "12.14: waitAny accepts TLS handles")
+assert_wrap(length(any["ready"]) == 2,                   "12.15: both TLS sockets writable")
+
+tlsCli.close()
+tlsSrvSock.close()
+tlsSrv.close()
+
+// double-close is a no-op
+tlsCli.close()
+assert_wrap(true,                                        "12.16: TLS double-close is silent")
+
+// connect-time deadline: a closed port (no listener) returns null promptly.
+var tlsFail = TLS.connect("127.0.0.1", 1, 300, { verify: false })
+assert_wrap(tlsFail == null,                             "12.17: TLS.connect to dead port returns null")
+
+// ----------------------------------------------------------------------------
+// SECTION 13: Surface presence
+// ----------------------------------------------------------------------------
+assert_wrap(typeof(TCP) == "map",                        "13.1: TCP is a map")
+assert_wrap(typeof(TCP.connect) != "null",               "13.2: TCP.connect exposed")
+assert_wrap(typeof(TCP.listen) != "null",                "13.3: TCP.listen exposed")
+assert_wrap(typeof(UDP) == "map",                        "13.4: UDP is a map")
+assert_wrap(typeof(UDP.bind) != "null",                  "13.5: UDP.bind exposed")
+assert_wrap(typeof(Sockets) == "map",                    "13.6: Sockets is a map")
+assert_wrap(typeof(Sockets.waitAny) != "null",           "13.7: Sockets.waitAny exposed")
+assert_wrap(typeof(TLS) == "map",                        "13.8: TLS is a map")
+assert_wrap(typeof(TLS.connect) != "null",               "13.9: TLS.connect exposed")
+assert_wrap(typeof(TLS.accept) != "null",                "13.10: TLS.accept exposed")
+
 // ============================================================================
 // FINAL RESULTS
 // ============================================================================

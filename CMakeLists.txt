@@ -77,6 +77,7 @@ set(ZYM_NATIVE_SOURCES
         src/natives/system.cpp
         src/natives/path.cpp
         src/natives/ip.cpp
+        src/natives/sockets.cpp
 )
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and

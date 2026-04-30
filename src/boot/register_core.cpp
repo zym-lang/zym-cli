@@ -157,6 +157,19 @@ void register_core_types() {
 	PacketPeerMbedDTLS::initialize_dtls();
 	DTLSServerMbedTLS::initialize();
 
+	// Load default CA chain (system trust store) so `TLS.connect(...)`
+	// against real-world hosts (https://example.com etc.) can verify the
+	// server cert without the script needing to pass `trustedRoots`.
+	// `Crypto::load_default_certificates("")` falls back to
+	// `OS::get_system_ca_certificates()` (or the builtin bundle if the
+	// engine was compiled with `BUILTIN_CERTS_ENABLED`). Calls into
+	// `mbedtls_x509_crt_parse` and is safe to invoke at startup; passing
+	// an empty path tells it "use system roots, not a project-defined
+	// path". Skipping this leaves `default_certs` null, which in turn
+	// makes `TLSContextMbedTLS::init_client` return `ERR_UNCONFIGURED`
+	// for any non-`unsafe` client.
+	Crypto::load_default_certificates(String());
+
 	// --- Additive batch #3: IP singleton --------------------------------
 	// `IP` is the engine's DNS/local-interface namespace and is the
 	// foundation for every networking native (TCP/UDP/TLS). On Linux

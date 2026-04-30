@@ -122,6 +122,30 @@ static bool reqCryptoKey(ZymVM* vm, ZymValue v, const char* where, Ref<CryptoKey
     return false;
 }
 
+// Public helpers for cross-TU use (sockets.cpp / TLS): extract Ref<>
+// handles from script-side CryptoKey / X509Certificate wrapper maps.
+// Return false on shape mismatch *without* raising a runtime error
+// (callers decide how to report).
+bool zymExtractCryptoKey(ZymVM* vm, ZymValue v, Ref<CryptoKey>* out) {
+    if (!zym_isMap(v)) return false;
+    ZymValue ctx = zym_mapGet(vm, v, "__ck__");
+    if (ctx == ZYM_ERROR) return false;
+    CKHandle* h = static_cast<CKHandle*>(zym_getNativeData(ctx));
+    if (!h) return false;
+    *out = h->k;
+    return true;
+}
+
+bool zymExtractX509(ZymVM* vm, ZymValue v, Ref<X509Certificate>* out) {
+    if (!zym_isMap(v)) return false;
+    ZymValue ctx = zym_mapGet(vm, v, "__cert__");
+    if (ctx == ZYM_ERROR) return false;
+    CertHandle* h = static_cast<CertHandle*>(zym_getNativeData(ctx));
+    if (!h) return false;
+    *out = h->x;
+    return true;
+}
+
 // ---- CryptoKey instance methods ----
 
 static ZymValue ck_load(ZymVM* vm, ZymValue ctx, ZymValue pathV, ZymValue pubV) {

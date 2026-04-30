@@ -19,3 +19,7 @@ ZymValue nativeHash_create(ZymVM* vm);
 ZymValue nativeSystem_create(ZymVM* vm);
 ZymValue nativePath_create(ZymVM* vm);
 ZymValue nativeIp_create(ZymVM* vm);
+ZymValue nativeTcp_create(ZymVM* vm);
+ZymValue nativeUdp_create(ZymVM* vm);
+ZymValue nativeSockets_create(ZymVM* vm);
+ZymValue nativeTls_create(ZymVM* vm);

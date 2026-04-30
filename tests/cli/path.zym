@@ -1,0 +1,166 @@
+// ============================================================================
+// COMPREHENSIVE Path NATIVE TEST SUITE
+// Exercises the `Path` global: query (isAbsolute/isRelative/isNetworkShare),
+// split (dirname/filename/extension/stem/basename), build (join variadic,
+// normalize, relative, withExtension, expandUser), and separator().
+// All methods are pure string transformations -- no filesystem access.
+// ============================================================================
+var testsPassed = 0
+var testsFailed = 0
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+print("==========================================================")
+print("Path NATIVE TEST SUITE")
+print("==========================================================")
+
+// ----------------------------------------------------------------------------
+// SECTION 1: Query (absolute / relative / network share)
+// ----------------------------------------------------------------------------
+assert_wrap(Path.isAbsolute("/a/b") == true,            "1.1: /a/b is absolute")
+assert_wrap(Path.isAbsolute("a/b") == false,            "1.2: a/b is not absolute")
+assert_wrap(Path.isAbsolute("") == false,               "1.3: empty is not absolute")
+assert_wrap(Path.isRelative("a/b") == true,             "1.4: a/b is relative")
+assert_wrap(Path.isRelative("/a/b") == false,           "1.5: /a/b is not relative")
+assert_wrap(Path.isAbsolute("./a") == false,            "1.6: ./a is not absolute")
+assert_wrap(Path.isNetworkShare("//host/share") == true,"1.7: //host/share is network share")
+assert_wrap(Path.isNetworkShare("/a/b") == false,       "1.8: /a/b is not network share")
+
+// ----------------------------------------------------------------------------
+// SECTION 2: Split
+// ----------------------------------------------------------------------------
+assert_wrap(Path.dirname("/a/b/c.txt") == "/a/b",       "2.1: dirname /a/b/c.txt")
+assert_wrap(Path.filename("/a/b/c.txt") == "c.txt",     "2.2: filename /a/b/c.txt")
+assert_wrap(Path.extension("/a/b/c.txt") == "txt",      "2.3: extension /a/b/c.txt")
+assert_wrap(Path.stem("/a/b/c.txt") == "c",             "2.4: stem /a/b/c.txt")
+assert_wrap(Path.basename("/a/b/c.txt") == "/a/b/c",    "2.5: basename /a/b/c.txt (path minus ext)")
+
+// no extension
+assert_wrap(Path.extension("/a/b") == "",               "2.6: no extension -> ''")
+assert_wrap(Path.stem("/a/b") == "b",                   "2.7: stem with no ext is filename")
+assert_wrap(Path.basename("/a/b") == "/a/b",            "2.8: basename with no ext is path itself")
+
+// multi-dot
+assert_wrap(Path.extension("/a/b.tar.gz") == "gz",      "2.9: extension is rightmost only")
+assert_wrap(Path.stem("/a/b.tar.gz") == "b.tar",        "2.10: stem strips only rightmost ext")
+assert_wrap(Path.basename("/a/b.tar.gz") == "/a/b.tar", "2.11: basename strips only rightmost ext")
+
+// trailing slash / empty
+assert_wrap(Path.filename("/a/b/") == "",               "2.12: trailing slash -> empty filename")
+assert_wrap(Path.dirname("/") == "/",                   "2.13: dirname of root")
+
+// ----------------------------------------------------------------------------
+// SECTION 3: Join (variadic)
+// ----------------------------------------------------------------------------
+assert_wrap(Path.join("/a", "b", "c.txt") == "/a/b/c.txt", "3.1: simple 3-arg join")
+assert_wrap(Path.join() == "",                              "3.2: 0-arg join is empty")
+assert_wrap(Path.join("solo") == "solo",                    "3.3: 1-arg join echoes")
+assert_wrap(Path.join("/a", "/b", "c") == "/b/c",           "3.4: absolute mid-segment rebases")
+assert_wrap(Path.join("/a/", "b") == "/a/b",                "3.5: trailing slash collapses")
+assert_wrap(Path.join("/a", "", "b") == "/a/b",             "3.6: empty segment is skipped")
+assert_wrap(Path.join("a", "b", "c") == "a/b/c",            "3.7: relative join")
+assert_wrap(Path.join("/a") == "/a",                        "3.8: 1-arg absolute")
+
+// ----------------------------------------------------------------------------
+// SECTION 4: Normalize (string-only, no FS access)
+// ----------------------------------------------------------------------------
+assert_wrap(Path.normalize("/a/./b/../c") == "/a/c",     "4.1: . and .. resolved")
+assert_wrap(Path.normalize("/a//b") == "/a/b",           "4.2: doubled slash collapsed")
+assert_wrap(Path.normalize("a/b/../c") == "a/c",         "4.3: relative .. resolved")
+assert_wrap(Path.normalize("/a/b/") == "/a/b",           "4.4: trailing slash trimmed")
+assert_wrap(Path.normalize("/a/b") == "/a/b",            "4.5: already normalized is unchanged")
+
+// ----------------------------------------------------------------------------
+// SECTION 5: Relative
+// ----------------------------------------------------------------------------
+// path_to_file treats `from` as a file: dir(from) -> to.
+// Hence /a/b -> /a/c yields ../c (from /a, walk to /a/c).
+assert_wrap(Path.relative("/a/b", "/a/c") == "../c",     "5.1: sibling file relative")
+var r = Path.relative("/a/b/c", "/a/b/d/e")
+assert_wrap(r == "../d/e",                               "5.2: relative descent")
+
+// ----------------------------------------------------------------------------
+// SECTION 6: withExtension
+// ----------------------------------------------------------------------------
+assert_wrap(Path.withExtension("/a/b.txt", "md") == "/a/b.md",  "6.1: change ext (no dot)")
+assert_wrap(Path.withExtension("/a/b.txt", ".md") == "/a/b.md", "6.2: change ext (with dot)")
+assert_wrap(Path.withExtension("/a/b.txt", "") == "/a/b",        "6.3: empty drops extension")
+assert_wrap(Path.withExtension("/a/b", "md") == "/a/b.md",       "6.4: append ext to no-ext path")
+assert_wrap(Path.withExtension("/a/b.tar.gz", "zst") == "/a/b.tar.zst", "6.5: replaces only rightmost ext")
+
+// ----------------------------------------------------------------------------
+// SECTION 7: expandUser
+// ----------------------------------------------------------------------------
+// Note: HOME is set on Linux/macOS. We don't compare to a hardcoded
+// path; we just assert the shape of the result.
+var ehome = Path.expandUser("~")
+assert_wrap(typeof(ehome) == "string",                   "7.1: ~ expands to a string")
+assert_wrap(ehome != "~",                                "7.2: ~ is actually expanded")
+assert_wrap(Path.isAbsolute(ehome) == true,              "7.3: expanded ~ is absolute")
+var esub = Path.expandUser("~/sub/dir")
+assert_wrap(esub == ehome + "/sub/dir",                  "7.4: ~/sub/dir prepends home")
+// `~user` (other-user form) is intentionally NOT expanded
+assert_wrap(Path.expandUser("~root") == "~root",         "7.5: ~user form is left untouched")
+// Non-tilde paths pass through unchanged
+assert_wrap(Path.expandUser("/etc") == "/etc",           "7.6: /etc passes through")
+assert_wrap(Path.expandUser("relative/path") == "relative/path", "7.7: relative passes through")
+assert_wrap(Path.expandUser("") == "",                   "7.8: empty passes through")
+
+// ----------------------------------------------------------------------------
+// SECTION 8: Separator
+// ----------------------------------------------------------------------------
+var sep = Path.separator()
+assert_wrap(typeof(sep) == "string",                     "8.1: separator() is string")
+assert_wrap(sep == "/" || sep == "\\",                   "8.2: separator() is / or \\")
+
+// ----------------------------------------------------------------------------
+// SECTION 9: Argument validation
+// ----------------------------------------------------------------------------
+// All methods reject non-string arguments at runtime; we just spot-check
+// that the API surface is reachable for representative methods.
+assert_wrap(typeof(Path.isAbsolute) != "null",           "9.1: isAbsolute exposed")
+assert_wrap(typeof(Path.dirname) != "null",              "9.2: dirname exposed")
+assert_wrap(typeof(Path.filename) != "null",             "9.3: filename exposed")
+assert_wrap(typeof(Path.extension) != "null",            "9.4: extension exposed")
+assert_wrap(typeof(Path.stem) != "null",                 "9.5: stem exposed")
+assert_wrap(typeof(Path.basename) != "null",             "9.6: basename exposed")
+assert_wrap(typeof(Path.join) != "null",                 "9.7: join exposed")
+assert_wrap(typeof(Path.normalize) != "null",            "9.8: normalize exposed")
+assert_wrap(typeof(Path.relative) != "null",             "9.9: relative exposed")
+assert_wrap(typeof(Path.expandUser) != "null",           "9.10: expandUser exposed")
+assert_wrap(typeof(Path.withExtension) != "null",        "9.11: withExtension exposed")
+assert_wrap(typeof(Path.separator) != "null",            "9.12: separator exposed")
+assert_wrap(typeof(Path.isRelative) != "null",           "9.13: isRelative exposed")
+assert_wrap(typeof(Path.isNetworkShare) != "null",       "9.14: isNetworkShare exposed")
+
+// ----------------------------------------------------------------------------
+// SECTION 10: Composition with System
+// ----------------------------------------------------------------------------
+// Path.join over System dirs should produce a portable result that
+// callers can hand to File / Dir without manually concatenating "/".
+var datadir = System.dataDir()
+var subpath = Path.join(datadir, "zym-tests", "x.txt")
+assert_wrap(typeof(subpath) == "string",                 "10.1: join(System.dataDir(), ..., ...) is a string")
+assert_wrap(Path.dirname(subpath) == Path.join(datadir, "zym-tests"), "10.2: dirname round-trips a join")
+assert_wrap(Path.filename(subpath) == "x.txt",           "10.3: filename round-trips a join")
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

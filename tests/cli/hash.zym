@@ -1,0 +1,152 @@
+// ============================================================================
+// COMPREHENSIVE Hash NATIVE TEST SUITE
+// Exercises the `Hash` global (statics: create / digest) and the
+// per-instance API (update / finish / reset). Covers all three
+// algorithms (md5, sha1, sha256), known-answer tests, streaming
+// equivalence, finish/reset lifecycle, and case-insensitive algorithm
+// names.
+// ============================================================================
+var testsPassed = 0
+var testsFailed = 0
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+print("==========================================================")
+print("Hash NATIVE TEST SUITE")
+print("==========================================================")
+
+// ----------------------------------------------------------------------------
+// SECTION 1: Known-answer one-shot digests
+// ----------------------------------------------------------------------------
+var hello = Buffer.fromString("hello")
+var empty = Buffer.fromString("")
+
+assert_wrap(Hash.digest("md5",    hello).hex() == "5d41402abc4b2a76b9719d911017c592",
+            "1.1: md5('hello') matches RFC vector")
+assert_wrap(Hash.digest("sha1",   hello).hex() == "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
+            "1.2: sha1('hello') matches RFC vector")
+assert_wrap(Hash.digest("sha256", hello).hex() == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            "1.3: sha256('hello') matches RFC vector")
+
+// Empty-input digests are well-known constants.
+assert_wrap(Hash.digest("md5",    empty).hex() == "d41d8cd98f00b204e9800998ecf8427e",
+            "1.4: md5('') is the empty-string MD5")
+assert_wrap(Hash.digest("sha1",   empty).hex() == "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "1.5: sha1('') is the empty-string SHA-1")
+assert_wrap(Hash.digest("sha256", empty).hex() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "1.6: sha256('') is the empty-string SHA-256")
+
+// ----------------------------------------------------------------------------
+// SECTION 2: Digest length matches algorithm
+// ----------------------------------------------------------------------------
+assert_wrap(Hash.digest("md5",    hello).size() == 16, "2.1: md5 digest is 16 bytes")
+assert_wrap(Hash.digest("sha1",   hello).size() == 20, "2.2: sha1 digest is 20 bytes")
+assert_wrap(Hash.digest("sha256", hello).size() == 32, "2.3: sha256 digest is 32 bytes")
+
+// ----------------------------------------------------------------------------
+// SECTION 3: Streaming matches one-shot
+// ----------------------------------------------------------------------------
+var hStream = Hash.create("sha256")
+hStream.update(Buffer.fromString("hel"))
+hStream.update(Buffer.fromString("lo"))
+assert_wrap(hStream.finish().hex() == Hash.digest("sha256", hello).hex(),
+            "3.1: streaming sha256 matches one-shot")
+
+var hStream2 = Hash.create("sha1")
+hStream2.update(Buffer.fromString("h"))
+hStream2.update(Buffer.fromString("e"))
+hStream2.update(Buffer.fromString("l"))
+hStream2.update(Buffer.fromString("l"))
+hStream2.update(Buffer.fromString("o"))
+assert_wrap(hStream2.finish().hex() == Hash.digest("sha1", hello).hex(),
+            "3.2: byte-by-byte streaming sha1 matches one-shot")
+
+// Empty-update streaming still produces empty-string digest.
+var hEmpty = Hash.create("sha256")
+assert_wrap(hEmpty.finish().hex() == Hash.digest("sha256", empty).hex(),
+            "3.3: streaming with no update == empty-string digest")
+
+// ----------------------------------------------------------------------------
+// SECTION 4: finish / reset lifecycle
+// ----------------------------------------------------------------------------
+var hL = Hash.create("sha256")
+hL.update(Buffer.fromString("first"))
+var d1 = hL.finish().hex()
+
+// After finish, update is a no-op (returns false), and finish returns empty.
+assert_wrap(hL.update(hello) == false, "4.1: update() after finish returns false")
+assert_wrap(hL.finish().size() == 0,   "4.2: finish() after finish returns empty Buffer")
+
+// reset() makes the instance reusable.
+assert_wrap(hL.reset() == true, "4.3: reset() returns true")
+hL.update(Buffer.fromString("second"))
+var d2 = hL.finish().hex()
+assert_wrap(d1 != d2,                                                   "4.4: post-reset digest differs from pre-reset")
+assert_wrap(d2 == Hash.digest("sha256", Buffer.fromString("second")).hex(), "4.5: post-reset digest matches one-shot of new input")
+
+// Reset twice in a row works.
+assert_wrap(hL.reset() == true, "4.6: reset() can be called repeatedly")
+hL.update(Buffer.fromString("third"))
+assert_wrap(hL.finish().hex() == Hash.digest("sha256", Buffer.fromString("third")).hex(),
+            "4.7: digest after second reset matches one-shot")
+
+// ----------------------------------------------------------------------------
+// SECTION 5: Algorithm string normalisation
+// ----------------------------------------------------------------------------
+assert_wrap(Hash.digest("SHA256", hello).hex() == Hash.digest("sha256", hello).hex(),
+            "5.1: algorithm string is case-insensitive (uppercase)")
+assert_wrap(Hash.digest("Sha1", hello).hex() == Hash.digest("sha1", hello).hex(),
+            "5.2: algorithm string is case-insensitive (mixed)")
+
+// ----------------------------------------------------------------------------
+// SECTION 6: Different inputs => different digests; same input => same
+// ----------------------------------------------------------------------------
+assert_wrap(Hash.digest("sha256", Buffer.fromString("hello")).hex() ==
+            Hash.digest("sha256", Buffer.fromString("hello")).hex(),
+            "6.1: identical inputs produce identical digests")
+assert_wrap(Hash.digest("sha256", Buffer.fromString("hello")).hex() !=
+            Hash.digest("sha256", Buffer.fromString("hellp")).hex(),
+            "6.2: differing inputs produce differing digests")
+
+// ----------------------------------------------------------------------------
+// SECTION 7: Multiple independent contexts
+// ----------------------------------------------------------------------------
+var hA = Hash.create("sha256")
+var hB = Hash.create("sha256")
+hA.update(Buffer.fromString("alpha"))
+hB.update(Buffer.fromString("beta"))
+assert_wrap(hA.finish().hex() == Hash.digest("sha256", Buffer.fromString("alpha")).hex(),
+            "7.1: independent context A is unaffected by B")
+assert_wrap(hB.finish().hex() == Hash.digest("sha256", Buffer.fromString("beta")).hex(),
+            "7.2: independent context B is unaffected by A")
+
+// ----------------------------------------------------------------------------
+// SECTION 8: Cross-algorithm sanity
+// ----------------------------------------------------------------------------
+assert_wrap(Hash.digest("md5",    hello).hex() != Hash.digest("sha1",   hello).hex(),
+            "8.1: md5 != sha1 for same input")
+assert_wrap(Hash.digest("sha1",   hello).hex() != Hash.digest("sha256", hello).hex(),
+            "8.2: sha1 != sha256 for same input")
+assert_wrap(Hash.digest("md5",    hello).hex() != Hash.digest("sha256", hello).hex(),
+            "8.3: md5 != sha256 for same input")
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

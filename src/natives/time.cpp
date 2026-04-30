@@ -120,13 +120,6 @@ static ZymValue t_ticksUsec(ZymVM*, ZymValue) {
     return zym_newNumber((double)Time::get_singleton()->get_ticks_usec());
 }
 
-static ZymValue t_sleep(ZymVM* vm, ZymValue, ZymValue msVal) {
-    double ms;
-    if (!requireNumber(vm, msVal, "Time.sleep(ms)", &ms)) return ZYM_ERROR;
-    if (ms < 0) ms = 0;
-    OS::get_singleton()->delay_usec((uint32_t)(ms * 1000.0));
-    return zym_newNull();
-}
 
 static ZymValue t_datetime(ZymVM* vm, ZymValue, ZymValue utcVal) {
     bool utc;
@@ -255,7 +248,6 @@ ZymValue nativeTime_create(ZymVM* vm) {
     METHOD(clockMethod,                  "clock()",                                   t_clock)
     METHOD(ticksMsec,                    "ticksMsec()",                               t_ticksMsec)
     METHOD(ticksUsec,                    "ticksUsec()",                               t_ticksUsec)
-    METHOD(sleepMethod,                  "sleep(ms)",                                 t_sleep)
     METHOD(datetime,                     "datetime(utc)",                             t_datetime)
     METHOD(date,                         "date(utc)",                                 t_date)
     METHOD(timeOfDay,                    "timeOfDay(utc)",                            t_timeOfDay)
@@ -284,7 +276,6 @@ ZymValue nativeTime_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "clock",                      clockMethod);
     zym_mapSet(vm, obj, "ticksMsec",                  ticksMsec);
     zym_mapSet(vm, obj, "ticksUsec",                  ticksUsec);
-    zym_mapSet(vm, obj, "sleep",                      sleepMethod);
     zym_mapSet(vm, obj, "datetime",                   datetime);
     zym_mapSet(vm, obj, "date",                       date);
     zym_mapSet(vm, obj, "timeOfDay",                  timeOfDay);
@@ -304,8 +295,8 @@ ZymValue nativeTime_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "timezone",                   timezone);
     zym_mapSet(vm, obj, "offsetString",               offsetString);
 
-    // context + 23 methods + obj = 25
-    for (int i = 0; i < 25; i++) zym_popRoot(vm);
+    // context + 22 methods + obj = 24
+    for (int i = 0; i < 24; i++) zym_popRoot(vm);
 
     return obj;
 }

@@ -1,0 +1,178 @@
+// ============================================================================
+// COMPREHENSIVE System NATIVE TEST SUITE
+// Exercises the `System` global: identity (osName/distribution/osVersion/
+// modelName), hardware (cpuName/cpuCount/uniqueId), locale/features,
+// executablePath, dirs (data/config/cache/temp + systemDir desktop kinds),
+// sleep / sleepUsec, env (get/has/set/unset), and Process interop where
+// `System.setEnv` is visible to a child spawned via `Process.exec`.
+// Linux-only (uses /bin/sh and shell-style env-var expansion in section 9).
+// ============================================================================
+var testsPassed = 0
+var testsFailed = 0
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+print("==========================================================")
+print("System NATIVE TEST SUITE")
+print("==========================================================")
+
+// ----------------------------------------------------------------------------
+// SECTION 1: Identity
+// ----------------------------------------------------------------------------
+var osName = System.osName()
+assert_wrap(typeof(osName) == "string",       "1.1: osName() is a string")
+assert_wrap(osName != "",                     "1.2: osName() is non-empty")
+
+var dist = System.distribution()
+assert_wrap(typeof(dist) == "string",         "1.3: distribution() is a string")
+
+var ver = System.osVersion()
+assert_wrap(typeof(ver) == "string",          "1.4: osVersion() is a string")
+
+var model = System.modelName()
+assert_wrap(typeof(model) == "string",        "1.5: modelName() is a string")
+
+// ----------------------------------------------------------------------------
+// SECTION 2: Hardware
+// ----------------------------------------------------------------------------
+var cpu = System.cpuName()
+assert_wrap(typeof(cpu) == "string",          "2.1: cpuName() is a string")
+
+var cpuCount = System.cpuCount()
+assert_wrap(typeof(cpuCount) == "number",     "2.2: cpuCount() is a number")
+assert_wrap(cpuCount >= 1,                    "2.3: cpuCount() >= 1")
+
+var uid = System.uniqueId()
+assert_wrap(typeof(uid) == "string",          "2.4: uniqueId() is a string")
+assert_wrap(uid == System.uniqueId(),         "2.5: uniqueId() is stable across calls")
+
+// ----------------------------------------------------------------------------
+// SECTION 3: Locale & features
+// ----------------------------------------------------------------------------
+var loc = System.locale()
+assert_wrap(typeof(loc) == "string",          "3.1: locale() is a string")
+
+var lang = System.localeLanguage()
+assert_wrap(typeof(lang) == "string",         "3.2: localeLanguage() is a string")
+
+assert_wrap(typeof(System.hasFeature("pc")) == "bool",                   "3.3: hasFeature() returns a bool")
+assert_wrap(System.hasFeature("__definitely_not_a_feature__") == false,  "3.4: hasFeature() returns false for unknown tag")
+
+// ----------------------------------------------------------------------------
+// SECTION 4: Process info
+// ----------------------------------------------------------------------------
+var exe = System.executablePath()
+assert_wrap(typeof(exe) == "string",          "4.1: executablePath() is a string")
+assert_wrap(exe != "",                        "4.2: executablePath() is non-empty")
+
+// ----------------------------------------------------------------------------
+// SECTION 5: Directories
+// ----------------------------------------------------------------------------
+var dataDir   = System.dataDir()
+var configDir = System.configDir()
+var cacheDir  = System.cacheDir()
+var tempDir   = System.tempDir()
+assert_wrap(typeof(dataDir)   == "string" && dataDir   != "", "5.1: dataDir() non-empty string")
+assert_wrap(typeof(configDir) == "string" && configDir != "", "5.2: configDir() non-empty string")
+assert_wrap(typeof(cacheDir)  == "string" && cacheDir  != "", "5.3: cacheDir() non-empty string")
+assert_wrap(typeof(tempDir)   == "string" && tempDir   != "", "5.4: tempDir() non-empty string")
+
+// ----------------------------------------------------------------------------
+// SECTION 6: systemDir — desktop-only kinds, case-insensitive
+// ----------------------------------------------------------------------------
+assert_wrap(typeof(System.systemDir("desktop"))   == "string", "6.1: systemDir(desktop) returns a string")
+assert_wrap(typeof(System.systemDir("documents")) == "string", "6.2: systemDir(documents) returns a string")
+assert_wrap(typeof(System.systemDir("downloads")) == "string", "6.3: systemDir(downloads) returns a string")
+assert_wrap(typeof(System.systemDir("movies"))    == "string", "6.4: systemDir(movies) returns a string")
+assert_wrap(typeof(System.systemDir("music"))     == "string", "6.5: systemDir(music) returns a string")
+assert_wrap(typeof(System.systemDir("pictures"))  == "string", "6.6: systemDir(pictures) returns a string")
+
+// case-insensitive
+assert_wrap(System.systemDir("Documents") == System.systemDir("documents"), "6.7: systemDir() is case-insensitive (Documents)")
+assert_wrap(System.systemDir("DOWNLOADS") == System.systemDir("downloads"), "6.8: systemDir() is case-insensitive (DOWNLOADS)")
+
+// ----------------------------------------------------------------------------
+// SECTION 7: Sleep
+// ----------------------------------------------------------------------------
+var t0 = Time.ticksMsec()
+System.sleep(80)
+var elapsed = Time.ticksMsec() - t0
+assert_wrap(elapsed >= 70,    "7.1: sleep(80) waits at least ~80ms")
+assert_wrap(elapsed <  2000,  "7.2: sleep(80) does not wildly overshoot")
+
+var t1 = Time.ticksMsec()
+System.sleep(-10)              // negative clamps to 0; should return ~immediately
+assert_wrap((Time.ticksMsec() - t1) < 50, "7.3: sleep(-10) clamps to 0")
+
+var t2 = Time.ticksMsec()
+System.sleepUsec(50000)        // 50 ms
+var us_elapsed = Time.ticksMsec() - t2
+assert_wrap(us_elapsed >= 40,  "7.4: sleepUsec(50000) waits at least ~40ms")
+assert_wrap(us_elapsed <  2000, "7.5: sleepUsec(50000) does not wildly overshoot")
+
+// ----------------------------------------------------------------------------
+// SECTION 8: Environment (round-trip)
+// ----------------------------------------------------------------------------
+var k = "ZYM_SYSTEM_TEST_VAR_XYZ"
+// Make sure it's clean to start
+System.unsetEnv(k)
+assert_wrap(System.hasEnv(k) == false,         "8.1: hasEnv() false before setEnv")
+assert_wrap(System.getEnv(k) == null,          "8.2: getEnv() null before setEnv")
+
+System.setEnv(k, "alpha")
+assert_wrap(System.hasEnv(k) == true,          "8.3: hasEnv() true after setEnv")
+assert_wrap(System.getEnv(k) == "alpha",       "8.4: getEnv() returns set value")
+
+System.setEnv(k, "beta")
+assert_wrap(System.getEnv(k) == "beta",        "8.5: setEnv overwrites prior value")
+
+System.unsetEnv(k)
+assert_wrap(System.hasEnv(k) == false,         "8.6: hasEnv() false after unsetEnv")
+assert_wrap(System.getEnv(k) == null,          "8.7: getEnv() null after unsetEnv")
+
+// unsetEnv on a missing var is a no-op
+System.unsetEnv(k)
+assert_wrap(System.hasEnv(k) == false,         "8.8: unsetEnv on missing var is a no-op")
+
+// ----------------------------------------------------------------------------
+// SECTION 9: Process interop — child sees System.setEnv
+// ----------------------------------------------------------------------------
+var ik = "ZYM_SYSTEM_INTEROP_VAR"
+System.setEnv(ik, "from-system")
+var r1 = Process.exec("/bin/sh", ["-c", "printf %s \"$ZYM_SYSTEM_INTEROP_VAR\""])
+assert_wrap(r1.exitCode == 0,                          "9.1: child exited 0 when reading set env")
+assert_wrap(r1.stdout.toUtf8() == "from-system",       "9.2: child sees value set via System.setEnv")
+
+System.setEnv(ik, "updated")
+var r2 = Process.exec("/bin/sh", ["-c", "printf %s \"$ZYM_SYSTEM_INTEROP_VAR\""])
+assert_wrap(r2.stdout.toUtf8() == "updated",           "9.3: child sees the updated value (live env)")
+
+System.unsetEnv(ik)
+var r3 = Process.exec("/bin/sh", ["-c", "printf '[%s]' \"$ZYM_SYSTEM_INTEROP_VAR\""])
+assert_wrap(r3.stdout.toUtf8() == "[]",                "9.4: child sees empty after System.unsetEnv")
+
+// And vice versa — Process.setEnv is observable via System.getEnv
+Process.setEnv(ik, "from-process")
+assert_wrap(System.getEnv(ik) == "from-process",       "9.5: Process.setEnv visible via System.getEnv")
+System.unsetEnv(ik)
+
+// ============================================================================
+// FINAL RESULTS
+// ============================================================================
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

@@ -24,7 +24,8 @@ Global singleton providing real-time clocks, system datetime queries, parsing/co
 | `Time.clock()` | number | Process CPU time in seconds via `clock() / CLOCKS_PER_SEC`. |
 | `Time.ticksMsec()` | number | Monotonic milliseconds since process start. |
 | `Time.ticksUsec()` | number | Monotonic microseconds since process start. |
-| `Time.sleep(ms)` | null | Blocks the calling thread for `ms` milliseconds (clamped to ≥ 0). |
+
+For blocking-sleep, see `System.sleep(ms)` / `System.sleepUsec(usec)` in the `System` native.
 
 ### System datetime (current time)
 
@@ -83,7 +84,7 @@ print("utc:      %s", Time.datetimeString(true, false))
 var dt = Time.datetime(true)
 print("year=%n month=%n day=%n", dt.year, dt.month, dt.day)
 
-Time.sleep(250)
+System.sleep(250)
 print("elapsed: %n ms", Time.ticksMsec() - started)
 ```
 

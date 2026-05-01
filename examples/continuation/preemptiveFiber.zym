@@ -1,0 +1,151 @@
+// ============================================================
+// preemptiveFibers (Zym)
+// A tiny preemptive fiber scheduler built from:
+//   - Preempt: instruction timeslices + callback
+//   - Cont: delimited continuations (capture/resume) as fiber state
+//
+// The flow:
+//   1) Each fiber runs inside a prompt boundary (FIBER_TAG).
+//   2) When preemption fires, the callback captures the fiber continuation.
+//   3) The scheduler receives that continuation and re-queues the fiber.
+//   4) If the fiber finishes, it returns a normal value instead of a continuation.
+//
+// Notes:
+//   - The scheduler itself runs with preemption disabled.
+//   - Each fiber resume runs with preemption re-enabled + timeslice reset.
+// ============================================================
+
+print("=== Zym: preemptiveFibers ===")
+
+var FIBER_TAG = Cont.newPrompt("fiber")
+var fiberQueue = []
+var currentFiberId = 0
+
+// ------------------------------------------------------------
+// Preemption callback
+// Runs asynchronously when the VM timeslice expires.
+// We capture the currently-running fiber continuation.
+// ------------------------------------------------------------
+func onPreempt() {
+    print("[tick] fiber %v yielded", currentFiberId)
+    Cont.capture(FIBER_TAG)
+}
+
+// ------------------------------------------------------------
+// Fiber creation
+//
+// We create a dormant continuation by establishing a prompt boundary
+// and capturing once.
+// - The first time we resume, capture returns null.
+// - On preemption, capture returns a continuation (which bubbles out).
+// ------------------------------------------------------------
+func createFiber(id, fn) {
+    return Cont.withPrompt(FIBER_TAG, func() {
+        var k = Cont.capture(FIBER_TAG)
+
+        if (k == null) {
+            // First resume starts here
+            fn()
+            return "done"
+        }
+
+        // If resumed into, return the continuation outward to the scheduler
+        return k
+    })
+}
+
+func spawn(id, fn) {
+    var k = createFiber(id, fn)
+    push(fiberQueue, { id: id, continuation: k })
+}
+
+// ------------------------------------------------------------
+// Workload (burns CPU so preemption occurs)
+// ------------------------------------------------------------
+func work(name, steps) {
+    print("  %s: starting", name)
+
+    for (var i = 1; i <= steps; i = i + 1) {
+        // Busy loop (forces enough instructions for timeslicing)
+        var j = 0
+        while (j < 1000) {
+            j = j + 1
+        }
+
+        print("  %s: step %v", name, i)
+    }
+}
+
+// ------------------------------------------------------------
+// Setup
+// ------------------------------------------------------------
+print("")
+print("-- spawn --")
+spawn(1, func() { work("Fiber 1", 5) })
+spawn(2, func() { work("Fiber 2", 5) })
+spawn(3, func() { work("Fiber 3", 5) })
+
+print("")
+print("-- enable preemption --")
+Preempt.setCallback(onPreempt)
+Preempt.setTimeslice(500)
+Preempt.enable()
+
+// ------------------------------------------------------------
+// Scheduler loop
+// The scheduler runs with preemption disabled so it can manage state
+// without being interrupted.
+// ------------------------------------------------------------
+print("")
+print("-- schedule --")
+
+Preempt.withDisabled(func() {
+    var iterations = 0
+    var maxIterations = 2000 // safety limit
+
+    while (length(fiberQueue) > 0 and iterations < maxIterations) {
+        var fiber = shift(fiberQueue)
+        currentFiberId = fiber.id
+
+        // Resume fiber inside a prompt boundary.
+        //
+        // NOTE:
+        // Using `withPrompt` here is a convenience wrapper.
+        // On repeated preemptions, wrap → capture → wrap can layer prompt frames
+        // and accumulate bookkeeping overhead over many slices.
+        // For long-running workloads, a flat-overhead scheduler would manage
+        // the prompt stack manually instead of re-wrapping each resume.
+        var result = Cont.withPrompt(FIBER_TAG, func() {
+            // Re-enable preemption inside the fiber execution window
+            Preempt.popDisable()
+
+            // Fresh timeslice for this run
+            Preempt.reset()
+
+            // Resume fiber (if it gets preempted, onPreempt captures and we bubble out)
+            Cont.resume(fiber.continuation, null)
+        })
+
+        // Back in scheduler context (preemption disabled again).
+        if (Cont.isContinuation(result)) {
+            // Fiber was preempted → continuation is the new fiber state
+            fiber.continuation = result
+            push(fiberQueue, fiber)
+        } else {
+            // Fiber finished normally
+            print("[done] fiber %v completed", fiber.id)
+        }
+
+        iterations = iterations + 1
+    }
+
+    print("")
+    if (iterations >= maxIterations) {
+        print("scheduler: hit safety limit (possible runaway fiber)")
+    } else {
+        print("scheduler: all fibers completed")
+    }
+})
+
+print("")
+print("=== end ===")

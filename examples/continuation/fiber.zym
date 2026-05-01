@@ -1,0 +1,252 @@
+// =============================================================================
+// Fiber Scheduler (Cooperative) — Closure-based "module"
+// =============================================================================
+//
+// Usage:
+//   var S = makeFiberScheduler()
+//   var a = S.spawn(func() { ... }, "A")
+//   var b = S.spawn(func() { ... }, "B")
+//   S.run(100000)
+//
+// Notes:
+// - Cooperative: fibers must call S.yield()/S.sleep()/S.join() to share CPU.
+// - One-shot continuations: scheduler always replaces a fiber's continuation.
+// - Prompt discipline:
+//     * capture/abort auto-consume the prompt
+//     * normal return does NOT, so scheduler pops on that path.
+//
+// =============================================================================
+
+func makeFiberScheduler() {
+    // -----------------------------
+    // Private scheduler state
+    // -----------------------------
+    var TAG = Cont.newPrompt("FiberScheduler.fiber")
+    var runQueue = []
+    var nextId = 1
+    var current = null
+    var tick = 0
+
+    // -----------------------------
+    // Fiber record constructor
+    // -----------------------------
+    func newFiber(fn, name) {
+        var f = {
+            id: nextId,
+            name: name,
+            fn: fn,
+            started: false,
+            done: false,
+            canceled: false,
+
+            waitingOn: null,   // join target fiber (object)
+            wakeTick: null,    // sleep until tick >= wakeTick
+
+            cont: null,        // Continuation (one-shot)
+            yieldValue: null   // last yielded payload (optional)
+        }
+        nextId = nextId + 1
+        return f
+    }
+
+    func spawn(fn) {
+        return spawn(fn, "fiber-" + str(nextId))
+    }
+
+    func spawn(fn, name) {
+        var f = newFiber(fn, name)
+        push(runQueue, f)
+        return f
+    }
+
+    // -----------------------------
+    // (MUST be helper func)
+    // -----------------------------
+    func yieldFiber() {
+        return yieldFiber(null)
+    }
+
+    func yieldFiber(value) {
+        if (current != null) {
+            current.yieldValue = value
+        }
+        // Capture up to TAG and return to scheduler.
+        // The scheduler receives the captured continuation as the "result"
+        // of running/resuming the fiber step.
+        return Cont.capture(TAG)
+    }
+
+    func sleep(ticks) {
+        if (current == null) return
+        if (ticks <= 0) return
+        current.wakeTick = tick + ticks
+        return yieldFiber({ type: "sleep", until: current.wakeTick })
+    }
+
+    // -----------------------------
+    // (wait for another fiber)
+    // -----------------------------
+    func join(targetFiber) {
+        if (current == null) return
+        if (targetFiber == null) return
+        if (targetFiber.done) return
+        current.waitingOn = targetFiber
+        return yieldFiber({ type: "join", target: targetFiber.id })
+    }
+
+    func cancel(f) {
+        if (f == null) return
+        f.canceled = true
+    }
+
+    // -----------------------------
+    // Internal: is fiber runnable?
+    // -----------------------------
+    func isBlocked(f) {
+        if (f.canceled) return true
+        if (f.waitingOn != null and !f.waitingOn.done) return true
+        if (f.wakeTick != null and tick < f.wakeTick) return true
+        return false
+    }
+
+    func clearBlocksIfSatisfied(f) {
+        if (f.waitingOn != null and f.waitingOn.done) {
+            f.waitingOn = null
+        }
+        if (f.wakeTick != null and tick >= f.wakeTick) {
+            f.wakeTick = null
+        }
+    }
+
+    // -----------------------------
+    // run scheduler
+    // -----------------------------
+    func run(maxSteps) {
+        var steps = 0
+        var completed = 0
+        var canceledCount = 0
+
+        if (maxSteps == null) maxSteps = 100000
+
+        while (length(runQueue) > 0 and steps < maxSteps) {
+            tick = tick + 1
+            var f = shift(runQueue)
+
+            // If canceled, mark done and drop
+            if (f.canceled) {
+                if (!f.done) {
+                    f.done = true
+                    canceledCount = canceledCount + 1
+                }
+                steps = steps + 1
+                continue
+            }
+
+            // Update block flags (join/sleep can become satisfied)
+            clearBlocksIfSatisfied(f)
+
+            // If blocked, requeue and move on
+            if (isBlocked(f)) {
+                push(runQueue, f)
+                steps = steps + 1
+                continue
+            }
+
+            // Dispatch one step
+            current = f
+            f.yieldValue = null
+
+            Cont.pushPrompt(TAG)
+
+            var result = null
+
+            if (!f.started) {
+                f.started = true
+                result = f.fn()
+            } else {
+                if (f.cont != null and Cont.isValid(f.cont)) {
+                    result = Cont.resume(f.cont, null)
+                } else {
+                    result = null
+                }
+            }
+
+            // If we got a continuation back, the fiber yielded.
+            if (Cont.isContinuation(result) and Cont.isValid(result)) {
+                f.cont = result
+                // capture() consumed the prompt automatically
+                push(runQueue, f)
+            } else {
+                // Normal return path: must pop prompt ourselves
+                Cont.popPrompt()
+                f.done = true
+                completed = completed + 1
+            }
+
+            current = null
+            steps = steps + 1
+        }
+
+        return {
+            steps: steps,
+            completed: completed,
+            canceled: canceledCount,
+            remaining: length(runQueue),
+            tick: tick
+        }
+    }
+
+    // -----------------------------
+    // Return public API object
+    // -----------------------------
+    return {
+        spawn: spawn,
+        run: run,
+        yield: yieldFiber,
+        sleep: sleep,
+        join: join,
+        cancel: cancel
+    }
+}
+
+
+// =============================================================================
+// Demo
+// =============================================================================
+print("=== Fiber Scheduler Demo (closure module) ===")
+
+var S = makeFiberScheduler()
+
+func makePrinter(name, n) {
+    return func() {
+        var i = 1
+        while (i <= n) {
+            print("[" + name + "] step " + str(i))
+            S.yield({ who: name, step: i })
+            i = i + 1
+        }
+        print("[" + name + "] done")
+    }
+}
+
+var a = S.spawn(makePrinter("A", 3), "A")
+var b = S.spawn(makePrinter("B", 2), "B")
+
+S.spawn(func() {
+    print("[Waiter] join A")
+    S.join(a)
+    print("[Waiter] sleep 2 ticks")
+    S.sleep(2)
+    print("[Waiter] done")
+}, "Waiter")
+
+var summary = S.run(1000)
+
+print("")
+print("Summary:")
+print("  steps: %v", summary.steps)
+print("  completed: %v", summary.completed)
+print("  canceled: %v", summary.canceled)
+print("  remaining: %v", summary.remaining)
+print("  tick: %v", summary.tick)
+print("=== Demo complete ===")

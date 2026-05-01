@@ -1,0 +1,87 @@
+// ============================================================
+// generators (Zym)
+// Building a generator manually using continuations.
+//
+// If you're coming from Python:
+//     yield  →  Cont.capture(TAG)
+//     next() →  Cont.resume(savedContinuation)
+//
+// ============================================================
+
+print("=== Zym: generators ===")
+
+// A prompt defines the boundary where capture returns to.
+var FIB_TAG = Cont.newPrompt("fib")
+
+func makeFib() {
+    // All generator state lives here.
+    // `cont` will hold the paused continuation between calls.
+    var state = {
+        a: 0,
+        b: 1,
+        value: null,
+        cont: null
+    }
+
+    // This is the generator "body".
+    // It runs until it hits Cont.capture(TAG),
+    // which acts exactly like `yield`.
+    func body() {
+        while (true) {
+            // Produce current value
+            state.value = state.a
+
+            // --- YIELD ---
+            //
+            // Cont.capture(TAG) pauses execution here.
+            // It returns a continuation to the caller (next()).
+            // When resumed, execution continues AFTER this line.
+            Cont.capture(FIB_TAG)
+
+            // Advance Fibonacci state (runs after resume)
+            var t = state.a + state.b
+            state.a = state.b
+            state.b = t
+        }
+    }
+
+    // next() drives the generator.
+    func next() {
+        // Establish the prompt boundary for this step.
+        Cont.pushPrompt(FIB_TAG)
+
+        var result
+
+        // First call: start the body.
+        // Later calls: resume from saved continuation.
+        if (state.cont == null)
+            result = body()
+        else
+            result = Cont.resume(state.cont, null)
+
+        // If capture occurred, we get a continuation back.
+        if (Cont.isContinuation(result)) {
+            state.cont = result
+            return state.value
+        }
+
+        // If body ever returns normally, generator is finished.
+        return null
+    }
+
+    return { next: next }
+}
+
+// ------------------------------------------------------------
+// Demo: print first 10 Fibonacci numbers
+// ------------------------------------------------------------
+
+var fib = makeFib()
+
+var i = 0
+while (i < 10) {
+    print("%v", fib.next())
+    i = i + 1
+}
+
+print("=== end ===")

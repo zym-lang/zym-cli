@@ -21,10 +21,11 @@ methods are invoked as `f.method(...)`.
 - **Buffers.** Byte I/O uses `Buffer` instances (see [buffer.md](buffer.md)).
 - **Endianness.** Typed multi-byte reads/writes accept an optional trailing
   `"le"` (default) or `"be"` string. See [Endianness](#endianness).
-- **Open failures.** `open`, `openCompressed`, and `openEncryptedPass` return
-  `null` on failure (check with `if f == null`). Use `lastError()` / the
-  `getError()` method on a handle for a numeric status. Whole-file helpers
-  (`File.readText` / `File.readBytes`) instead raise a runtime error.
+- **Open failures.** `open`, `openCompressed`, `openEncryptedPass`, and
+  `openEncrypted` return `null` on failure (check with `if f == null`). Use
+  `lastError()` / the `getError()` method on a handle for a numeric status.
+  Whole-file helpers (`File.readText` / `File.readBytes`) instead raise a
+  runtime error.
 - **Errors.** Invalid argument types, bad modes, negative sizes, or operations
   on a closed handle produce a Zym runtime error of the form
   `File.method(args) ...`.
@@ -37,7 +38,8 @@ methods are invoked as `f.method(...)`.
 | --- | --- |
 | `File.open(path, mode)` | handle, or `null` on failure |
 | `File.openCompressed(path, mode, algo)` | handle over a compressed stream, or `null` |
-| `File.openEncryptedPass(path, mode, password)` | handle over an encrypted stream, or `null` |
+| `File.openEncryptedPass(path, mode, password)` | handle over a password-encrypted stream, or `null` |
+| `File.openEncrypted(path, mode, key)` | handle over an AES-256 encrypted stream, or `null` |
 
 `algo` accepts `"fastlz"`, `"deflate"`, `"zstd"`, `"gzip"`, or `"brotli"`.
 Availability of each algorithm depends on the build; unsupported algorithms
@@ -53,6 +55,19 @@ cause the open call to fail (`null`).
 > produce — so there is currently no supported way to read a brotli
 > stream through this API. Use one of the other algorithms for
 > round-trip compression.
+
+> **Encrypted I/O.** `openEncrypted` uses **AES-256-CBC**: the `key` argument
+> must be a 32-byte `Buffer` (any other length raises a runtime error).
+> A fresh 16-byte IV is generated on write and stored in the file header,
+> so reads do not need it. Use a high-entropy key — for example
+> `Crypto.create().generateRandomBytes(32)` — and store it separately;
+> losing the key makes the file unrecoverable. Files written with
+> `openEncrypted` can only be read by `openEncrypted` (with the same key);
+> files written with `openEncryptedPass` can only be read by
+> `openEncryptedPass` (with the same password). The two helpers share an
+> on-disk container format but differ in how the key is derived. For
+> in-memory encryption with a custom IV, use the
+> [`AES`](aes.md) native directly.
 
 ---
 

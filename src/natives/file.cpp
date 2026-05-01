@@ -456,6 +456,21 @@ static ZymValue f_openEncryptedPass(ZymVM* vm, ZymValue, ZymValue pathV, ZymValu
     return makeFileInstance(vm, fa);
 }
 
+static ZymValue f_openEncrypted(ZymVM* vm, ZymValue, ZymValue pathV, ZymValue modeV, ZymValue keyV) {
+    String path; if (!reqStr(vm, pathV, "File.openEncrypted(path, mode, key)", &path)) return ZYM_ERROR;
+    String mode; if (!reqStr(vm, modeV, "File.openEncrypted(path, mode, key)", &mode)) return ZYM_ERROR;
+    PackedByteArray* key; if (!reqBufferArg(vm, keyV, "File.openEncrypted(path, mode, key)", &key)) return ZYM_ERROR;
+    int m = modeFromString(mode);
+    if (m < 0) { zym_runtimeError(vm, "File.openEncrypted: mode must be \"r\", \"w\", \"rw\", or \"wr\""); return ZYM_ERROR; }
+    if (key->size() != 32) {
+        zym_runtimeError(vm, "File.openEncrypted: key must be a 32-byte Buffer (AES-256), got %d bytes", (int)key->size());
+        return ZYM_ERROR;
+    }
+    Ref<FileAccess> fa = FileAccess::open_encrypted(path, (FileAccess::ModeFlags)m, *key);
+    if (fa.is_null()) return zym_newNull();
+    return makeFileInstance(vm, fa);
+}
+
 static ZymValue f_exists(ZymVM* vm, ZymValue, ZymValue pathV) {
     String path; if (!reqStr(vm, pathV, "File.exists(path)", &path)) return ZYM_ERROR;
     return zym_newBool(FileAccess::exists(path));
@@ -588,6 +603,7 @@ ZymValue nativeFile_create(ZymVM* vm) {
     F("open",              "open(path, mode)",                        f_open);
     F("openCompressed",    "openCompressed(path, mode, algo)",        f_openCompressed);
     F("openEncryptedPass", "openEncryptedPass(path, mode, password)", f_openEncryptedPass);
+    F("openEncrypted",     "openEncrypted(path, mode, key)",          f_openEncrypted);
 
     F("readBytes",    "readBytes(path)",         f_readBytes);
     F("readText",     "readText(path)",          f_readText);

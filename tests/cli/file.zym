@@ -29,6 +29,7 @@ var P_CSV  = "/tmp/zym_cli_file_test.csv"
 var P_COPY = "/tmp/zym_cli_file_test.copy"
 var P_MOVE = "/tmp/zym_cli_file_test.moved"
 var P_MISS = "/tmp/zym_cli_file_test.nosuch"
+var P_ENC  = "/tmp/zym_cli_file_test.enc"
 
 // Clean any leftovers from a previous run (ignore return values).
 File.remove(P)
@@ -37,6 +38,7 @@ File.remove(P_CSV)
 File.remove(P_COPY)
 File.remove(P_MOVE)
 File.remove(P_MISS)
+File.remove(P_ENC)
 
 
 // ============================================================================
@@ -360,6 +362,68 @@ assert_wrap(missRemove == false, "12.9: remove missing -> false")
 
 
 // ============================================================================
+// SECTION 13: ENCRYPTED I/O (openEncrypted, AES-256)
+// ============================================================================
+print("--- [13] openEncrypted (AES-256) ---")
+
+// Build a deterministic 32-byte AES-256 key (0x00..0x1F).
+var keyList = []
+for (var i = 0; i < 32; i = i + 1) { push(keyList, i) }
+var key1 = Buffer.fromList(keyList)
+assert_wrap(key1.size() == 32, "13.1: built 32-byte key Buffer")
+
+// Write an encrypted file via the openEncrypted handle.
+var fwe = File.openEncrypted(P_ENC, "w", key1)
+assert_wrap(fwe != null, "13.2: openEncrypted(w) returns a handle")
+fwe.writeString("hello aes-256")
+fwe.close()
+assert_wrap(File.exists(P_ENC), "13.3: encrypted file exists on disk")
+
+// Encrypted output must NOT match the plaintext on disk.
+var rawEnc = File.readBytes(P_ENC)
+assert_wrap(rawEnc.size() > 13, "13.4: encrypted file is larger than plaintext (header + iv)")
+assert_wrap(rawEnc.toUtf8() != "hello aes-256", "13.5: raw bytes do not equal plaintext")
+
+// Round-trip with the same key.
+var fre = File.openEncrypted(P_ENC, "r", key1)
+assert_wrap(fre != null, "13.6: openEncrypted(r) with correct key opens")
+assert_wrap(fre.readText() == "hello aes-256", "13.7: round-trip plaintext matches")
+fre.close()
+
+// Wrong key -> null. Build a different 32-byte key.
+var key2List = []
+for (var j = 0; j < 32; j = j + 1) { push(key2List, 0xFF - j) }
+var key2 = Buffer.fromList(key2List)
+var fbad = File.openEncrypted(P_ENC, "r", key2)
+assert_wrap(fbad == null, "13.8: openEncrypted(r) with wrong key -> null")
+
+// Round-trip with bytes payload as well.
+var bfwe = File.openEncrypted(P_ENC, "w", key1)
+bfwe.writeBytes(Buffer.fromList([0xCA, 0xFE, 0xBA, 0xBE]))
+bfwe.close()
+var bfre = File.openEncrypted(P_ENC, "r", key1)
+assert_wrap(bfre != null, "13.9: openEncrypted(w) then openEncrypted(r) roundtrip handle")
+var roundB = bfre.readBytes(4)
+bfre.close()
+assert_wrap(roundB.size() == 4 && roundB.hex() == "cafebabe", "13.10: encrypted Buffer round-trip")
+
+// openEncrypted on a non-existent path for read returns null.
+File.remove(P_ENC)
+var fmissE = File.openEncrypted(P_ENC, "r", key1)
+assert_wrap(fmissE == null, "13.11: openEncrypted(r) on missing file -> null")
+
+// openEncrypted is incompatible with openEncryptedPass on the wire: a file
+// written with openEncryptedPass cannot be read back with openEncrypted
+// (different key derivation), and vice-versa.
+var fpw = File.openEncryptedPass(P_ENC, "w", "hunter2")
+assert_wrap(fpw != null, "13.12: openEncryptedPass(w) opens for sanity check")
+fpw.writeString("pass-encrypted")
+fpw.close()
+var fcrossKey = File.openEncrypted(P_ENC, "r", key1)
+assert_wrap(fcrossKey == null, "13.13: openEncrypted cannot read openEncryptedPass file with arbitrary key")
+
+
+// ============================================================================
 // CLEAN UP
 // ============================================================================
 File.remove(P)
@@ -367,6 +431,7 @@ File.remove(P_BIN)
 File.remove(P_CSV)
 File.remove(P_COPY)
 File.remove(P_MOVE)
+File.remove(P_ENC)
 
 
 // ============================================================================

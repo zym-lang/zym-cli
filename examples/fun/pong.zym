@@ -1,0 +1,416 @@
+// pong.zym
+//
+// Terminal pong over ENet.
+// Usage:
+//   zym pong.zym -- server [port]     (default port 9100)
+//   zym pong.zym -- client [host] [port]
+//
+// Controls: W/S (left paddle), Up/Down arrows (right paddle on server side
+// when playing solo), Q to quit.
+// Two players: server controls left paddle, client controls right paddle.
+
+// ============================================================================
+//  Constants
+// ============================================================================
+
+#define WIDTH        80
+#define HEIGHT       24
+#define PADDLE_H     5
+#define BALL_CHAR    "O"
+#define PADDLE_CHAR  "|"
+#define SCORE_WIN    7
+#define TICK_MS      33       // ~30fps
+#define CHANNEL      0
+#define PORT_DEFAULT 9100
+
+// ============================================================================
+//  Shared helpers
+// ============================================================================
+
+func clampInt(v, lo, hi) {
+    if (v < lo) return lo
+    if (v > hi) return hi
+    return v
+}
+
+func absVal(v) {
+    if (v < 0) return -v
+    return v
+}
+
+// Pack game state into a compact string: "bx,by,bdx,bdy,lp,rp,ls,rs"
+func packState(bx, by, bdx, bdy, lp, rp, ls, rs) {
+    return str(floor(bx)) + "," + str(floor(by)) + "," +
+           str(bdx)       + "," + str(bdy)       + "," +
+           str(lp)        + "," + str(rp)         + "," +
+           str(ls)        + "," + str(rs)
+}
+
+func unpackState(s) {
+    var parts = split(s, ",")
+    return {
+        "bx":  num(parts[0]),
+        "by":  num(parts[1]),
+        "bdx": num(parts[2]),
+        "bdy": num(parts[3]),
+        "lp":  num(parts[4]),
+        "rp":  num(parts[5]),
+        "ls":  num(parts[6]),
+        "rs":  num(parts[7])
+    }
+}
+
+// ============================================================================
+//  Rendering
+// ============================================================================
+
+func drawFrame(bx, by, lp, rp, ls, rs) {
+    Console.moveCursor(1, 1)
+
+    // Score line
+    var scoreLine = "  " + str(ls) + "  :  " + str(rs) + "  "
+    var pad = floor((WIDTH - byteLength(scoreLine)) / 2)
+    var i = 0
+    while (i < pad) { Console.write(" "); ++i }
+    Console.setColor("yellow")
+    Console.write(scoreLine)
+    Console.reset()
+    Console.write("\n")
+
+    // Top border
+    i = 0
+    while (i < WIDTH) { Console.write("-"); ++i }
+    Console.write("\n")
+
+    // Play area rows
+    var row = 0
+    while (row < HEIGHT) {
+        var col = 0
+        while (col < WIDTH) {
+            var ch = " "
+            // Left paddle (col 1)
+            if (col == 1 && row >= lp && row < lp + PADDLE_H) {
+                ch = PADDLE_CHAR
+            }
+            // Right paddle (col WIDTH-2)
+            else if (col == WIDTH - 2 && row >= rp && row < rp + PADDLE_H) {
+                ch = PADDLE_CHAR
+            }
+            // Ball
+            else if (col == floor(bx) && row == floor(by)) {
+                ch = BALL_CHAR
+            }
+            Console.write(ch)
+            ++col
+        }
+        Console.write("\n")
+        ++row
+    }
+
+    // Bottom border
+    i = 0
+    while (i < WIDTH) { Console.write("-"); ++i }
+    Console.write("\n")
+    Console.flush()
+}
+
+func drawMessage(msg) {
+    Console.moveCursor(HEIGHT / 2 + 3, WIDTH / 2 - byteLength(msg) / 2)
+    Console.setColor("cyan")
+    Console.write(msg)
+    Console.reset()
+    Console.flush()
+}
+
+// ============================================================================
+//  SERVER
+// ============================================================================
+
+func runServer(port) {
+    var srv = ENet.listen("0.0.0.0", port, 2, 1)
+    if (srv == null) {
+        print("Could not listen on port %n\n", port)
+        return 1
+    }
+    print("Pong server listening on 0.0.0.0:%n\n", srv.localPort())
+    print("Waiting for client...\n")
+
+    // Wait for one client to connect
+    var clientPeer = null
+    var deadline = Time.ticksMsec() + 60000
+    while (clientPeer == null && Time.ticksMsec() < deadline) {
+        var ev = srv.service(100)
+        if (ev != null && ev["type"] == "connect") {
+            clientPeer = ev["peer"]
+            var pa = clientPeer.peerAddress()
+            print("Client connected from %s:%n\n", pa["host"], pa["port"])
+        }
+    }
+    if (clientPeer == null) {
+        print("No client connected within 60s\n")
+        srv.close()
+        return 1
+    }
+
+    // Init console
+    Console.useAltScreen()
+    Console.hideCursor()
+    Console.setRawMode(true)
+    Console.clear()
+
+    // Game state
+    var bx   = WIDTH / 2
+    var by   = HEIGHT / 2
+    var bdx  = 1
+    var bdy  = 1
+    var lp   = HEIGHT / 2 - PADDLE_H / 2   // server controls left
+    var rp   = HEIGHT / 2 - PADDLE_H / 2   // client controls right
+    var ls   = 0
+    var rs   = 0
+    var running = true
+
+    var lastTick = Time.ticksMsec()
+
+    while (running) {
+        // Handle ENet events (client paddle updates)
+        var ev = srv.service(0)
+        if (ev != null) {
+            if (ev["type"] == "receive") {
+                var msg = ev["data"].toUtf8()
+                if (msg == "UP")   rp = clampInt(rp - 1, 0, HEIGHT - PADDLE_H)
+                if (msg == "DOWN") rp = clampInt(rp + 1, 0, HEIGHT - PADDLE_H)
+                if (msg == "QUIT") running = false
+            } else if (ev["type"] == "disconnect") {
+                running = false
+            }
+        }
+
+        // Server input (left paddle)
+        if (Console.hasInput()) {
+            var ch = Console.readChar()
+            if (ch == "w" || ch == "W") lp = clampInt(lp - 1, 0, HEIGHT - PADDLE_H)
+            if (ch == "s" || ch == "S") lp = clampInt(lp + 1, 0, HEIGHT - PADDLE_H)
+            if (ch == "q" || ch == "Q") running = false
+        }
+
+        // Tick
+        var now = Time.ticksMsec()
+        if (now - lastTick >= TICK_MS) {
+            lastTick = now
+
+            // Move ball
+            bx = bx + bdx
+            by = by + bdy
+
+            // Top/bottom bounce
+            if (by <= 0) {
+                by = 0
+                bdy = 1
+            }
+            if (by >= HEIGHT - 1) {
+                by = HEIGHT - 1
+                bdy = -1
+            }
+
+            // Left paddle collision
+            if (bx <= 2 && by >= lp && by < lp + PADDLE_H) {
+                bx = 2
+                bdx = 1
+            }
+
+            // Right paddle collision
+            if (bx >= WIDTH - 3 && by >= rp && by < rp + PADDLE_H) {
+                bx = WIDTH - 3
+                bdx = -1
+            }
+
+            // Scoring
+            if (bx <= 0) {
+                rs++
+                bx = WIDTH / 2
+                by = HEIGHT / 2
+                bdx = 1
+                bdy = 1
+            }
+            if (bx >= WIDTH - 1) {
+                ls++
+                bx = WIDTH / 2
+                by = HEIGHT / 2
+                bdx = -1
+                bdy = 1
+            }
+
+            // Win check
+            if (ls >= SCORE_WIN || rs >= SCORE_WIN) {
+                running = false
+            }
+
+            // Send state to client
+            var state = packState(bx, by, bdx, bdy, lp, rp, ls, rs)
+            clientPeer.send(Buffer.fromString(state), CHANNEL, "unreliable")
+            srv.flush()
+
+            // Draw
+            drawFrame(bx, by, lp, rp, ls, rs)
+        }
+
+        System.sleepUsec(1000)
+    }
+
+    // Final frame
+    drawFrame(bx, by, lp, rp, ls, rs)
+    if (ls >= SCORE_WIN) {
+        drawMessage("  LEFT WINS!  Press any key...  ")
+    } else if (rs >= SCORE_WIN) {
+        drawMessage("  RIGHT WINS!  Press any key...  ")
+    } else {
+        drawMessage("  DISCONNECTED  ")
+    }
+    System.sleep(2000)
+
+    Console.setRawMode(false)
+    Console.showCursor()
+    Console.useMainScreen()
+
+    clientPeer.disconnect()
+    srv.flush()
+    srv.service(100)
+    srv.close()
+    return 0
+}
+
+// ============================================================================
+//  CLIENT
+// ============================================================================
+
+func runClient(host, port) {
+    var pair = ENet.connect(host, port, 1)
+    if (pair == null) {
+        print("Could not start ENet client\n")
+        return 1
+    }
+    var cli  = pair["host"]
+    var peer = pair["peer"]
+
+    // Handshake
+    print("Connecting to %s:%n...\n", host, port)
+    var deadline = Time.ticksMsec() + 5000
+    while (Time.ticksMsec() < deadline && peer.status() != "connected") {
+        cli.service(50)
+    }
+    if (peer.status() != "connected") {
+        print("Could not connect to server\n")
+        cli.close()
+        return 1
+    }
+    print("Connected!\n")
+
+    // Init console
+    Console.useAltScreen()
+    Console.hideCursor()
+    Console.setRawMode(true)
+    Console.clear()
+
+    var bx  = WIDTH / 2
+    var by  = HEIGHT / 2
+    var lp  = HEIGHT / 2 - PADDLE_H / 2
+    var rp  = HEIGHT / 2 - PADDLE_H / 2
+    var ls  = 0
+    var rs  = 0
+    var running = true
+
+    while (running) {
+        // Client input (right paddle)
+        if (Console.hasInput()) {
+            var ch = Console.readChar()
+            var msg = null
+            if (ch == "w" || ch == "W") msg = "UP"
+            if (ch == "s" || ch == "S") msg = "DOWN"
+            if (ch == "q" || ch == "Q") {
+                msg = "QUIT"
+                running = false
+            }
+            if (msg != null) {
+                peer.send(Buffer.fromString(msg), CHANNEL, "reliable")
+                cli.flush()
+            }
+        }
+
+        // Receive state from server
+        var ev = cli.service(0)
+        if (ev != null) {
+            if (ev["type"] == "receive") {
+                var state = unpackState(ev["data"].toUtf8())
+                bx = state["bx"]
+                by = state["by"]
+                lp = state["lp"]
+                rp = state["rp"]
+                ls = state["ls"]
+                rs = state["rs"]
+
+                drawFrame(bx, by, lp, rp, ls, rs)
+
+                if (ls >= SCORE_WIN || rs >= SCORE_WIN) {
+                    running = false
+                }
+            } else if (ev["type"] == "disconnect") {
+                running = false
+            }
+        }
+
+        System.sleepUsec(1000)
+    }
+
+    // Final
+    drawFrame(bx, by, lp, rp, ls, rs)
+    if (ls >= SCORE_WIN) {
+        drawMessage("  LEFT WINS!  ")
+    } else if (rs >= SCORE_WIN) {
+        drawMessage("  RIGHT WINS!  ")
+    } else {
+        drawMessage("  DISCONNECTED  ")
+    }
+    System.sleep(2000)
+
+    Console.setRawMode(false)
+    Console.showCursor()
+    Console.useMainScreen()
+
+    peer.disconnect()
+    cli.flush()
+    cli.service(100)
+    cli.close()
+    return 0
+}
+
+// ============================================================================
+//  Entry
+// ============================================================================
+
+func main(argv) {
+    if (length(argv) < 2) {
+        print("Usage:\n")
+        print("  zym pong.zym -- server [port]\n")
+        print("  zym pong.zym -- client [host] [port]\n")
+        return 1
+    }
+
+    var mode = argv[1]
+
+    if (mode == "server") {
+        var port = PORT_DEFAULT
+        if (length(argv) > 2) port = num(argv[2])
+        return runServer(port)
+    }
+
+    if (mode == "client") {
+        var host = "127.0.0.1"
+        var port = PORT_DEFAULT
+        if (length(argv) > 2) host = argv[2]
+        if (length(argv) > 3) port = num(argv[3])
+        return runClient(host, port)
+    }
+
+    print("Unknown mode: %s\n", mode)
+    return 1
+}

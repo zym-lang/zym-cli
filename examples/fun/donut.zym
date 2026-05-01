@@ -1,0 +1,374 @@
+// ======================================================
+//  Globals / constants
+// ======================================================
+
+#define WIDTH  60
+#define HEIGHT 40
+
+#define R1 1.0    // Inner radius (tube)
+#define R2 2.0    // Outer radius
+#define K2 5.0    // Distance from viewer
+
+#define PI     3.14159265
+#define TWO_PI 6.28318530
+
+##define SHADE(B)
+    ((B) > 0.90 ? "@" :
+     (B) > 0.75 ? "#" :
+     (B) > 0.60 ? "*" :
+     (B) > 0.45 ? "+" :
+     (B) > 0.30 ? ":" :
+     (B) > 0.15 ? "." : " ")
+##enddefine
+
+var ESC_BYTE = 27;
+
+// Console + buffers
+var zbuf;
+var colorR;
+var colorG;
+var colorB;
+var frameBuf;
+var ansiBuf;
+
+// Size-related globals
+var buffer_size;
+var ROW_STRIDE;
+var FRAME_SIZE;
+var K1;
+
+// Rotation state
+var A = 0.0;
+var B = 0.0;
+
+// Lights (directions + colors)
+var L1x; var L1y; var L1z;
+var L2x; var L2y; var L2z;
+var L1r; var L1g; var L1b;
+var L2r; var L2g; var L2b;
+var ambientR; var ambientG; var ambientB;
+
+// Light animation angles
+var lightAngle1 = 0.0;
+var lightAngle2 = 0.0;
+
+
+// ======================================================
+//  ANSI helpers
+// ======================================================
+
+func appendStr(buf, s) {
+    var i = 0;
+    var len = length(s);
+    while (i < len) {
+        buf.append(charCodeAt(s, i));
+        ++i;
+    }
+}
+
+func writeAnsiColorRGB(buf, r, g, b) {
+    r = clamp(floor(r), 0, 255);
+    g = clamp(floor(g), 0, 255);
+    b = clamp(floor(b), 0, 255);
+
+    buf.append(ESC_BYTE);
+    appendStr(buf, "[38;2;");
+    appendStr(buf, str(r));
+    buf.append(59);
+    appendStr(buf, str(g));
+    buf.append(59);
+    appendStr(buf, str(b));
+    buf.append(109);
+}
+
+func writeAnsiReset(buf) {
+    buf.append(ESC_BYTE);
+    appendStr(buf, "[0m");
+}
+
+
+// ======================================================
+//  Init functions
+// ======================================================
+
+func initConsole() {
+    Console.useAltScreen();
+    Console.hideCursor();
+    Console.clear();
+    Console.moveCursor(1, 1);
+    Console.writeLine("Spinning ASCII Donut in Zym (dual colored lights)...");
+    Console.writeLine("");
+    Console.flush();
+}
+
+func initLights() {
+    L1r = 255.0; L1g = 200.0; L1b = 80.0;
+    L2r = 80.0;  L2g = 160.0; L2b = 255.0;
+
+    ambientR = 15.0;
+    ambientG = 8.0;
+    ambientB = 20.0;
+
+    lightAngle1 = 0.0;
+    lightAngle2 = 1.57;
+}
+
+func initBuffers() {
+    buffer_size = WIDTH * HEIGHT;
+    ROW_STRIDE = WIDTH + 1;
+    FRAME_SIZE = ROW_STRIDE * HEIGHT;
+
+    zbuf   = [];
+    colorR = [];
+    colorG = [];
+    colorB = [];
+
+    var i = 0;
+    while (i < buffer_size) {
+        push(zbuf,   0.0);
+        push(colorR, 0.0);
+        push(colorG, 0.0);
+        push(colorB, 0.0);
+        ++i;
+    }
+
+    // Frame buffer: fixed-size, pre-filled with spaces
+    frameBuf = Buffer.new(FRAME_SIZE);
+
+    // ANSI output buffer — preallocated, reused each frame via clear()
+    ansiBuf = Buffer.new(FRAME_SIZE * 20);
+
+    K1 = (WIDTH * 1.0) * K2 * 3.0 / (8.0 * (R1 + R2));
+}
+
+
+// ======================================================
+//  Per-frame helpers
+// ======================================================
+
+func resetFrameBuffers() {
+    var k = 0;
+    while (k < buffer_size) {
+        zbuf[k]   = 0.0;
+        colorR[k] = 0.0;
+        colorG[k] = 0.0;
+        colorB[k] = 0.0;
+        ++k;
+    }
+
+    // Fill char buffer with spaces (ASCII 32)
+    frameBuf.fill(32);
+
+    // Write newlines at row ends
+    var y = 0;
+    while (y < HEIGHT) {
+        var newlineIndex = y * ROW_STRIDE + WIDTH;
+        frameBuf.encodeU8(newlineIndex, 10);   // '\n'
+        ++y;
+    }
+}
+
+func renderTorusFrame() {
+    var sinA = sin(A);
+    var cosA = cos(A);
+    var sinB = sin(B);
+    var cosB = cos(B);
+
+    var j = 0.0;
+    while (j < TWO_PI) {
+        var sin_j = sin(j);
+        var cos_j = cos(j);
+
+        var theta = 0.0;
+        while (theta < TWO_PI) {
+            var sin_t = sin(theta);
+            var cos_t = cos(theta);
+
+            var circle_x = R2 + R1 * cos_t;
+            var circle_y = R1 * sin_t;
+
+            var x0 = circle_x * cos_j;
+            var y0 = circle_y;
+            var z0 = circle_x * sin_j;
+
+            var nx0 = cos_t * cos_j;
+            var ny0 = sin_t;
+            var nz0 = cos_t * sin_j;
+
+            var x1 = x0;
+            var y1 = y0 * cosA - z0 * sinA;
+            var z1 = y0 * sinA + z0 * cosA;
+
+            var x = x1 * cosB - y1 * sinB;
+            var y = x1 * sinB + y1 * cosB;
+            var z = z1 + K2;
+
+            var inv_z = 1.0 / z;
+
+            var nnx1 = nx0;
+            var nny1 = ny0 * cosA - nz0 * sinA;
+            var nnz1 = ny0 * sinA + nz0 * cosA;
+
+            var nx = nnx1 * cosB - nny1 * sinB;
+            var ny = nnx1 * sinB + nny1 * cosB;
+            var nz = nnz1;
+
+            var dot1 = nx * L1x + ny * L1y + nz * L1z;
+            if (dot1 < 0.0) dot1 = 0.0;
+
+            var dot2 = nx * L2x + ny * L2y + nz * L2z;
+            if (dot2 < 0.0) dot2 = 0.0;
+
+            var brightness = 0.20 + 0.40 * dot1 + 0.40 * dot2;
+            if (brightness > 1.0) brightness = 1.0;
+
+            var r = ambientR + L1r * dot1 + L2r * dot2;
+            var g = ambientG + L1g * dot1 + L2g * dot2;
+            var b = ambientB + L1b * dot1 + L2b * dot2;
+
+            var proj_x = (WIDTH * 0.5)  + K1 * inv_z * x;
+            var proj_y = (HEIGHT * 0.5) - K1 * inv_z * y;
+
+            var xp = clamp(floor(proj_x), 0, WIDTH  - 1);
+            var yp = clamp(floor(proj_y), 0, HEIGHT - 1);
+
+            var idx = xp + WIDTH * yp;
+
+            if (inv_z > zbuf[idx]) {
+                zbuf[idx] = inv_z;
+
+                colorR[idx] = clamp(floor(r), 0, 255);
+                colorG[idx] = clamp(floor(g), 0, 255);
+                colorB[idx] = clamp(floor(b), 0, 255);
+
+                var shade = SHADE(brightness);
+                var bufIndex = xp + yp * ROW_STRIDE;
+                frameBuf.encodeU8(bufIndex, charCodeAt(shade, 0));
+            }
+
+            theta += 0.07;
+        }
+
+        j += 0.02;
+    }
+}
+
+func buildAnsiFrame() {
+    ansiBuf.clear();
+    writeAnsiReset(ansiBuf);
+
+    var prevR = -1;
+    var prevG = -1;
+    var prevB = -1;
+
+    var y2 = 0;
+    while (y2 < HEIGHT) {
+        var x2 = 0;
+        while (x2 < WIDTH) {
+            var idx2 = x2 + WIDTH * y2;
+
+            var rr = colorR[idx2];
+            var gg = colorG[idx2];
+            var bb = colorB[idx2];
+
+            if (rr == 0.0 && gg == 0.0 && bb == 0.0) {
+                rr = 30.0;
+                gg = 30.0;
+                bb = 30.0;
+            }
+
+            if (rr != prevR || gg != prevG || bb != prevB) {
+                writeAnsiColorRGB(ansiBuf, rr, gg, bb);
+                prevR = rr;
+                prevG = gg;
+                prevB = bb;
+            }
+
+            var charPos = x2 + y2 * ROW_STRIDE;
+            var code = frameBuf.decodeU8(charPos);
+            ansiBuf.append(code);
+
+            ++x2;
+        }
+
+        ansiBuf.append(10);  // '\n'
+        ++y2;
+    }
+
+    writeAnsiReset(ansiBuf);
+}
+
+func updateLights() {
+    lightAngle1 += 0.03;
+    lightAngle2 -= 0.017;
+
+    if (lightAngle1 > TWO_PI)  lightAngle1 -= TWO_PI;
+    if (lightAngle2 < -TWO_PI) lightAngle2 += TWO_PI;
+
+    var c1 = cos(lightAngle1);
+    var s1 = sin(lightAngle1);
+
+    L1x = c1;
+    L1y = 0.7;
+    L1z = s1 * -1;
+
+    var len1 = sqrt(L1x*L1x + L1y*L1y + L1z*L1z);
+    L1x /= len1;
+    L1y /= len1;
+    L1z /= len1;
+
+    var c2 = cos(lightAngle2);
+    var s2 = sin(lightAngle2);
+
+    L2x = c2 * -1.0;
+    L2y = 0.3 + 0.2 * s2;
+    L2z = s2 * -0.7;
+
+    var len2 = sqrt(L2x*L2x + L2y*L2y + L2z*L2z);
+    L2x /= len2;
+    L2y /= len2;
+    L2z /= len2;
+}
+
+func drawFrame() {
+    Console.moveCursor(3, 1);
+    Console.writeBuffer(ansiBuf);
+}
+
+func main(argv) {
+    initConsole();
+    initLights();
+    initBuffers();
+
+    var frame = 0;
+
+    var lastTime = Time.clock();
+    var fpsFrame = 0;
+
+    while (frame < 100000) {
+        resetFrameBuffers();
+        updateLights();
+        renderTorusFrame();
+        buildAnsiFrame();
+        drawFrame();
+
+        A += 0.04;
+        B += 0.02;
+
+        ++frame;
+
+        ++fpsFrame;
+        if (fpsFrame >= 30) {
+            var now = Time.clock();
+            var fps = 30.0 / (now - lastTime);
+            Console.moveCursor(1, 1);
+            Console.write("FPS: " + str(floor(fps)) + "   ");
+            lastTime = now;
+            fpsFrame = 0;
+        }
+    }
+
+    Console.showCursor();
+    Console.useMainScreen();
+    return 0;
+}

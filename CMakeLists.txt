@@ -57,6 +57,17 @@ set(APP_SOURCES
         src/godot_host.cpp
         src/boot/register_core.hpp
         src/boot/register_core.cpp
+        # Link-time stubs for `RenderingDevice::get_singleton`,
+        # `RenderingDevice::_set_max_fps(int)`, and
+        # `RenderingServer::get_singleton` -- vtable-pinned by
+        # `memnew(Engine)` (godot_host.cpp) and `memnew(OS_LinuxBSD)`
+        # (register_core.cpp). Defining these here lets the link drop
+        # `libservers.a` (commented out in `ZYM_GODOT_SUBLIBS` below) by
+        # resolving the three otherwise-undefined references LTO emits
+        # from `Engine::set_max_fps` and
+        # `OS_LinuxBSD::get_video_adapter_driver_info`. See the file
+        # header for full rationale.
+        src/boot/rendering_stubs.cpp
 )
 
 set(ZYM_NATIVE_SOURCES
@@ -133,9 +144,6 @@ if(ZYM_GODOT_PLATFORM STREQUAL "linux_x86_64")
 endif()
 set(ZYM_GODOT_SUBLIBS
         "${ZYM_GODOT_BIN_DIR}/obj/platform/libplatform.${ZYM_GODOT_LIB_SUFFIX}.a"
-        "${ZYM_GODOT_BIN_DIR}/obj/main/libmain.${ZYM_GODOT_LIB_SUFFIX}.a"
-        "${ZYM_GODOT_BIN_DIR}/obj/scene/libscene.${ZYM_GODOT_LIB_SUFFIX}.a"
-        "${ZYM_GODOT_BIN_DIR}/obj/servers/libservers.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/drivers/libdrivers.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodules.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_regex.${ZYM_GODOT_LIB_SUFFIX}.a"
@@ -218,6 +226,36 @@ target_link_options(zym PRIVATE
         $<IF:$<CONFIG:Release>,-flto,-flto=auto>
         -no-pie)
 
+# Identical Code Folding via gold. Folds bytewise-identical functions emitted
+# as separate symbols -- in this build that's the long tail of vtable-pinned
+# ClassDB reflection thunks (`*::_property_can_revertv`,
+# `_property_get_revertv`, `_validate_propertyv`, `_notification_backwardv`)
+# and the duplicated template instantiations of `Ref<>::~Ref()`,
+# `CowData<>::_ref()`, `_convert_array<>()`, `Variant::PackedArrayRef<>::~PackedArrayRef()`,
+# `HashMap<>::~HashMap()`, etc. that LTO emits per partition. `--icf=safe`
+# only folds functions whose addresses aren't taken (safe under C++ identity
+# rules), so it can't break vtable dispatch or function-pointer comparison.
+#
+# We deliberately use gold (not lld) here. `libgodot.a` is built with GCC
+# `lto=full`, and our own TUs are compiled with `-flto` under GCC, so every
+# input `.o` carries GCC LTO IR in `.gnu.lto_*` sections rather than native
+# code. Only `ld.bfd` and `ld.gold` understand the GCC LTO plugin protocol
+# (`liblto_plugin.so`); `ld.lld` cannot parse GCC bitcode and reports the
+# IR-only TUs' contents as undefined (e.g. `undefined symbol: main` from
+# crt1.o referencing a `main` that lives only in IR). Plain BFD ld would
+# work but doesn't implement ICF, so gold is the only linker that gives us
+# both the GCC LTO pipeline and `--icf=safe`.
+find_program(ZYM_GOLD_EXECUTABLE NAMES ld.gold gold)
+if(ZYM_GOLD_EXECUTABLE)
+    message(STATUS ">> ICF: using ${ZYM_GOLD_EXECUTABLE} (-fuse-ld=gold -Wl,--icf=safe)")
+    target_link_options(zym PRIVATE
+            -fuse-ld=gold
+            "-Wl,--icf=safe"
+    )
+else()
+    message(STATUS ">> ICF: no ld.gold found; skipping --icf=safe (BFD ld has no ICF, lld is incompatible with GCC LTO)")
+endif()
+
 target_link_libraries(zym PRIVATE
         -Wl,--whole-archive
         "${ZYM_GODOT_LIB_PATH}"
@@ -234,7 +272,8 @@ if(USE_COMPRESSION AND (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE 
     if(ZYM_UPX_EXECUTABLE)
         message(STATUS ">> UPX: found at ${ZYM_UPX_EXECUTABLE} (will pack ${CMAKE_BUILD_TYPE} zym)")
         add_custom_command(TARGET zym POST_BUILD
-                COMMAND "${ZYM_UPX_EXECUTABLE}" --best --lzma "$<TARGET_FILE:zym>"
+                #COMMAND "${ZYM_UPX_EXECUTABLE}" --best --lzma "$<TARGET_FILE:zym>"
+                COMMAND "${ZYM_UPX_EXECUTABLE}" --best --nrv2e "$<TARGET_FILE:zym>"
                 COMMENT "Compressing $<TARGET_FILE_NAME:zym> with UPX"
                 VERBATIM
         )

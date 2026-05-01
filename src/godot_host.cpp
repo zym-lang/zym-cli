@@ -69,7 +69,7 @@ bool init() {
     // ProjectSettings itself.
     zym::boot::register_core_types();
     g_packed_data      = memnew(PackedData);
-    g_project_settings = memnew(ProjectSettings);
+    //g_project_settings = memnew(ProjectSettings);
     // register_core_settings() intentionally NOT called: its 6 GLOBAL_DEFs
     // configure (a) network/limits/{tcp,unix,packet_peer_stream} +
     // network/tls/certificate_bundle_override -- consumed only by the
@@ -119,10 +119,10 @@ void shutdown() {
         memdelete(g_packed_data);
         g_packed_data = nullptr;
     }
-    if (g_project_settings) {
+    /*if (g_project_settings) {
         memdelete(g_project_settings);
         g_project_settings = nullptr;
-    }
+    }*/
     if (g_engine) {
         memdelete(g_engine);
         g_engine = nullptr;

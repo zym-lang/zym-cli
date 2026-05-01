@@ -13,7 +13,7 @@ or `X509Certificate`) whose methods are invoked as `h.method(...)`.
 
 - **Byte payloads.** All binary inputs and outputs (random bytes,
   hashes, signatures, ciphertexts, keys for HMAC) are exchanged through
-  the Zym `Buffer` native (which wraps `PackedByteArray`). Use
+  the Zym `Buffer` native. Use
   `Buffer.fromString(...)` to lift script strings, and `b.size()` /
   `b[i]` to inspect the result.
 - **Hash type.** Methods that name a hash use a string identifier:

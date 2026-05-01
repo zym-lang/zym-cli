@@ -25,3 +25,4 @@ ZymValue nativeSockets_create(ZymVM* vm);
 ZymValue nativeTls_create(ZymVM* vm);
 ZymValue nativeDtls_create(ZymVM* vm);
 ZymValue nativeEnet_create(ZymVM* vm);
+ZymValue nativeAes_create(ZymVM* vm);

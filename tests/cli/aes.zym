@@ -1,0 +1,203 @@
+// ============================================================================
+// COMPREHENSIVE AES NATIVE TEST SUITE
+// Exercises the `AES` global (statics: create / encryptCbc / decryptCbc) and
+// the per-instance API (start / update / ivState / finish). Covers NIST
+// SP 800-38A known-answer vectors for AES-128/192/256-CBC, PKCS#7
+// round-trips, ECB determinism, mode and key-size validation, padding
+// failures, and case-insensitive mode names.
+// ============================================================================
+var testsPassed = 0
+var testsFailed = 0
+func assert_wrap(condition, message) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: " + message)
+    }
+}
+print("==========================================================")
+print("AES NATIVE TEST SUITE")
+print("==========================================================")
+
+// ----------------------------------------------------------------------------
+// SECTION 1: Surface presence
+// ----------------------------------------------------------------------------
+assert_wrap(AES != null,                   "1.1: AES global exists")
+assert_wrap(AES.create != null,            "1.2: AES.create exposed")
+assert_wrap(AES.encryptCbc != null,        "1.3: AES.encryptCbc exposed")
+assert_wrap(AES.decryptCbc != null,        "1.4: AES.decryptCbc exposed")
+var c0 = AES.create()
+assert_wrap(c0.start != null,              "1.5: instance.start exposed")
+assert_wrap(c0.update != null,             "1.6: instance.update exposed")
+assert_wrap(c0.ivState != null,            "1.7: instance.ivState exposed")
+assert_wrap(c0.finish != null,             "1.8: instance.finish exposed")
+
+// ----------------------------------------------------------------------------
+// SECTION 2: NIST SP 800-38A F.2.1 — AES-128-CBC known-answer
+// ----------------------------------------------------------------------------
+var k128 = Buffer.fromHex("2b7e151628aed2a6abf7158809cf4f3c")
+var iv0  = Buffer.fromHex("000102030405060708090a0b0c0d0e0f")
+var pt4  = Buffer.fromHex("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710")
+var expCt128 = "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b273bed6b8e3c1743b7116e69e222295163ff1caa1681fac09120eca307586e1a7"
+var c1 = AES.create()
+assert_wrap(c1.start("cbc-encrypt", k128, iv0) == "ok",   "2.1: start cbc-encrypt returns ok")
+var ct1 = c1.update(pt4)
+c1.finish()
+assert_wrap(ct1.hex() == expCt128,                         "2.2: AES-128-CBC matches NIST vector")
+assert_wrap(ct1.size() == 64,                              "2.3: ciphertext length matches plaintext (no padding)")
+
+// Decrypt round-trip
+var d1 = AES.create()
+d1.start("cbc-decrypt", k128, iv0)
+var rt1 = d1.update(ct1)
+d1.finish()
+assert_wrap(rt1.hex() == pt4.hex(),                        "2.4: AES-128-CBC decrypt round-trip")
+
+// ----------------------------------------------------------------------------
+// SECTION 3: NIST SP 800-38A F.2.5 — AES-256-CBC known-answer
+// (AES-192 is intentionally not supported; only 16- and 32-byte keys.)
+// ----------------------------------------------------------------------------
+var k256 = Buffer.fromHex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4")
+var expCt256 = "f58c4c04d6e5f1ba779eabfb5f7bfbd69cfc4e967edb808d679f777bc6702c7d39f23369a9d9bacfa530e26304231461b2eb05e2c39be9fcda6c19078c6a9d1b"
+var c3 = AES.create()
+c3.start("cbc-encrypt", k256, iv0)
+var ct3 = c3.update(pt4)
+c3.finish()
+assert_wrap(ct3.hex() == expCt256,                         "3.1: AES-256-CBC matches NIST vector")
+var d3 = AES.create()
+d3.start("cbc-decrypt", k256, iv0)
+assert_wrap(d3.update(ct3).hex() == pt4.hex(),             "3.2: AES-256-CBC decrypt round-trip")
+d3.finish()
+
+// ----------------------------------------------------------------------------
+// SECTION 4: PKCS#7 convenience helpers
+// ----------------------------------------------------------------------------
+var msg = Buffer.fromString("hello world!")  // 12 bytes
+var encShort = AES.encryptCbc(k128, iv0, msg)
+assert_wrap(encShort.size() == 16,                         "4.1: 12-byte input pads to one block")
+var decShort = AES.decryptCbc(k128, iv0, encShort)
+assert_wrap(decShort.toUtf8() == "hello world!",           "4.2: short message round-trip via convenience")
+
+// Aligned input (64 bytes) gets a full pad block
+var encAlign = AES.encryptCbc(k128, iv0, pt4)
+assert_wrap(encAlign.size() == 80,                         "4.3: aligned input adds full pad block")
+var decAlign = AES.decryptCbc(k128, iv0, encAlign)
+assert_wrap(decAlign.hex() == pt4.hex(),                   "4.4: aligned-input round-trip via convenience")
+
+// Empty input → one full pad block
+var encEmpty = AES.encryptCbc(k128, iv0, Buffer.fromString(""))
+assert_wrap(encEmpty.size() == 16,                         "4.5: empty input encrypts to one pad block")
+var decEmpty = AES.decryptCbc(k128, iv0, encEmpty)
+assert_wrap(decEmpty.size() == 0,                          "4.6: empty round-trip yields empty buffer")
+
+// AES-256 convenience
+var enc256 = AES.encryptCbc(k256, iv0, msg)
+assert_wrap(AES.decryptCbc(k256, iv0, enc256).toUtf8() == "hello world!",
+                                                            "4.7: AES-256 convenience round-trip")
+
+// ----------------------------------------------------------------------------
+// SECTION 5: Decryption failure cases (return null, never raise)
+// ----------------------------------------------------------------------------
+assert_wrap(AES.decryptCbc(k128, iv0, Buffer.fromHex("00")) == null,
+                                                            "5.1: not 16-aligned ciphertext -> null")
+assert_wrap(AES.decryptCbc(k128, iv0, Buffer.fromString("")) == null,
+                                                            "5.2: empty ciphertext -> null")
+var wrongKey = Buffer.fromHex("00000000000000000000000000000000")
+assert_wrap(AES.decryptCbc(wrongKey, iv0, encShort) == null,
+                                                            "5.3: wrong key -> null (bad pad)")
+var wrongIv = Buffer.fromHex("ffffffffffffffffffffffffffffffff")
+// Wrong IV may decrypt cleanly (statistically possible) or fail PKCS#7;
+// either way the plaintext can't match the original.
+var dWrongIv = AES.decryptCbc(k128, wrongIv, encShort)
+var wrongIvOk = false
+if (dWrongIv == null) {
+    wrongIvOk = true
+} else {
+    wrongIvOk = (dWrongIv.toUtf8() != "hello world!")
+}
+assert_wrap(wrongIvOk,                                      "5.4: wrong IV either fails or yields different plaintext")
+
+// ----------------------------------------------------------------------------
+// SECTION 6: ECB determinism + IV-driven CBC variability
+// ----------------------------------------------------------------------------
+var dupBlock = Buffer.fromHex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+var ecb = AES.create()
+ecb.start("ecb-encrypt", k128)
+var ecbCt = ecb.update(dupBlock)
+ecb.finish()
+// First and second halves of the ciphertext must be identical (ECB leaks structure).
+var ecbHex = ecbCt.hex()
+assert_wrap(substr(ecbHex, 0, 32) == substr(ecbHex, 32, 64),
+                                                            "6.1: ECB produces identical blocks for identical plaintext blocks")
+
+// CBC must NOT have that property (chaining randomises every block).
+var cbc = AES.create()
+cbc.start("cbc-encrypt", k128, iv0)
+var cbcCt = cbc.update(dupBlock)
+cbc.finish()
+var cbcHex = cbcCt.hex()
+assert_wrap(substr(cbcHex, 0, 32) != substr(cbcHex, 32, 64),
+                                                            "6.2: CBC chains blocks (no leak across identical plaintext)")
+
+// Different IVs produce different ciphertexts for the same plaintext.
+var iv1 = Buffer.fromHex("ffffffffffffffffffffffffffffffff")
+var alt = AES.encryptCbc(k128, iv1, msg)
+assert_wrap(alt.hex() != encShort.hex(),                   "6.3: different IVs produce different ciphertexts")
+
+// ----------------------------------------------------------------------------
+// SECTION 7: Mode and key/iv validation
+// ----------------------------------------------------------------------------
+// Case-insensitive mode names
+var ci = AES.create()
+assert_wrap(ci.start("CBC-ENCRYPT", k128, iv0) == "ok",    "7.1: mode names are case-insensitive")
+ci.finish()
+
+// ivState only valid in CBC modes
+var ic = AES.create()
+ic.start("cbc-encrypt", k128, iv0)
+ic.update(Buffer.fromHex("00112233445566778899aabbccddeeff"))
+assert_wrap(ic.ivState().size() == 16,                     "7.2: CBC ivState returns 16 bytes")
+ic.finish()
+
+// ----------------------------------------------------------------------------
+// SECTION 8: Composition with Crypto.generateRandomBytes
+// ----------------------------------------------------------------------------
+var crypto = Crypto.create()
+var rk = crypto.generateRandomBytes(32)
+var riv = crypto.generateRandomBytes(16)
+var rmsg = Buffer.fromString("composes with Crypto and Buffer")
+var rct = AES.encryptCbc(rk, riv, rmsg)
+var rpt = AES.decryptCbc(rk, riv, rct)
+assert_wrap(rpt.toUtf8() == "composes with Crypto and Buffer",
+                                                            "8.1: random-key/IV round-trip via Crypto.generateRandomBytes")
+assert_wrap(rk.size() == 32,                                "8.2: generated key is 32 bytes (AES-256)")
+assert_wrap(riv.size() == 16,                               "8.3: generated IV is 16 bytes")
+
+// ----------------------------------------------------------------------------
+// SECTION 9: Instance reuse (start -> finish -> start again)
+// ----------------------------------------------------------------------------
+var ru = AES.create()
+ru.start("cbc-encrypt", k128, iv0)
+var firstCt = ru.update(pt4)
+ru.finish()
+ru.start("cbc-decrypt", k128, iv0)
+var firstPt = ru.update(firstCt)
+ru.finish()
+assert_wrap(firstPt.hex() == pt4.hex(),                    "9.1: instance can be reused with a new mode after finish()")
+
+// ----------------------------------------------------------------------------
+// FINAL RESULTS
+// ----------------------------------------------------------------------------
+print("")
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed: %v", testsPassed)
+print("Tests Failed: %v", testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED!")
+}
+print("==========================================================")

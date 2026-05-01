@@ -95,7 +95,7 @@ exec scons \
     arch=x86_64 \
     library_type=static_library \
     lto=full \
-    optimize=size_extra \
+    optimize=speed \
     production=yes \
     \
     modules_enabled_by_default=no \

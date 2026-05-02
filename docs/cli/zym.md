@@ -18,6 +18,42 @@ see `docs/buffer.md`.
 
 ---
 
+## Quick start
+
+The shortest end-to-end path: spin up a VM, register one parent
+native, compile and run a script that uses it, call a function on the
+child, then free the VM.
+
+```zym
+var src = "
+    func greet(who) {
+        return hostHello(who)
+    }
+"
+
+var vm = Zym.newVM()
+vm.registerNative("hostHello(who)", func(who) { return "hi " + who })
+
+var sm  = vm.newSourceMap()
+var fid = vm.registerSourceFile("entry.zym", src)
+var ch  = vm.newChunk()
+
+vm.compile(src, ch, sm, "entry.zym", { includeLineInfo: true })
+vm.runChunk(ch)
+
+vm.call("greet", ["ada"])
+print(vm.callResult())            // hi ada
+
+vm.free()
+```
+
+That's the whole loop. Everything else in this document is either an
+elaboration of one of these steps (capability grants, multi-file
+compiles, bytecode round-trips, diagnostics) or a different value
+shape crossing the bridge.
+
+---
+
 ## Conventions
 
 - **Capability-gated.** `Zym` itself is a regular catalog entry: a
@@ -181,6 +217,90 @@ vm2.runChunk(ch2)
 vm2.call("answer", [])
 print(vm2.callResult())              // 42
 ```
+
+### Multi-file compile with `loadModules`
+
+`loadModules` mirrors the C-side `readAndPreprocessCallback` pipeline:
+the parent supplies a `callback(path)` that resolves each `import` it
+encounters, and `loadModules` returns a single combined preprocessed
+source ready for `compile`. The callback runs with the **parent's**
+capabilities (it's a parent closure), so a child without `File`
+cannot read modules — the closure simply isn't expressible.
+
+The callback must return a map shaped exactly like the C
+`ModuleReadResult`:
+
+```zym
+{ source: <string>, sourceMap: <SourceMap>, fileId: <int> }
+```
+
+Returning `null` signals "file not found"; the loader will push a
+diagnostic and continue.
+
+```zym
+var entry = "
+    import \"./mathx\"
+    import \"./greet\"
+    func main() {
+        return greet_for(\"ada\", mathx_double(21))
+    }
+"
+var mathx = "func mathx_double(x) { return x * 2 }"
+var greet = "
+    func greet_for(name, n) {
+        return { who: name, count: n }
+    }
+"
+
+var vm  = Zym.newVM()
+vm.registerCliNative(["File", "Path"])    // grant whatever the callback needs
+
+var sm  = vm.newSourceMap()
+var fid = vm.registerSourceFile("entry.zym", entry)
+var pre = vm.preprocess(entry, sm, fid)
+
+// In real code the callback would consult File / Path; here we serve
+// a tiny in-memory module map so the example is self-contained.
+var modules = {
+    "./mathx": mathx,
+    "./greet": greet,
+}
+
+var loaded = vm.loadModules(pre.source, sm, "entry.zym",
+    func(path) {
+        if (!modules[path]) { return null }       // miss → diagnostic
+        var raw = modules[path]
+        var sub = vm.registerSourceFile(path, raw)
+        var pp  = vm.preprocess(raw, sm, sub)
+        return { source: pp.source, sourceMap: sm, fileId: sub }
+    },
+    { debugNames: true }
+)
+
+if (loaded.status == Zym.STATUS.OK) {
+    var ch = vm.newChunk()
+    vm.compile(loaded.combinedSource, ch, sm, "entry.zym", { includeLineInfo: true })
+    vm.runChunk(ch)
+    vm.call("main", [])
+    var r = vm.callResult()
+    print(r.who)                                   // ada
+    print(r.count)                                 // 42
+    print(loaded.modulePaths)                      // [./mathx, ./greet, entry.zym]
+} else {
+    // loaded.error is set; full details are in vm.diagnostics()
+    for (d in vm.diagnostics()) { print(d.message) }
+}
+```
+
+Notes:
+
+- The callback closes over whatever parent state it needs (`vm`, `sm`,
+  a packed-bytecode index, a virtual filesystem, etc.). Different
+  `loadModules` calls can pass different callbacks.
+- `loaded.modulePaths` lists the resolved paths in load order — useful
+  for diagnostics, caching, and watch-mode reloads.
+- `loadModules` does **not** flip the child into execution phase on its
+  own; the subsequent `compile` call does.
 
 ### Calling regular (fixed-arity) functions
 

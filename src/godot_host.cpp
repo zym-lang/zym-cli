@@ -69,7 +69,12 @@ bool init() {
     // ProjectSettings itself.
     zym::boot::register_core_types();
     g_packed_data      = memnew(PackedData);
-    //g_project_settings = memnew(ProjectSettings);
+    // ProjectSettings is required even though zym does not load a project.
+    // `StreamPeerTCP::connect_to_host` (and other networking paths)
+    // unconditionally dereference `ProjectSettings::get_singleton()` via
+    // `GLOBAL_GET("network/limits/tcp/connect_timeout_seconds")`. Leaving
+    // the singleton null causes a SIGSEGV on the very first `TCP.connect`.
+    g_project_settings = memnew(ProjectSettings);
     // register_core_settings() intentionally NOT called: its 6 GLOBAL_DEFs
     // configure (a) network/limits/{tcp,unix,packet_peer_stream} +
     // network/tls/certificate_bundle_override -- consumed only by the
@@ -119,10 +124,10 @@ void shutdown() {
         memdelete(g_packed_data);
         g_packed_data = nullptr;
     }
-    /*if (g_project_settings) {
+    if (g_project_settings) {
         memdelete(g_project_settings);
         g_project_settings = nullptr;
-    }*/
+    }
     if (g_engine) {
         memdelete(g_engine);
         g_engine = nullptr;

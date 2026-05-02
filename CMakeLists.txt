@@ -27,12 +27,12 @@ elseif(PGO_MODE STREQUAL "USE")
 endif()
 
 set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION OFF)
+set(USE_COMPRESSION ON)
 # USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
 # on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
 # binary so engine-level error and warning output is suppressed at startup
 # (zym's own runtime errors are unaffected). See src/boot/register_core.cpp.
-set(USE_ENGINE_ERRORS ON)
+set(USE_ENGINE_ERRORS OFF)
 
 cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)

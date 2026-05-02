@@ -52,6 +52,15 @@ struct ZymCliVmCtx {
     // so iteration / `cliNatives()` returns a stable order without
     // an extra sort.
     std::vector<std::string> available;
+    // When true, this ctx is owned by some external structure (e.g. a
+    // parent-side ChildVmHandle for a child VM) and the closure-bound
+    // finalizer in `nativeZym_create` MUST NOT free it. Used so that
+    // a child VM granted `Zym` (which would otherwise install the
+    // freeing finalizer on the child) doesn't double-free the ctx
+    // owned by its parent's handle. Defaults to false (root VM case:
+    // `cli_catalog_install_all` allocates the ctx and the Zym
+    // finalizer is its sole owner).
+    bool externalOwner = false;
 };
 
 // Returns the declaration-order list of grantable catalog names (does

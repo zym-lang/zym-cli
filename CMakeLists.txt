@@ -68,6 +68,11 @@ set(APP_SOURCES
         # `OS_LinuxBSD::get_video_adapter_driver_info`. See the file
         # header for full rationale.
         src/boot/rendering_stubs.cpp
+        src/pack/zpk_format.h
+        src/pack/zpk_writer.hpp
+        src/pack/zpk_writer.cpp
+        src/pack/zpk_reader.hpp
+        src/pack/zpk_reader.cpp
 )
 
 set(ZYM_NATIVE_SOURCES

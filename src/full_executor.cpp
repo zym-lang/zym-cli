@@ -21,11 +21,15 @@
 #include "full_executor.hpp"
 #include "runtime_loader.hpp"
 #include "natives/natives.hpp"
+#include "pack/zpk_format.h"
+#include "pack/zpk_writer.hpp"
 #include "zym/zym.h"
 #include "zym/module_loader.h"
 #include "zym/debug.h"
 
-#define FOOTER_MAGIC "ZYMBCODE"
+// Legacy `ZYMBCODE` footer magic was removed when the CLI switched to
+// the `.zpk` container format. See `docs/formats/zpk.md` and
+// `src/pack/zpk_format.h`.
 
 // ---------------------------------------------------------------------------
 // Phase 1.7 — rich diagnostic rendering.
@@ -429,7 +433,12 @@ static int has_extension(const char* path, const char* ext) {
     return strcmp(path + path_len - ext_len, ext) == 0;
 }
 
+// "Pack into a .zpk bundle" target. Either a stub-wrapped executable
+// (anything-but-`.zbc` on POSIX, `.exe` on Windows) or a headless
+// `.zpk` file. Both routes go through `pack_bytecode_into_exe`, which
+// switches on the `.zpk` extension to omit the stub.
 static int is_exe_output(const char* path) {
+    if (has_extension(path, ".zpk")) return 1;
 #ifdef _WIN32
     return has_extension(path, ".exe");
 #else
@@ -438,66 +447,70 @@ static int is_exe_output(const char* path) {
 #endif
 }
 
+// Pack the given bytecode into a `.zpk` bundle on disk.
+//
+// If `runtime_path` is non-null (or, when null, the running executable
+// is itself a CLI stub), the bundle is emitted as a stub-wrapped
+// native executable: `[stub][payload][strtab][manifest][footer]`.
+// When `output_path` ends in `.zpk` the stub is omitted entirely and
+// a headless bundle is produced.
+//
+// The on-disk shape is documented in `docs/formats/zpk.md` and
+// implemented by `src/pack/zpk_writer`. The single entry produced
+// here is named "main.zbc" with kind ENTRY_BYTECODE; richer bundles
+// (multiple modules, assets) are a later concern that the writer
+// already supports without further changes here.
 static int pack_bytecode_into_exe(const char* bytecode, size_t bytecode_size, const char* output_path, const char* runtime_path) {
-    // Determine which runtime binary to use
-    char exe_path[4096];
-    const char* stub_path;
+    const bool headless = has_extension(output_path, ".zpk");
 
-    if (runtime_path) {
-        // Explicit runtime provided via -r
-        stub_path = runtime_path;
-    } else {
-        // Use the current running executable as the runtime
-        if (!get_executable_path(exe_path, sizeof(exe_path))) {
-            fprintf(stderr, "Error: Could not determine executable path.\n");
+    char* stub_data = nullptr;
+    size_t stub_size = 0;
+    char exe_path[4096];
+    const char* stub_path = nullptr;
+
+    if (!headless) {
+        if (runtime_path) {
+            stub_path = runtime_path;
+        } else {
+            if (!get_executable_path(exe_path, sizeof(exe_path))) {
+                fprintf(stderr, "Error: Could not determine executable path.\n");
+                return 0;
+            }
+            stub_path = exe_path;
+        }
+
+        stub_data = read_binary_file(stub_path, &stub_size);
+        if (!stub_data) {
+            fprintf(stderr, "Error: Could not read runtime binary: %s\n", stub_path);
             return 0;
         }
-        stub_path = exe_path;
     }
 
-    size_t stub_size = 0;
-    char* stub_data = read_binary_file(stub_path, &stub_size);
-    if (!stub_data) {
-        fprintf(stderr, "Error: Could not read runtime binary: %s\n", stub_path);
-        return 0;
-    }
+    static const char kEntryName[] = "main.zbc";
+    ZpkEntryInput entry = {};
+    entry.name = kEntryName;
+    entry.name_length = sizeof(kEntryName) - 1;
+    entry.kind = ZPK_KIND_ENTRY_BYTECODE;
+    entry.flags = 0;
+    entry.custom = 0;
+    entry.data = bytecode;
+    entry.data_size = bytecode_size;
 
-    // Build output: [runtime][bytecode][size][magic]
-    size_t footer_size = 12; // 4 bytes size + 8 bytes magic
-    size_t total_size = stub_size + bytecode_size + footer_size;
-
-    char* output = (char*)malloc(total_size);
-    if (!output) {
-        fprintf(stderr, "Error: Could not allocate memory for packed executable.\n");
-        free(stub_data);
-        return 0;
-    }
-
-    // Copy runtime binary
-    memcpy(output, stub_data, stub_size);
+    int ok = zpk_write_bundle(output_path,
+                              stub_data, stub_size,
+                              &entry, /*entry_count=*/1,
+                              /*entry_index=*/0);
     free(stub_data);
+    if (!ok) return 0;
 
-    // Copy bytecode
-    memcpy(output + stub_size, bytecode, bytecode_size);
-
-    // Write footer: 4-byte size (little-endian) + 8-byte magic
-    uint32_t size_le = (uint32_t)bytecode_size;
-    unsigned char* footer = (unsigned char*)(output + stub_size + bytecode_size);
-    footer[0] = (size_le) & 0xFF;
-    footer[1] = (size_le >> 8) & 0xFF;
-    footer[2] = (size_le >> 16) & 0xFF;
-    footer[3] = (size_le >> 24) & 0xFF;
-    memcpy(footer + 4, FOOTER_MAGIC, 8);
-
-    int success = write_binary_file(output_path, output, total_size);
-    free(output);
-
-    if (!success) return 0;
-
-    printf("Packed executable created: %s\n", output_path);
-    printf("  Runtime:       %s (%zu bytes)\n", stub_path, stub_size);
-    printf("  Bytecode size: %zu bytes\n", bytecode_size);
-    printf("  Total size:    %zu bytes\n", total_size);
+    if (headless) {
+        printf("Packed bundle created: %s\n", output_path);
+        printf("  Bytecode size: %zu bytes\n", bytecode_size);
+    } else {
+        printf("Packed executable created: %s\n", output_path);
+        printf("  Runtime:       %s (%zu bytes)\n", stub_path, stub_size);
+        printf("  Bytecode size: %zu bytes\n", bytecode_size);
+    }
 
     return 1;
 }
@@ -1107,7 +1120,7 @@ int full_main(int argc, char** argv, ZymAllocator* allocator) {
             }
             printf("Bytecode written to: %s\n", compile_output);
         } else {
-            fprintf(stderr, "Error: Output file must have .exe or .zbc extension.\n");
+            fprintf(stderr, "Error: Output file must have .exe, .zpk, or .zbc extension.\n");
             if (bytecode_allocated) free(bytecode);
             return 1;
         }

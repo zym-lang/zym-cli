@@ -11,12 +11,13 @@
 
 #include "runtime_loader.hpp"
 #include "natives/natives.hpp"
+#include "pack/zpk_reader.hpp"
 #include "zym/zym.h"
 
-// Bytecode package format:
-// [bytecode][4B size little-endian][8B magic "ZYMBCODE"]
-#define FOOTER_MAGIC "ZYMBCODE"
-#define FOOTER_SIZE 12
+// Discovery and bytecode extraction now live in `src/pack/zpk_reader`.
+// The on-disk format is documented in `docs/formats/zpk.md`. This file
+// is the runtime stub: resolve self-exe, open the bundled payload,
+// pull the entry bytecode out of the manifest, and hand it to the VM.
 
 char* get_executable_path(char* buffer, size_t size) {
 #ifdef _WIN32
@@ -35,122 +36,32 @@ char* get_executable_path(char* buffer, size_t size) {
 #endif
 }
 
-static char* extract_embedded_bytecode(size_t* out_size) {
-    char exe_path[4096];
-    if (!get_executable_path(exe_path, sizeof(exe_path))) {
-        fprintf(stderr, "Error: Could not determine executable path.\n");
-        return nullptr;
+bool has_embedded_bytecode() {
+    // Probe the running executable for a valid `.zpk` footer.
+    return zpk_reader_self_exe_has_payload() != 0;
+}
+
+int runtime_main(int argc, char** argv, ZymAllocator* allocator) {
+    ZpkReader reader;
+    if (!zpk_reader_open_self_exe(&reader)) {
+        return 1;
     }
 
-    FILE* file = fopen(exe_path, "rb");
-    if (!file) {
-        fprintf(stderr, "Error: Could not open executable for reading.\n");
-        return nullptr;
-    }
-
-    fseek(file, 0L, SEEK_END);
-    long file_size = ftell(file);
-
-    if (file_size < FOOTER_SIZE) {
-        fprintf(stderr, "Error: Executable too small to contain embedded bytecode.\n");
-        fclose(file);
-        return nullptr;
-    }
-
-    fseek(file, file_size - FOOTER_SIZE, SEEK_SET);
-    unsigned char footer[FOOTER_SIZE];
-    if (fread(footer, 1, FOOTER_SIZE, file) != FOOTER_SIZE) {
-        fprintf(stderr, "Error: Could not read bytecode footer.\n");
-        fclose(file);
-        return nullptr;
-    }
-
-    if (memcmp(footer + 4, FOOTER_MAGIC, 8) != 0) {
-        fprintf(stderr, "Error: No embedded bytecode found (missing magic footer).\n");
-        fclose(file);
-        return nullptr;
-    }
-
-    uint32_t bytecode_size =
-        ((uint32_t)footer[0]) |
-        ((uint32_t)footer[1] << 8) |
-        ((uint32_t)footer[2] << 16) |
-        ((uint32_t)footer[3] << 24);
-
-    if (bytecode_size == 0 || bytecode_size > 100 * 1024 * 1024) {
-        fprintf(stderr, "Error: Invalid bytecode size: %u bytes.\n", bytecode_size);
-        fclose(file);
-        return nullptr;
-    }
-
-    long bytecode_offset = file_size - FOOTER_SIZE - bytecode_size;
-    if (bytecode_offset < 0) {
-        fprintf(stderr, "Error: Bytecode size exceeds file size.\n");
-        fclose(file);
-        return nullptr;
-    }
-
-    char* bytecode = (char*)malloc(bytecode_size);
+    size_t bytecode_size = 0;
+    char* bytecode = zpk_reader_read_entry(&reader, reader.footer.entry_index, &bytecode_size);
     if (!bytecode) {
-        fprintf(stderr, "Error: Could not allocate memory for bytecode (%u bytes).\n", bytecode_size);
-        fclose(file);
-        return nullptr;
+        zpk_reader_close(&reader);
+        return 1;
     }
 
-    fseek(file, bytecode_offset, SEEK_SET);
-    size_t read_count = fread(bytecode, 1, bytecode_size, file);
-    fclose(file);
-
-    if (read_count != bytecode_size) {
-        fprintf(stderr, "Error: Could not read complete bytecode.\n");
-        free(bytecode);
-        return nullptr;
-    }
+    // The reader has copied the entry bytes; the file mapping is no
+    // longer needed for startup. Releasing it early frees a few MB
+    // back to the OS before the VM starts allocating.
+    zpk_reader_close(&reader);
 
     if (bytecode_size < 5 || memcmp(bytecode, "ZYM\0", 4) != 0) {
         fprintf(stderr, "Error: Invalid bytecode format (missing ZYM header).\n");
         free(bytecode);
-        return nullptr;
-    }
-
-    *out_size = bytecode_size;
-    return bytecode;
-}
-
-bool has_embedded_bytecode() {
-    char exe_path[4096];
-    if (!get_executable_path(exe_path, sizeof(exe_path))) {
-        return false;
-    }
-
-    FILE* file = fopen(exe_path, "rb");
-    if (!file) {
-        return false;
-    }
-
-    fseek(file, 0L, SEEK_END);
-    long file_size = ftell(file);
-
-    if (file_size < FOOTER_SIZE) {
-        fclose(file);
-        return false;
-    }
-
-    fseek(file, file_size - FOOTER_SIZE, SEEK_SET);
-    unsigned char footer[FOOTER_SIZE];
-    if (fread(footer, 1, FOOTER_SIZE, file) != FOOTER_SIZE) {
-        fclose(file);
-        return false;
-    }
-    fclose(file);
-
-    return memcmp(footer + 4, FOOTER_MAGIC, 8) == 0;
-}
-
-int runtime_main(int argc, char** argv, ZymAllocator* allocator) {
-    size_t bytecode_size = 0;
-    char* bytecode = extract_embedded_bytecode(&bytecode_size);
-    if (!bytecode) {
         return 1;
     }
 

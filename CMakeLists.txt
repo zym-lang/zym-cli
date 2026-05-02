@@ -6,8 +6,8 @@ set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
 
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
 set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
-#set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections")
+#set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
+set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections")
 
 set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
 set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
@@ -27,12 +27,12 @@ elseif(PGO_MODE STREQUAL "USE")
 endif()
 
 set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION ON)
+set(USE_COMPRESSION OFF)
 # USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
 # on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
 # binary so engine-level error and warning output is suppressed at startup
 # (zym's own runtime errors are unaffected). See src/boot/register_core.cpp.
-set(USE_ENGINE_ERRORS OFF)
+set(USE_ENGINE_ERRORS ON)
 
 cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)
@@ -78,6 +78,10 @@ set(APP_SOURCES
 set(ZYM_NATIVE_SOURCES
         src/natives/natives.hpp
         src/natives/natives.cpp
+        src/natives/cli_catalog.hpp
+        src/natives/cli_catalog.cpp
+        src/natives/Zym/zym_native.hpp
+        src/natives/Zym/zym_native.cpp
         src/natives/print.cpp
         src/natives/time.cpp
         src/natives/buffer.cpp

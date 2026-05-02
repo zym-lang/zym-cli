@@ -1,27 +1,13 @@
 #include "./natives.hpp"
 
+#include "cli_catalog.hpp"
+
+// `setupNatives` is now a thin compatibility shim around the catalog.
+// `cli_catalog_install_all` produces the same set of globals in the
+// same declaration order (plus a new `Zym` global registered as a
+// regular catalog entry) and seeds the VM's capability set with every
+// catalog name. See src/natives/cli_catalog.hpp for the rationale.
 void setupNatives(ZymVM* vm)
 {
-    zym_defineNativeVariadic(vm, "print(...)", (void*)nativePrint);
-    zym_defineGlobal(vm, "Time", nativeTime_create(vm));
-    zym_defineGlobal(vm, "Buffer", nativeBuffer_create(vm));
-    zym_defineGlobal(vm, "File", nativeFile_create(vm));
-    zym_defineGlobal(vm, "Dir", nativeDir_create(vm));
-    zym_defineGlobal(vm, "Console", nativeConsole_create(vm));
-    zym_defineGlobal(vm, "Process", nativeProcess_create(vm));
-    zym_defineGlobal(vm, "RegEx", nativeRegex_create(vm));
-    zym_defineGlobal(vm, "JSON", nativeJson_create(vm));
-    zym_defineGlobal(vm, "Crypto", nativeCrypto_create(vm));
-    zym_defineGlobal(vm, "Random", nativeRandom_create(vm));
-    zym_defineGlobal(vm, "Hash", nativeHash_create(vm));
-    zym_defineGlobal(vm, "System", nativeSystem_create(vm));
-    zym_defineGlobal(vm, "Path", nativePath_create(vm));
-    zym_defineGlobal(vm, "IP", nativeIp_create(vm));
-    zym_defineGlobal(vm, "TCP", nativeTcp_create(vm));
-    zym_defineGlobal(vm, "UDP", nativeUdp_create(vm));
-    zym_defineGlobal(vm, "TLS", nativeTls_create(vm));
-    zym_defineGlobal(vm, "DTLS", nativeDtls_create(vm));
-    zym_defineGlobal(vm, "ENet", nativeEnet_create(vm));
-    zym_defineGlobal(vm, "AES", nativeAes_create(vm));
-    zym_defineGlobal(vm, "Sockets", nativeSockets_create(vm));
+    cli_catalog_install_all(vm);
 }

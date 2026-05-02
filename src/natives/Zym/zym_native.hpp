@@ -19,4 +19,12 @@
 
 #include "zym/zym.h"
 
-ZymValue nativeZym_create(ZymVM* vm);
+struct ZymCliVmCtx;
+
+// Creates the `Zym` native module map and binds every method's
+// closure context to the supplied `ctx`. Ownership of `ctx`
+// transfers here: a finalizer-bearing native context wrapping `ctx`
+// is created and shared by every method closure, so VM teardown
+// (which drops the closures) fires the finalizer and frees `ctx`.
+// Callers must not delete `ctx` themselves after this returns.
+ZymValue nativeZym_create(ZymVM* vm, ZymCliVmCtx* ctx);

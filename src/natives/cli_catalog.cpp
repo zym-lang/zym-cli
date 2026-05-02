@@ -5,8 +5,6 @@
 
 #include <array>
 #include <cstring>
-#include <unordered_map>
-#include <utility>
 
 // =============================================================================
 // CATALOG TABLE
@@ -56,13 +54,18 @@ void install_dtls   (ZymVM* vm) { zym_defineGlobal(vm, "DTLS",    nativeDtls_cre
 void install_enet   (ZymVM* vm) { zym_defineGlobal(vm, "ENet",    nativeEnet_create(vm));    }
 void install_aes    (ZymVM* vm) { zym_defineGlobal(vm, "AES",     nativeAes_create(vm));     }
 void install_sockets(ZymVM* vm) { zym_defineGlobal(vm, "Sockets", nativeSockets_create(vm)); }
-void install_zym    (ZymVM* vm) { zym_defineGlobal(vm, "Zym",     nativeZym_create(vm));     }
+// Note: `install_zym` is intentionally absent from the kCatalog
+// installer slot. Zym is installed by `cli_catalog_install_all` /
+// `cli_catalog_install_named` *after* the rest of the catalog so it
+// receives the fully-populated `ZymCliVmCtx*` and can take ownership
+// of it via a finalizer-bearing closure context. See
+// `nativeZym_create` for the lifetime contract.
 
 // Order matches the legacy `setupNatives` body, with `Zym` appended
 // as the new grantable entry. `Buffer` is intentionally absent
 // (auto-installed). When a new module is added, append it to this
 // table and to the corresponding declaration in natives.hpp.
-constexpr std::array<CatalogEntry, 22> kCatalog = {{
+constexpr std::array<CatalogEntry, 21> kCatalog = {{
     {"print",   install_print},
     {"Time",    install_time},
     {"File",    install_file},
@@ -84,7 +87,6 @@ constexpr std::array<CatalogEntry, 22> kCatalog = {{
     {"ENet",    install_enet},
     {"AES",     install_aes},
     {"Sockets", install_sockets},
-    {"Zym",     install_zym},
 }};
 
 const CatalogEntry* find_entry(const char* name) {
@@ -95,39 +97,17 @@ const CatalogEntry* find_entry(const char* name) {
     return nullptr;
 }
 
-// ----- per-VM ctx storage -------------------------------------------------
+// ----- per-VM ctx lifetime ------------------------------------------------
 //
-// VM addresses are unique within the process and stable for the VM's
-// lifetime, so they make a fine map key. Auto-cleanup is wired through
-// a finalizer-bearing native context that we permanently root in the
-// VM (`zym_pushRoot` without a balancing pop): when the VM is torn
-// down, root drops trigger the finalizer, which removes the map
-// entry. We never expose this holder value to script.
-
-std::unordered_map<ZymVM*, ZymCliVmCtx*>& ctx_map() {
-    static std::unordered_map<ZymVM*, ZymCliVmCtx*> m;
-    return m;
-}
-
-void ctx_finalizer(ZymVM* /*vm*/, void* p) {
-    auto* ctx = static_cast<ZymCliVmCtx*>(p);
-    if (!ctx) return;
-    ctx_map().erase(ctx->vm);
-    delete ctx;
-}
-
-ZymCliVmCtx* attach_ctx(ZymVM* vm) {
-    auto* ctx = new ZymCliVmCtx();
-    ctx->vm = vm;
-    ctx_map()[vm] = ctx;
-
-    // Permanently-rooted finalizer holder. Never popped on purpose:
-    // the root keeps the holder alive for the VM's life, and VM
-    // teardown drops the root, firing `ctx_finalizer`.
-    ZymValue holder = zym_createNativeContext(vm, ctx, ctx_finalizer);
-    zym_pushRoot(vm, holder);
-    return ctx;
-}
+// `ZymCliVmCtx` is heap-allocated by `cli_catalog_install_all` (root
+// VM) or by `Zym.newVM` (PR 2 onward) and handed off to
+// `nativeZym_create`, which binds it as the userdata of a
+// finalizer-bearing native context shared by every `Zym.*` method
+// closure. The finalizer below frees the allocation when the closure
+// context is GC'd (i.e. when the VM is torn down and its globals
+// drop). No process-wide bookkeeping; the ctx travels with the
+// closures, mirroring the `VMData`/`zymvm_cleanup` pattern in the
+// pre-godot CLI's `src/natives/ZymVM.c`.
 
 bool ctx_has(const ZymCliVmCtx* ctx, const char* name) {
     for (const auto& s : ctx->available) {
@@ -162,16 +142,28 @@ void cli_catalog_install_auto(ZymVM* vm) {
     zym_defineGlobal(vm, "Buffer", nativeBuffer_create(vm));
 }
 
-bool cli_catalog_install_named(ZymVM* vm, const char* name) {
+bool cli_catalog_install_named(ZymVM* vm, ZymCliVmCtx* ctx, const char* name) {
+    if (!ctx) return false;
+    if (!name) return false;
+
+    // The `Zym` entry is special: it isn't an installer in `kCatalog`
+    // (it can't be, because the installer signature has no place for
+    // the ctx pointer it needs to take ownership of). Handle it here.
+    if (std::strcmp(name, "Zym") == 0) {
+        if (ctx_has(ctx, "Zym")) return true;  // idempotent
+        ctx->available.emplace_back("Zym");
+        zym_defineGlobal(vm, "Zym", nativeZym_create(vm, ctx));
+        return true;
+    }
+
     const CatalogEntry* e = find_entry(name);
     if (!e) return false;
 
-    ZymCliVmCtx* ctx = cli_catalog_ctx(vm);
     if (ctx_has(ctx, e->name)) {
         // Idempotent: already granted, treat as success without
-        // reinstalling the global (the legacy installers are not
-        // generally safe to call twice, and there's no script-visible
-        // difference between a fresh install and a re-install).
+        // reinstalling the global. Matches the user-locked policy:
+        // scripts can call `registerCliNative("ALL")` regardless of
+        // prior state; only un-granted names get installed.
         return true;
     }
 
@@ -182,17 +174,20 @@ bool cli_catalog_install_named(ZymVM* vm, const char* name) {
 
 void cli_catalog_install_all(ZymVM* vm) {
     cli_catalog_install_auto(vm);
-    ZymCliVmCtx* ctx = cli_catalog_ctx(vm);
+
+    // Fresh ctx; ownership transfers to `nativeZym_create` below.
+    auto* ctx = new ZymCliVmCtx();
+    ctx->vm = vm;
+
+    // Install every grantable catalog entry except Zym, which is
+    // installed last so it can adopt the now-populated ctx.
     for (const auto& e : kCatalog) {
-        if (ctx_has(ctx, e.name)) continue;
         e.install(vm);
         ctx->available.emplace_back(e.name);
     }
-}
 
-ZymCliVmCtx* cli_catalog_ctx(ZymVM* vm) {
-    auto& m = ctx_map();
-    auto it = m.find(vm);
-    if (it != m.end()) return it->second;
-    return attach_ctx(vm);
+    // Install Zym last; this transfers ownership of `ctx` to the
+    // Zym native's closure context (finalizer attached there).
+    ctx->available.emplace_back("Zym");
+    zym_defineGlobal(vm, "Zym", nativeZym_create(vm, ctx));
 }

@@ -36,11 +36,14 @@ enum class ZymVmPhase {
     Execution,  // frozen: only pipeline / call APIs allowed
 };
 
-// Per-VM CLI state. One is auto-attached the first time any
-// cli_catalog_* function touches a VM, and auto-freed when the VM is
-// torn down (via a finalizer-bearing native context that we
-// permanently root in the VM; the VM teardown drops the root, the
-// finalizer fires, and the entry is removed from the lookup map).
+// Per-VM CLI state. Ownership of the heap allocation transfers to
+// the `Zym` native module's closure context: when the catalog
+// installer hands the ctx to `nativeZym_create`, that native binds
+// the pointer into a `zym_createNativeContext` with a finalizer.
+// Every `Zym.*` method closure shares that one context, so the ctx
+// travels with the closures (pre-godot CLI's `VMData` pattern in
+// `src/natives/ZymVM.c`). VM teardown drops the closures, fires the
+// finalizer, and frees the ctx — no process-wide bookkeeping.
 struct ZymCliVmCtx {
     ZymVM* vm = nullptr;
     ZymVmPhase phase = ZymVmPhase::Setup;
@@ -63,18 +66,27 @@ bool cli_catalog_has(const char* name);
 // affected by capabilities. Safe to call multiple times.
 void cli_catalog_install_auto(ZymVM* vm);
 
-// Install one catalog entry by name and add it to the VM's
-// `available` set. Returns false if `name` is not a grantable entry
-// (Buffer is rejected here; use `cli_catalog_install_auto`).
-// Idempotent: re-installing an already-granted name is a no-op.
-bool cli_catalog_install_named(ZymVM* vm, const char* name);
+// Install one catalog entry by name on `vm`, recording it in `ctx`'s
+// `available` list. Returns false if `name` is not a grantable
+// catalog entry (Buffer is rejected here; use
+// `cli_catalog_install_auto`).
+//
+// Idempotent: re-granting an already-installed name is a silent
+// no-op (matches the user-locked policy — scripts can call
+// `registerCliNative("ALL")` regardless of prior state). Collisions
+// with a script-defined global are last-write-wins, mirroring the
+// underlying `zym_defineGlobal` semantics.
+//
+// Note: callers must own `ctx` and pass it explicitly. The catalog
+// no longer maintains a process-wide VM→ctx map; the Zym native
+// module is the canonical owner.
+bool cli_catalog_install_named(ZymVM* vm, ZymCliVmCtx* ctx, const char* name);
 
-// Install everything: auto-natives + every catalog entry, seeding
-// `available` with the full catalog. Used for the root VM at boot
-// and as the byte-for-byte replacement for the legacy `setupNatives`.
+// Install everything: auto-natives + every catalog entry, allocates
+// a fresh `ZymCliVmCtx`, populates its `available` list with the
+// full catalog, and installs `Zym` last (handing ctx ownership to
+// the `Zym` native's closure context, which holds the finalizer
+// that frees the allocation on VM teardown). Used for the root VM
+// at boot and as the byte-for-byte replacement for the legacy
+// `setupNatives`.
 void cli_catalog_install_all(ZymVM* vm);
-
-// Look up the per-VM ctx, attaching one if not already present.
-// Never returns nullptr (allocation failure aborts via the engine
-// like other natives do).
-ZymCliVmCtx* cli_catalog_ctx(ZymVM* vm);

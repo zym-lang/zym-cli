@@ -27,7 +27,7 @@ ZymValue nativeDtls_create(ZymVM* vm);
 ZymValue nativeEnet_create(ZymVM* vm);
 ZymValue nativeAes_create(ZymVM* vm);
 
-// `Zym` lives in src/natives/Zym/zym_native.hpp; declared here as a
-// convenience so the catalog table in cli_catalog.cpp can refer to it
-// alongside the other module factories.
-ZymValue nativeZym_create(ZymVM* vm);
+// `Zym` lives in src/natives/Zym/zym_native.hpp and has a different
+// signature (takes a `ZymCliVmCtx*` because it adopts ownership of
+// the per-VM ctx). Include that header directly when you need it;
+// it isn't redeclared here on purpose.

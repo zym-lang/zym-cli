@@ -82,6 +82,8 @@ set(ZYM_NATIVE_SOURCES
         src/natives/cli_catalog.cpp
         src/natives/Zym/zym_native.hpp
         src/natives/Zym/zym_native.cpp
+        src/bridge/cross_vm.hpp
+        src/bridge/cross_vm.cpp
         src/natives/print.cpp
         src/natives/time.cpp
         src/natives/buffer.cpp

@@ -56,6 +56,29 @@ ZymValue makeBufferInstance(ZymVM* vm, const PackedByteArray& src) {
     return makeInstance(vm, src);
 }
 
+// Type-clean wrappers used by the `Zym` native (which lives outside the
+// Godot include scope and so cannot mention `PackedByteArray`).
+ZymValue makeBufferFromBytes(ZymVM* vm, const char* data, size_t size) {
+    PackedByteArray pba;
+    if (size > 0) {
+        pba.resize((int)size);
+        if (data) memcpy(pba.ptrw(), data, size);
+    }
+    return makeInstance(vm, pba);
+}
+
+bool readBufferBytes(ZymVM* vm, ZymValue v, const char** out_data, size_t* out_size) {
+    if (!zym_isMap(v)) return false;
+    ZymValue ctx = zym_mapGet(vm, v, "__pba__");
+    if (ctx == ZYM_ERROR) return false;
+    void* data = zym_getNativeData(ctx);
+    if (!data) return false;
+    auto* pba = static_cast<PackedByteArray*>(data);
+    if (out_data) *out_data = (const char*)pba->ptr();
+    if (out_size) *out_size = (size_t)pba->size();
+    return true;
+}
+
 static bool reqBuffer(ZymVM* vm, ZymValue v, const char* where, PackedByteArray** out) {
     if (zym_isMap(v)) {
         ZymValue ctx = zym_mapGet(vm, v, "__pba__");

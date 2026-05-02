@@ -26,12 +26,33 @@
 #include "zym_native.hpp"
 
 #include "../cli_catalog.hpp"
+#include "../natives.hpp"
+#include "../../bridge/cross_vm.hpp"
+#include "zym/module_loader.h"
 
+#include "zym/diagnostics.h"
+#include "zym/sourcemap.h"
+
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
+
+// =============================================================================
+// Status code mirror exposed to scripts as `Zym.STATUS` (roadmap §0 → Errors).
+// Numeric values mirror the C `ZymStatus` enum so a script can branch on the
+// code returned from compile / runChunk / call / deserializeChunk just like
+// `full_executor.cpp` does.
+// =============================================================================
+struct StatusEntry { const char* name; int value; };
+const StatusEntry kStatusEntries[] = {
+    { "OK",             ZYM_STATUS_OK },
+    { "COMPILE_ERROR",  ZYM_STATUS_COMPILE_ERROR },
+    { "RUNTIME_ERROR",  ZYM_STATUS_RUNTIME_ERROR },
+    { "YIELD",          ZYM_STATUS_YIELD },
+};
 
 // =============================================================================
 // CTX FINALIZER (shared by parent's Zym module and any child that gets Zym
@@ -70,11 +91,18 @@ struct ChildVmHandle {
     ZymCliVmCtx* childCtx = nullptr;
     ZymCliVmCtx* parentCtx = nullptr;
     bool freed = false;
+    // Refcount for cross-resource ownership. The ChildVM map's native
+    // context holds 1 ref; every SourceMap / Chunk wrapper allocated
+    // off this VM holds 1 ref. The handle is destroyed (and the child
+    // VM freed if not already) when the count drops to zero.
+    int refcount = 0;
 };
 
-void child_handle_finalizer(ZymVM* /*parentVm*/, void* p) {
-    auto* h = static_cast<ChildVmHandle*>(p);
+void handle_decref(ChildVmHandle* h);
+
+void handle_decref(ChildVmHandle* h) {
     if (!h) return;
+    if (--h->refcount > 0) return;
     if (h->child && !h->freed) {
         zym_freeVM(h->child);
         h->freed = true;
@@ -83,6 +111,54 @@ void child_handle_finalizer(ZymVM* /*parentVm*/, void* p) {
     // (if Zym was granted) skipped freeing it. Free it here.
     delete h->childCtx;
     delete h;
+}
+
+void child_handle_finalizer(ZymVM* /*parentVm*/, void* p) {
+    handle_decref(static_cast<ChildVmHandle*>(p));
+}
+
+// =============================================================================
+// Resource wrappers — SourceMap and Chunk values exposed to scripts.
+//
+// Each is a parent-VM map carrying an opaque native context whose userdata
+// is one of the structs below. The resource holds a refcount on its owning
+// `ChildVmHandle` so it survives `vm` going out of scope script-side, and the
+// finalizer releases the underlying `ZymSourceMap*` / `ZymChunk*` if the
+// child VM is still alive — otherwise the child VM teardown already collected
+// it. `freed` short-circuits double-free when the script calls `.free()`
+// explicitly before GC.
+// =============================================================================
+
+struct SourceMapRes {
+    ChildVmHandle* h = nullptr;
+    ZymSourceMap* sm = nullptr;
+    bool freed = false;
+};
+
+void source_map_finalizer(ZymVM* /*parentVm*/, void* p) {
+    auto* r = static_cast<SourceMapRes*>(p);
+    if (!r) return;
+    if (!r->freed && r->h && !r->h->freed && r->sm) {
+        zym_freeSourceMap(r->h->child, r->sm);
+    }
+    handle_decref(r->h);
+    delete r;
+}
+
+struct ChunkRes {
+    ChildVmHandle* h = nullptr;
+    ZymChunk* chunk = nullptr;
+    bool freed = false;
+};
+
+void chunk_finalizer(ZymVM* /*parentVm*/, void* p) {
+    auto* r = static_cast<ChunkRes*>(p);
+    if (!r) return;
+    if (!r->freed && r->h && !r->h->freed && r->chunk) {
+        zym_freeChunk(r->h->child, r->chunk);
+    }
+    handle_decref(r->h);
+    delete r;
 }
 
 // =============================================================================
@@ -179,8 +255,425 @@ ZymValue z_newVM(ZymVM* parentVm, ZymValue context) {
     handle->child = child;
     handle->childCtx = childCtx;
     handle->parentCtx = parentCtx;
+    handle->refcount = 1;  // owned by the ChildVM map below
 
     return make_child_vm(parentVm, handle);
+}
+
+// =============================================================================
+// Resource constructors (parent-VM maps)
+// =============================================================================
+//
+// `make_source_map` and `make_chunk` mint a parent-VM map with an opaque
+// native context wrapping the corresponding child resource. Each one bumps
+// the handle's refcount so the resource can outlive the ChildVM script value.
+
+ZymValue make_source_map(ZymVM* parentVm, ChildVmHandle* h, ZymSourceMap* sm);
+ZymValue make_chunk     (ZymVM* parentVm, ChildVmHandle* h, ZymChunk* c);
+
+// Forward decl: also defined below.
+ChildVmHandle* require_child(ZymVM* vm, ZymValue context, bool setupOnly);
+
+// =============================================================================
+// Pipeline-resource accessors
+// =============================================================================
+
+SourceMapRes* unwrap_source_map(ZymVM* parentVm, ZymValue v) {
+    if (!zym_isMap(v)) return nullptr;
+    ZymValue ctx = zym_mapGet(parentVm, v, "__sm__");
+    if (ctx == ZYM_ERROR) return nullptr;
+    return static_cast<SourceMapRes*>(zym_getNativeData(ctx));
+}
+
+ChunkRes* unwrap_chunk(ZymVM* parentVm, ZymValue v) {
+    if (!zym_isMap(v)) return nullptr;
+    ZymValue ctx = zym_mapGet(parentVm, v, "__chunk__");
+    if (ctx == ZYM_ERROR) return nullptr;
+    return static_cast<ChunkRes*>(zym_getNativeData(ctx));
+}
+
+// Verify a resource is alive AND belongs to this VM. Mismatches collapse
+// to "no such native" (roadmap §0 → Errors): the script must not be able
+// to tell whether the resource is from a sibling VM, freed, or simply
+// the wrong type.
+SourceMapRes* require_source_map(ZymVM* parentVm, ChildVmHandle* h, ZymValue v) {
+    auto* r = unwrap_source_map(parentVm, v);
+    if (!r || r->freed || !r->sm || r->h != h || r->h->freed) {
+        zym_runtimeError(parentVm, "no such native");
+        return nullptr;
+    }
+    return r;
+}
+
+ChunkRes* require_chunk(ZymVM* parentVm, ChildVmHandle* h, ZymValue v) {
+    auto* r = unwrap_chunk(parentVm, v);
+    if (!r || r->freed || !r->chunk || r->h != h || r->h->freed) {
+        zym_runtimeError(parentVm, "no such native");
+        return nullptr;
+    }
+    return r;
+}
+
+// Auto-loop on YIELD (matches `execute_bytecode` in full_executor.cpp).
+ZymStatus run_to_completion_chunk(ZymVM* child, ZymChunk* chunk) {
+    ZymStatus s = zym_runChunk(child, chunk);
+    while (s == ZYM_STATUS_YIELD) s = zym_resume(child);
+    return s;
+}
+
+ZymStatus call_to_completion(ZymVM* child, const char* name, int argc, ZymValue* argv) {
+    ZymStatus s = zym_callv(child, name, argc, argv);
+    while (s == ZYM_STATUS_YIELD) s = zym_resume(child);
+    return s;
+}
+
+// =============================================================================
+// Pipeline methods (closures live in parent VM, operate on child VM)
+// =============================================================================
+// All mutate the child's source registry / chunk / VM state. Methods that
+// trigger the setup→execution freeze do so explicitly via `freeze`.
+
+void freeze(ChildVmHandle* h) {
+    if (h && h->childCtx && h->childCtx->phase == ZymVmPhase::Setup) {
+        h->childCtx->phase = ZymVmPhase::Execution;
+    }
+}
+
+ZymValue cv_newSourceMap(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    ZymSourceMap* sm = zym_newSourceMap(h->child);
+    if (!sm) { zym_runtimeError(parentVm, "no such native"); return ZYM_ERROR; }
+    return make_source_map(parentVm, h, sm);
+}
+
+ZymValue cv_newChunk(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    ZymChunk* c = zym_newChunk(h->child);
+    if (!c) { zym_runtimeError(parentVm, "no such native"); return ZYM_ERROR; }
+    return make_chunk(parentVm, h, c);
+}
+
+ZymValue cv_registerSourceFile(ZymVM* parentVm, ZymValue context,
+                               ZymValue pathV, ZymValue srcV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(pathV) || !zym_isString(srcV)) {
+        zym_runtimeError(parentVm,
+            "registerSourceFile(path, source) expects two strings");
+        return ZYM_ERROR;
+    }
+    const char* path = zym_asCString(pathV);
+    const char* src  = zym_asCString(srcV);
+    ZymFileId id = zym_registerSourceFile(h->child, path, src, std::strlen(src));
+    return zym_newNumber((double)id);
+}
+
+ZymValue cv_preprocess(ZymVM* parentVm, ZymValue context,
+                       ZymValue srcV, ZymValue smV, ZymValue idV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(srcV) || !zym_isNumber(idV)) {
+        zym_runtimeError(parentVm,
+            "preprocess(source, sourceMap, fileId): bad arg types");
+        return ZYM_ERROR;
+    }
+    auto* smr = require_source_map(parentVm, h, smV);
+    if (!smr) return ZYM_ERROR;
+
+    const char* src = zym_asCString(srcV);
+    ZymFileId fid   = (ZymFileId)zym_asNumber(idV);
+    const char* out = nullptr;
+    ZymStatus st = zym_preprocess(h->child, src, smr->sm, fid, &out);
+
+    ZymValue result = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, result);
+    zym_mapSet(parentVm, result, "status", zym_newNumber((double)st));
+    if (st == ZYM_STATUS_OK && out) {
+        zym_mapSet(parentVm, result, "source", zym_newString(parentVm, out));
+        zym_freeProcessedSource(h->child, out);
+    } else {
+        zym_mapSet(parentVm, result, "source", zym_newNull());
+    }
+    zym_popRoot(parentVm);
+    return result;
+}
+
+ZymValue cv_compile(ZymVM* parentVm, ZymValue context,
+                    ZymValue srcV, ZymValue chunkV, ZymValue smV,
+                    ZymValue entryV, ZymValue optsV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(srcV) || !zym_isString(entryV)) {
+        zym_runtimeError(parentVm,
+            "compile(source, chunk, sourceMap, entryFile, opts): bad arg types");
+        return ZYM_ERROR;
+    }
+    auto* cr = require_chunk(parentVm, h, chunkV);
+    if (!cr) return ZYM_ERROR;
+    // sourceMap may be null/omitted when compiling raw text.
+    ZymSourceMap* sm = nullptr;
+    if (!zym_isNull(smV)) {
+        auto* smr = require_source_map(parentVm, h, smV);
+        if (!smr) return ZYM_ERROR;
+        sm = smr->sm;
+    }
+
+    ZymCompilerConfig config = { /*include_line_info=*/ true };
+    if (zym_isMap(optsV)) {
+        ZymValue v = zym_mapGet(parentVm, optsV, "includeLineInfo");
+        if (v != ZYM_ERROR && zym_isBool(v)) config.include_line_info = zym_asBool(v);
+    }
+
+    const char* src   = zym_asCString(srcV);
+    const char* entry = zym_asCString(entryV);
+    ZymStatus st = zym_compile(h->child, src, cr->chunk, sm, entry, config, nullptr);
+    freeze(h);
+    return zym_newNumber((double)st);
+}
+
+ZymValue cv_serializeChunk(ZymVM* parentVm, ZymValue context,
+                           ZymValue chunkV, ZymValue optsV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    auto* cr = require_chunk(parentVm, h, chunkV);
+    if (!cr) return ZYM_ERROR;
+
+    ZymCompilerConfig config = { /*include_line_info=*/ true };
+    if (zym_isMap(optsV)) {
+        ZymValue v = zym_mapGet(parentVm, optsV, "includeLineInfo");
+        if (v != ZYM_ERROR && zym_isBool(v)) config.include_line_info = zym_asBool(v);
+    }
+
+    char* buf = nullptr;
+    size_t size = 0;
+    ZymStatus st = zym_serializeChunk(h->child, config, cr->chunk, &buf, &size);
+    if (st != ZYM_STATUS_OK || !buf) {
+        if (buf) std::free(buf);
+        ZymValue result = zym_newMap(parentVm);
+        zym_pushRoot(parentVm, result);
+        zym_mapSet(parentVm, result, "status", zym_newNumber((double)st));
+        zym_mapSet(parentVm, result, "bytes",  zym_newNull());
+        zym_popRoot(parentVm);
+        return result;
+    }
+    ZymValue bytes = makeBufferFromBytes(parentVm, buf, size);
+    std::free(buf);
+    zym_pushRoot(parentVm, bytes);
+    ZymValue result = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, result);
+    zym_mapSet(parentVm, result, "status", zym_newNumber((double)ZYM_STATUS_OK));
+    zym_mapSet(parentVm, result, "bytes",  bytes);
+    zym_popRoot(parentVm);
+    zym_popRoot(parentVm);
+    return result;
+}
+
+ZymValue cv_deserializeChunk(ZymVM* parentVm, ZymValue context,
+                             ZymValue chunkV, ZymValue bufV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    auto* cr = require_chunk(parentVm, h, chunkV);
+    if (!cr) return ZYM_ERROR;
+    const char* data = nullptr;
+    size_t size = 0;
+    if (!readBufferBytes(parentVm, bufV, &data, &size)) {
+        zym_runtimeError(parentVm,
+            "deserializeChunk(chunk, bytes) expects a Buffer");
+        return ZYM_ERROR;
+    }
+    ZymStatus st = zym_deserializeChunk(h->child, cr->chunk, data, size);
+    freeze(h);
+    return zym_newNumber((double)st);
+}
+
+ZymValue cv_runChunk(ZymVM* parentVm, ZymValue context, ZymValue chunkV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    auto* cr = require_chunk(parentVm, h, chunkV);
+    if (!cr) return ZYM_ERROR;
+    ZymStatus st = run_to_completion_chunk(h->child, cr->chunk);
+    freeze(h);
+    return zym_newNumber((double)st);
+}
+
+ZymValue cv_hasFunction(ZymVM* parentVm, ZymValue context,
+                        ZymValue nameV, ZymValue arityV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(nameV) || !zym_isNumber(arityV)) {
+        zym_runtimeError(parentVm, "hasFunction(name, arity): bad arg types");
+        return ZYM_ERROR;
+    }
+    return zym_newBool(zym_hasFunction(h->child,
+                                       zym_asCString(nameV),
+                                       (int)zym_asNumber(arityV)));
+}
+
+// Marshal a single primitive across VMs. PR 3 keeps this primitives-only,
+// matching `defineGlobal`. Lists/maps/structs/Buffer/callables land in PR 4.
+// Cross-VM value marshaller — full graph copy with identity tracking,
+// Buffer byte-copy, and closure trampoline wrapping. Backed by
+// `src/bridge/cross_vm.{hpp,cpp}` (mirror of zym-js).
+bool marshal_to_child(ZymVM* parentVm, ZymVM* child, ZymValue v, ZymValue* out) {
+    return zym_bridge::marshal(parentVm, child, v, out);
+}
+
+bool marshal_to_parent(ZymVM* child, ZymVM* parentVm, ZymValue v, ZymValue* out) {
+    return zym_bridge::marshal(child, parentVm, v, out);
+}
+
+ZymValue cv_call(ZymVM* parentVm, ZymValue context,
+                 ZymValue nameV, ZymValue argsV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(nameV)) {
+        zym_runtimeError(parentVm, "call(name, args): name must be a string");
+        return ZYM_ERROR;
+    }
+    if (!zym_isList(argsV)) {
+        zym_runtimeError(parentVm, "call(name, args): args must be a list");
+        return ZYM_ERROR;
+    }
+    int n = zym_listLength(argsV);
+    std::vector<ZymValue> argv;
+    argv.reserve((size_t)n);
+    for (int i = 0; i < n; i++) {
+        ZymValue parentArg = zym_listGet(parentVm, argsV, i);
+        ZymValue childArg;
+        if (!marshal_to_child(parentVm, h->child, parentArg, &childArg)) {
+            return ZYM_ERROR;
+        }
+        argv.push_back(childArg);
+    }
+    ZymStatus st = call_to_completion(h->child, zym_asCString(nameV), n,
+                                      argv.empty() ? nullptr : argv.data());
+    freeze(h);
+    return zym_newNumber((double)st);
+}
+
+ZymValue cv_callResult(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    ZymValue childResult = zym_getCallResult(h->child);
+    if (childResult == ZYM_ERROR) return zym_newNull();
+    ZymValue parentResult;
+    if (!marshal_to_parent(h->child, parentVm, childResult, &parentResult)) {
+        return ZYM_ERROR;
+    }
+    return parentResult;
+}
+
+const char* severity_name(ZymDiagSeverity s) {
+    switch (s) {
+        case ZYM_DIAG_ERROR:   return "error";
+        case ZYM_DIAG_WARNING: return "warning";
+        case ZYM_DIAG_INFO:    return "info";
+        case ZYM_DIAG_HINT:    return "hint";
+    }
+    return "info";
+}
+
+ZymValue cv_diagnostics(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+
+    size_t count = 0;
+    const ZymDiagnostic* diags = zymGetDiagnostics(h->child, &count);
+
+    ZymValue list = zym_newList(parentVm);
+    zym_pushRoot(parentVm, list);
+    for (size_t i = 0; i < count; i++) {
+        const ZymDiagnostic* d = &diags[i];
+        ZymValue m = zym_newMap(parentVm);
+        zym_pushRoot(parentVm, m);
+        zym_mapSet(parentVm, m, "severity",  zym_newString(parentVm, severity_name(d->severity)));
+        zym_mapSet(parentVm, m, "fileId",    zym_newNumber((double)d->fileId));
+        zym_mapSet(parentVm, m, "startByte", zym_newNumber((double)d->startByte));
+        zym_mapSet(parentVm, m, "length",    zym_newNumber((double)d->length));
+        zym_mapSet(parentVm, m, "line",      zym_newNumber((double)d->line));
+        zym_mapSet(parentVm, m, "column",    zym_newNumber((double)d->column));
+        zym_mapSet(parentVm, m, "message",
+                   d->message ? zym_newString(parentVm, d->message) : zym_newNull());
+        // Resolve the file path/contents from the child registry while the
+        // child is still alive, so the parent can render diagnostics without
+        // poking into child memory after the fact.
+        ZymSourceFileInfo info{};
+        if (d->fileId != ZYM_FILE_ID_INVALID &&
+            zym_getSourceFile(h->child, d->fileId, &info)) {
+            zym_mapSet(parentVm, m, "file",
+                       info.path ? zym_newString(parentVm, info.path) : zym_newNull());
+        } else {
+            zym_mapSet(parentVm, m, "file", zym_newNull());
+        }
+        zym_listAppend(parentVm, list, m);
+        zym_popRoot(parentVm);
+    }
+    zymClearDiagnostics(h->child);
+    zym_popRoot(parentVm);
+    return list;
+}
+
+// =============================================================================
+// Resource methods (sm.free / chunk.free)
+// =============================================================================
+
+ZymValue sm_free(ZymVM* /*parentVm*/, ZymValue context) {
+    auto* r = static_cast<SourceMapRes*>(zym_getNativeData(context));
+    if (!r || r->freed || !r->sm) return zym_newBool(false);
+    if (r->h && !r->h->freed) zym_freeSourceMap(r->h->child, r->sm);
+    r->freed = true;
+    r->sm = nullptr;
+    return zym_newBool(true);
+}
+
+ZymValue chunk_free(ZymVM* /*parentVm*/, ZymValue context) {
+    auto* r = static_cast<ChunkRes*>(zym_getNativeData(context));
+    if (!r || r->freed || !r->chunk) return zym_newBool(false);
+    if (r->h && !r->h->freed) zym_freeChunk(r->h->child, r->chunk);
+    r->freed = true;
+    r->chunk = nullptr;
+    return zym_newBool(true);
+}
+
+ZymValue cv_freeChunk(ZymVM* parentVm, ZymValue /*context*/, ZymValue chunkV) {
+    auto* r = unwrap_chunk(parentVm, chunkV);
+    if (!r || r->freed || !r->chunk) return zym_newBool(false);
+    if (r->h && !r->h->freed) zym_freeChunk(r->h->child, r->chunk);
+    r->freed = true;
+    r->chunk = nullptr;
+    return zym_newBool(true);
+}
+
+ZymValue make_source_map(ZymVM* parentVm, ChildVmHandle* h, ZymSourceMap* sm) {
+    auto* r = new SourceMapRes{ h, sm, false };
+    h->refcount++;
+    ZymValue ctx = zym_createNativeContext(parentVm, r, source_map_finalizer);
+    zym_pushRoot(parentVm, ctx);
+    ZymValue mFree = zym_createNativeClosure(parentVm, "free()", (void*)sm_free, ctx);
+    zym_pushRoot(parentVm, mFree);
+    ZymValue obj = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, obj);
+    zym_mapSet(parentVm, obj, "__sm__", ctx);
+    zym_mapSet(parentVm, obj, "free",   mFree);
+    for (int i = 0; i < 3; i++) zym_popRoot(parentVm);
+    return obj;
+}
+
+ZymValue make_chunk(ZymVM* parentVm, ChildVmHandle* h, ZymChunk* c) {
+    auto* r = new ChunkRes{ h, c, false };
+    h->refcount++;
+    ZymValue ctx = zym_createNativeContext(parentVm, r, chunk_finalizer);
+    zym_pushRoot(parentVm, ctx);
+    ZymValue mFree = zym_createNativeClosure(parentVm, "free()", (void*)chunk_free, ctx);
+    zym_pushRoot(parentVm, mFree);
+    ZymValue obj = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, obj);
+    zym_mapSet(parentVm, obj, "__chunk__", ctx);
+    zym_mapSet(parentVm, obj, "free",      mFree);
+    for (int i = 0; i < 3; i++) zym_popRoot(parentVm);
+    return obj;
 }
 
 // =============================================================================
@@ -248,25 +741,160 @@ ZymValue cv_defineGlobal(ZymVM* parentVm, ZymValue context,
     }
     const char* name = zym_asCString(nameV);
 
-    // PR 2: primitives only — string, number, bool. Lists, maps,
-    // structs, Buffer, callables land in PR 4 with the cross-VM
-    // marshaller.
+    // Cross-VM marshal: primitives, strings, lists, maps, structs, enums,
+    // Buffers (byte-copy), and closures (wrapped as variadic native closures
+    // on the child). See `src/bridge/cross_vm.{hpp,cpp}`.
     ZymValue marshalled;
-    if (zym_isString(value)) {
-        marshalled = zym_newString(h->child, zym_asCString(value));
-    } else if (zym_isNumber(value)) {
-        marshalled = zym_newNumber(zym_asNumber(value));
-    } else if (zym_isBool(value)) {
-        marshalled = zym_newBool(zym_asBool(value));
-    } else {
-        zym_runtimeError(parentVm,
-            "defineGlobal(name, value): only strings, numbers, and bools "
-            "are marshalled across VMs in this version");
+    if (!marshal_to_child(parentVm, h->child, value, &marshalled)) {
         return ZYM_ERROR;
     }
 
     zym_defineGlobal(h->child, name, marshalled);
     return zym_newBool(true);
+}
+
+// =============================================================================
+// PR 4: registerNative — bind a parent closure as a child native
+// =============================================================================
+
+ZymValue cv_registerNative(ZymVM* parentVm, ZymValue context,
+                           ZymValue sigV, ZymValue fnV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ true);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(sigV)) {
+        zym_runtimeError(parentVm,
+            "registerNative(signature, fn) expects a string signature");
+        return ZYM_ERROR;
+    }
+    if (!zym_isClosure(fnV) && !zym_isFunction(fnV)) {
+        zym_runtimeError(parentVm,
+            "registerNative(signature, fn) expects a closure as the second arg");
+        return ZYM_ERROR;
+    }
+    if (!zym_bridge::register_cross_native(
+            parentVm, h->child, zym_asCString(sigV), fnV)) {
+        return ZYM_ERROR;
+    }
+    return zym_newBool(true);
+}
+
+// =============================================================================
+// PR 4: loadModules — multi-file compile with parent-closure read callback
+// =============================================================================
+
+struct LoadModulesCtx {
+    ZymVM* parentVm;
+    ZymVM* child;
+    ZymValue parentCallback;  // parent-side closure
+};
+
+static ModuleReadResult zym_loadModules_trampoline(const char* path, void* user_data) {
+    ModuleReadResult result = { nullptr, nullptr, ZYM_FILE_ID_INVALID };
+    auto* ctx = static_cast<LoadModulesCtx*>(user_data);
+    if (!ctx || !ctx->parentVm || !ctx->child) return result;
+
+    // Call parent closure with the path string. Parent sees a parent-VM
+    // string; we marshal nothing back here — the script callback's job is
+    // to return either a map { source, sourceMap, fileId } or null.
+    ZymValue pathV = zym_newString(ctx->parentVm, path ? path : "");
+    ZymValue argv[1] = { pathV };
+    ZymStatus st = zym_callClosurev(ctx->parentVm, ctx->parentCallback, 1, argv);
+    if (st != ZYM_STATUS_OK) return result;
+
+    ZymValue ret = zym_getCallResult(ctx->parentVm);
+    if (zym_isNull(ret)) return result;
+    if (!zym_isMap(ret)) return result;
+
+    // Pull `source` (string), `sourceMap` (parent-side wrapper), `fileId`
+    // (number) from the returned map.
+    ZymValue srcV = zym_mapGet(ctx->parentVm, ret, "source");
+    if (srcV == ZYM_ERROR || zym_isNull(srcV) || !zym_isString(srcV)) return result;
+    ZymValue smV  = zym_mapGet(ctx->parentVm, ret, "sourceMap");
+    ZymValue fidV = zym_mapGet(ctx->parentVm, ret, "fileId");
+
+    const char* src = zym_asCString(srcV);
+    if (!src) return result;
+    // loadModules takes ownership of `source` (free'd in freeModuleLoadResult);
+    // duplicate into the heap so we don't hand out a VM-managed pointer.
+    size_t n = strlen(src);
+    char* heap_src = (char*)std::malloc(n + 1);
+    if (!heap_src) return result;
+    std::memcpy(heap_src, src, n + 1);
+
+    ZymSourceMap* smPtr = nullptr;
+    if (smV != ZYM_ERROR && !zym_isNull(smV)) {
+        auto* smr = unwrap_source_map(ctx->parentVm, smV);
+        if (smr && !smr->freed) smPtr = smr->sm;
+    }
+    ZymFileId fid = ZYM_FILE_ID_INVALID;
+    if (fidV != ZYM_ERROR && zym_isNumber(fidV)) {
+        fid = (ZymFileId)(int)zym_asNumber(fidV);
+    }
+
+    result.source     = heap_src;
+    result.source_map = smPtr;
+    result.file_id    = fid;
+    return result;
+}
+
+ZymValue cv_loadModules(ZymVM* parentVm, ZymValue context,
+                        ZymValue srcV, ZymValue smV, ZymValue entryV,
+                        ZymValue cbV, ZymValue optsV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(srcV) || !zym_isString(entryV)) {
+        zym_runtimeError(parentVm,
+            "loadModules(source, sourceMap, entryFile, callback, opts): bad arg types");
+        return ZYM_ERROR;
+    }
+    if (!zym_isClosure(cbV) && !zym_isFunction(cbV)) {
+        zym_runtimeError(parentVm,
+            "loadModules(source, sourceMap, entryFile, callback, opts): callback must be a closure");
+        return ZYM_ERROR;
+    }
+    auto* smr = require_source_map(parentVm, h, smV);
+    if (!smr) return ZYM_ERROR;
+
+    bool debug_names = true;
+    bool write_debug = false;
+    if (zym_isMap(optsV)) {
+        ZymValue v;
+        v = zym_mapGet(parentVm, optsV, "debugNames");
+        if (v != ZYM_ERROR && zym_isBool(v)) debug_names = zym_asBool(v);
+        v = zym_mapGet(parentVm, optsV, "writeDebugOutput");
+        if (v != ZYM_ERROR && zym_isBool(v)) write_debug = zym_asBool(v);
+    }
+
+    LoadModulesCtx ctx { parentVm, h->child, cbV };
+    zym_pushRoot(parentVm, cbV);
+    ModuleLoadResult* mr = loadModules(
+        h->child, zym_asCString(srcV), smr->sm, zym_asCString(entryV),
+        zym_loadModules_trampoline, &ctx,
+        debug_names, write_debug, nullptr);
+    zym_popRoot(parentVm);
+
+    ZymValue result = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, result);
+    if (!mr || mr->has_error) {
+        zym_mapSet(parentVm, result, "status", zym_newNumber((double)ZYM_STATUS_COMPILE_ERROR));
+        zym_mapSet(parentVm, result, "error",
+            zym_newString(parentVm, (mr && mr->error_message) ? mr->error_message : "loadModules failed"));
+    } else {
+        zym_mapSet(parentVm, result, "status", zym_newNumber((double)ZYM_STATUS_OK));
+        zym_mapSet(parentVm, result, "combinedSource",
+            zym_newString(parentVm, mr->combined_source ? mr->combined_source : ""));
+        ZymValue paths = zym_newList(parentVm);
+        zym_pushRoot(parentVm, paths);
+        for (int i = 0; i < mr->module_count; i++) {
+            zym_listAppend(parentVm, paths,
+                zym_newString(parentVm, mr->module_paths[i] ? mr->module_paths[i] : ""));
+        }
+        zym_mapSet(parentVm, result, "modulePaths", paths);
+        zym_popRoot(parentVm);
+    }
+    if (mr) freeModuleLoadResult(h->child, mr);
+    zym_popRoot(parentVm);
+    return result;
 }
 
 ZymValue cv_free(ZymVM* /*parentVm*/, ZymValue context) {
@@ -291,32 +919,60 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue ctx = zym_createNativeContext(parentVm, handle, child_handle_finalizer);
     zym_pushRoot(parentVm, ctx);
 
-    ZymValue mRegister = zym_createNativeClosure(
-        parentVm, "registerCliNative(arg)", (void*)cv_registerCliNative, ctx);
-    zym_pushRoot(parentVm, mRegister);
+#define MK_CLOSURE(sig, fn) zym_createNativeClosure(parentVm, sig, (void*)fn, ctx)
 
-    ZymValue mDefine = zym_createNativeClosure(
-        parentVm, "defineGlobal(name, value)", (void*)cv_defineGlobal, ctx);
-    zym_pushRoot(parentVm, mDefine);
+    // Setup-phase methods
+    ZymValue mRegister = MK_CLOSURE("registerCliNative(arg)", cv_registerCliNative);            zym_pushRoot(parentVm, mRegister);
+    ZymValue mDefine   = MK_CLOSURE("defineGlobal(name, value)", cv_defineGlobal);              zym_pushRoot(parentVm, mDefine);
+    ZymValue mRegN     = MK_CLOSURE("registerNative(signature, fn)", cv_registerNative);        zym_pushRoot(parentVm, mRegN);
 
-    ZymValue mCli = zym_createNativeClosure(
-        parentVm, "cliNatives()", (void*)cv_cliNatives, ctx);
-    zym_pushRoot(parentVm, mCli);
+    // Phase-neutral / introspection
+    ZymValue mCli      = MK_CLOSURE("cliNatives()", cv_cliNatives);                              zym_pushRoot(parentVm, mCli);
+    ZymValue mFree     = MK_CLOSURE("free()", cv_free);                                          zym_pushRoot(parentVm, mFree);
 
-    ZymValue mFree = zym_createNativeClosure(
-        parentVm, "free()", (void*)cv_free, ctx);
-    zym_pushRoot(parentVm, mFree);
+    // Pipeline (allowed in either phase; mutating ones flip phase to Execution).
+    ZymValue mNewSm    = MK_CLOSURE("newSourceMap()", cv_newSourceMap);                          zym_pushRoot(parentVm, mNewSm);
+    ZymValue mNewCh    = MK_CLOSURE("newChunk()", cv_newChunk);                                  zym_pushRoot(parentVm, mNewCh);
+    ZymValue mRegSrc   = MK_CLOSURE("registerSourceFile(path, source)", cv_registerSourceFile);  zym_pushRoot(parentVm, mRegSrc);
+    ZymValue mPre      = MK_CLOSURE("preprocess(source, sourceMap, fileId)", cv_preprocess);     zym_pushRoot(parentVm, mPre);
+    ZymValue mLoadMod  = MK_CLOSURE("loadModules(source, sourceMap, entryFile, callback, opts)", cv_loadModules); zym_pushRoot(parentVm, mLoadMod);
+    ZymValue mComp     = MK_CLOSURE("compile(source, chunk, sourceMap, entryFile, opts)", cv_compile); zym_pushRoot(parentVm, mComp);
+    ZymValue mSer      = MK_CLOSURE("serializeChunk(chunk, opts)", cv_serializeChunk);           zym_pushRoot(parentVm, mSer);
+    ZymValue mDes      = MK_CLOSURE("deserializeChunk(chunk, bytes)", cv_deserializeChunk);      zym_pushRoot(parentVm, mDes);
+    ZymValue mRun      = MK_CLOSURE("runChunk(chunk)", cv_runChunk);                             zym_pushRoot(parentVm, mRun);
+    ZymValue mCall     = MK_CLOSURE("call(name, args)", cv_call);                                zym_pushRoot(parentVm, mCall);
+    ZymValue mCallR    = MK_CLOSURE("callResult()", cv_callResult);                              zym_pushRoot(parentVm, mCallR);
+    ZymValue mHas      = MK_CLOSURE("hasFunction(name, arity)", cv_hasFunction);                 zym_pushRoot(parentVm, mHas);
+    ZymValue mDiag     = MK_CLOSURE("diagnostics()", cv_diagnostics);                            zym_pushRoot(parentVm, mDiag);
+    ZymValue mFreeCh   = MK_CLOSURE("freeChunk(chunk)", cv_freeChunk);                           zym_pushRoot(parentVm, mFreeCh);
+
+#undef MK_CLOSURE
 
     ZymValue obj = zym_newMap(parentVm);
     zym_pushRoot(parentVm, obj);
 
-    zym_mapSet(parentVm, obj, "registerCliNative", mRegister);
-    zym_mapSet(parentVm, obj, "defineGlobal",      mDefine);
-    zym_mapSet(parentVm, obj, "cliNatives",        mCli);
-    zym_mapSet(parentVm, obj, "free",              mFree);
+    zym_mapSet(parentVm, obj, "registerCliNative",  mRegister);
+    zym_mapSet(parentVm, obj, "defineGlobal",       mDefine);
+    zym_mapSet(parentVm, obj, "registerNative",     mRegN);
+    zym_mapSet(parentVm, obj, "cliNatives",         mCli);
+    zym_mapSet(parentVm, obj, "free",               mFree);
+    zym_mapSet(parentVm, obj, "newSourceMap",       mNewSm);
+    zym_mapSet(parentVm, obj, "newChunk",           mNewCh);
+    zym_mapSet(parentVm, obj, "registerSourceFile", mRegSrc);
+    zym_mapSet(parentVm, obj, "preprocess",         mPre);
+    zym_mapSet(parentVm, obj, "loadModules",        mLoadMod);
+    zym_mapSet(parentVm, obj, "compile",            mComp);
+    zym_mapSet(parentVm, obj, "serializeChunk",     mSer);
+    zym_mapSet(parentVm, obj, "deserializeChunk",   mDes);
+    zym_mapSet(parentVm, obj, "runChunk",           mRun);
+    zym_mapSet(parentVm, obj, "call",               mCall);
+    zym_mapSet(parentVm, obj, "callResult",         mCallR);
+    zym_mapSet(parentVm, obj, "hasFunction",        mHas);
+    zym_mapSet(parentVm, obj, "diagnostics",        mDiag);
+    zym_mapSet(parentVm, obj, "freeChunk",          mFreeCh);
 
-    // ctx + 4 closures + obj = 6
-    for (int i = 0; i < 6; i++) zym_popRoot(parentVm);
+    // ctx + 19 closures + obj = 21
+    for (int i = 0; i < 21; i++) zym_popRoot(parentVm);
     return obj;
 }
 
@@ -339,13 +995,21 @@ ZymValue nativeZym_create(ZymVM* vm, ZymCliVmCtx* ctx) {
         vm, "newVM()", (void*)z_newVM, sharedCtx);
     zym_pushRoot(vm, mNew);
 
+    // Status code mirror — `Zym.STATUS.OK`, `.COMPILE_ERROR`, etc.
+    ZymValue status = zym_newMap(vm);
+    zym_pushRoot(vm, status);
+    for (const auto& e : kStatusEntries) {
+        zym_mapSet(vm, status, e.name, zym_newNumber((double)e.value));
+    }
+
     ZymValue obj = zym_newMap(vm);
     zym_pushRoot(vm, obj);
 
     zym_mapSet(vm, obj, "cliNatives", mCli);
     zym_mapSet(vm, obj, "newVM",      mNew);
+    zym_mapSet(vm, obj, "STATUS",     status);
 
-    // sharedCtx + cliNatives + newVM + obj = 4
-    for (int i = 0; i < 4; i++) zym_popRoot(vm);
+    // sharedCtx + cliNatives + newVM + status + obj = 5
+    for (int i = 0; i < 5; i++) zym_popRoot(vm);
     return obj;
 }

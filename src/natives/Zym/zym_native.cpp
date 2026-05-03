@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -93,9 +94,16 @@ struct ChildVmHandle {
     bool freed = false;
     // Refcount for cross-resource ownership. The ChildVM map's native
     // context holds 1 ref; every SourceMap / Chunk wrapper allocated
-    // off this VM holds 1 ref. The handle is destroyed (and the child
-    // VM freed if not already) when the count drops to zero.
+    // off this VM holds 1 ref; every cached `getFunc` dispatcher holds
+    // 1 ref. The handle is destroyed (and the child VM freed if not
+    // already) when the count drops to zero.
     int refcount = 0;
+    // `getFunc` cache — same name on the same VM returns the same
+    // parent-side dispatcher closure every time (identity-stable per
+    // user spec). Entries are removed when their dispatcher's
+    // finalizer fires (script lost all refs) or when the handle
+    // tears down.
+    std::unordered_map<std::string, ZymValue> funcCache;
 };
 
 void handle_decref(ChildVmHandle* h);
@@ -753,6 +761,108 @@ ZymValue cv_callResult(ZymVM* parentVm, ZymValue context) {
     return parentResult;
 }
 
+// =============================================================================
+// getFunc — parent-side dispatcher closure mirroring a child function set
+// =============================================================================
+//
+// `vm.getFunc(name)` returns a parent-side variadic native closure that
+// forwards into `zym_callv(child, name, ...)` and marshals the result
+// back. The wrapper covers the entire function set for that name on the
+// child (every fixed overload + any variadic), with overload resolution
+// performed on the child via the normal `zym_call_prepare` walk.
+//
+// Identity is stable per name on the same VM: the wrapper is cached on
+// the handle and the same `ZymValue` is returned every time.
+
+struct GetFuncCtx {
+    ChildVmHandle* h = nullptr;
+    std::string name;
+};
+
+void getfunc_finalizer(ZymVM* /*parentVm*/, void* p) {
+    auto* g = static_cast<GetFuncCtx*>(p);
+    if (!g) return;
+    if (g->h) {
+        // Cache key still owns its (now-being-freed) ZymValue entry; the
+        // cache map sits inside `funcCache` on the handle. Erase it so
+        // a subsequent `getFunc(name)` rebuilds a fresh wrapper.
+        g->h->funcCache.erase(g->name);
+        handle_decref(g->h);
+    }
+    delete g;
+}
+
+// Variadic native body for the dispatcher closure. Marshals every
+// positional arg from parent → child, forwards the call, marshals the
+// result back. Triggers the setup→execution freeze (matches `cv_call`).
+// Errors during the call (non-OK status, marshalling failure, etc.)
+// surface as a parent-side runtime error with the canonical
+// "no such native" message — same shape `cv.call` already uses.
+ZymValue cv_invoke_dispatcher(ZymVM* parentVm, ZymValue context,
+                              ZymValue* vargs, int vargc) {
+    auto* g = static_cast<GetFuncCtx*>(zym_getNativeData(context));
+    if (!g || !g->h || g->h->freed || !g->h->child) {
+        zym_runtimeError(parentVm, "no such native");
+        return ZYM_ERROR;
+    }
+    ChildVmHandle* h = g->h;
+
+    std::vector<ZymValue> argv;
+    argv.reserve((size_t)vargc);
+    for (int i = 0; i < vargc; i++) {
+        ZymValue childArg;
+        if (!marshal_to_child(parentVm, h->child, vargs[i], &childArg)) {
+            return ZYM_ERROR;
+        }
+        argv.push_back(childArg);
+    }
+    ZymStatus st = call_to_completion(h->child, g->name.c_str(), vargc,
+                                      argv.empty() ? nullptr : argv.data());
+    freeze(h);
+    if (st != ZYM_STATUS_OK) {
+        zym_runtimeError(parentVm, "no such native");
+        return ZYM_ERROR;
+    }
+    ZymValue childResult = zym_getCallResult(h->child);
+    if (childResult == ZYM_ERROR) return zym_newNull();
+    ZymValue parentResult;
+    if (!marshal_to_parent(h->child, parentVm, childResult, &parentResult)) {
+        return ZYM_ERROR;
+    }
+    return parentResult;
+}
+
+ZymValue cv_getFunc(ZymVM* parentVm, ZymValue context, ZymValue nameV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(nameV)) {
+        zym_runtimeError(parentVm, "getFunc(name): name must be a string");
+        return ZYM_ERROR;
+    }
+    const char* name = zym_asCString(nameV);
+    if (!zym_hasAnyFunction(h->child, name)) {
+        return zym_newNull();
+    }
+    // Cached? Return the same value every time for identity stability.
+    auto it = h->funcCache.find(name);
+    if (it != h->funcCache.end()) {
+        return it->second;
+    }
+    auto* g = new GetFuncCtx{ h, std::string(name) };
+    ZymValue ctx = zym_createNativeContext(parentVm, g, getfunc_finalizer);
+    zym_pushRoot(parentVm, ctx);
+    // Use a generic signature — the child does real arity resolution per
+    // call via `zym_call_prepare`. The signature's display name doesn't
+    // need to match `name`; what matters is that it's variadic with zero
+    // fixed prefix so the wrapper accepts any argc.
+    ZymValue closure = zym_createNativeClosureVariadic(
+        parentVm, "getFunc(...)", (void*)cv_invoke_dispatcher, ctx);
+    zym_popRoot(parentVm);
+    h->refcount++;  // one ref held by the cached dispatcher closure
+    h->funcCache.emplace(std::string(name), closure);
+    return closure;
+}
+
 const char* severity_name(ZymDiagSeverity s) {
     switch (s) {
         case ZYM_DIAG_ERROR:   return "error";
@@ -1137,6 +1247,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mHas      = MK_CLOSURE("hasFunction(name, arity)", cv_hasFunction);                 zym_pushRoot(parentVm, mHas);
     ZymValue mHasFunc  = zym_createNativeClosureVariadic(parentVm,
                             "hasFunc(name, ...)", (void*)cv_hasFunc, ctx);                       zym_pushRoot(parentVm, mHasFunc);
+    ZymValue mGetFunc  = MK_CLOSURE("getFunc(name)", cv_getFunc);                                zym_pushRoot(parentVm, mGetFunc);
     ZymValue mDiag     = MK_CLOSURE("diagnostics()", cv_diagnostics);                            zym_pushRoot(parentVm, mDiag);
     ZymValue mFreeCh   = MK_CLOSURE("freeChunk(chunk)", cv_freeChunk);                           zym_pushRoot(parentVm, mFreeCh);
 
@@ -1166,11 +1277,12 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "callResult",         mCallR);
     zym_mapSet(parentVm, obj, "hasFunction",        mHas);
     zym_mapSet(parentVm, obj, "hasFunc",            mHasFunc);
+    zym_mapSet(parentVm, obj, "getFunc",            mGetFunc);
     zym_mapSet(parentVm, obj, "diagnostics",        mDiag);
     zym_mapSet(parentVm, obj, "freeChunk",          mFreeCh);
 
-    // ctx + 23 closures + obj = 25
-    for (int i = 0; i < 25; i++) zym_popRoot(parentVm);
+    // ctx + 24 closures + obj = 26
+    for (int i = 0; i < 26; i++) zym_popRoot(parentVm);
     return obj;
 }
 

@@ -148,6 +148,7 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.call(name, args)` | `int` (status) | Calls a top-level function on the child by name with positional `args` (a list). Args are marshalled across the VM boundary (full graph copy). Auto-loops on `YIELD`. **Flips the child into execution phase.** |
 | `cv.callv(name, ...args)` | `int` (status) | Positional-args sibling to `cv.call`. `vm.callv("greet", "ada")` is equivalent to `vm.call("greet", ["ada"])`, just spelled with positional args at the call site rather than an explicit list. Both write to the same backing slot, so `cv.callResult()` reads the result of whichever was used most recently. Mirrors the C `zym_callv` / `zym_call` split. |
 | `cv.callResult()` | `value` | Returns the marshalled return value of the most recent successful `cv.call(...)` / `cv.callv(...)`. Lists, maps, structs, enums, Buffers, and closures (wrapped on the parent side) all round-trip back. |
+| `cv.getFunc(name)` | `callable` or `null` | Returns a parent-side callable that forwards into the child function set named `name` (every fixed overload + any variadic, with overload resolution performed by the child per call). Invoking it returns the marshalled value directly — no `callResult` step needed. Returns `null` if no such name exists on the child. **Identity-stable:** calling `getFunc(name)` twice on the same VM returns the same callable. |
 
 ### Lifecycle
 
@@ -457,6 +458,65 @@ print(vm.callResult())               // [1, 2, 3, 4]
 small, named set; `call` is the right choice when the args are
 already a list (e.g., a forwarded `...rest`, a parsed JSON payload,
 or a list built up by `map`/`reduce`).
+
+### `getFunc` — store and call like a native
+
+`cv.call` and `cv.callv` are the right shape when you're driving the
+child function-by-function from a known sequence of work. When you
+want to *hold onto* a child function and call it many times — for
+module/helper patterns, callbacks stored in a parent-side data
+structure, or just to keep the call site clean — `cv.getFunc(name)`
+returns a parent-side callable that forwards into the child function
+set as if it were a native parent closure.
+
+The returned callable covers the **entire function set** under that
+name on the child: every fixed overload plus any variadic. Overload
+resolution is performed on the child per call (same logic that
+`cv.call` / `cv.callv` go through), so a single `getFunc` result
+handles every shape the child accepts.
+
+```zym
+var src = "
+    func greet(who) { return \"hi \" + who }
+    func add(a, b)  { return a + b }
+    func collect(...parts) { return parts }
+"
+
+var vm = Zym.newVM()
+vm.run(src)
+
+// Look up once, call as if it were a regular callable.
+var greet   = vm.getFunc("greet")
+var add     = vm.getFunc("add")
+var collect = vm.getFunc("collect")
+
+print(greet("ada"))                  // hi ada
+print(add(2, 3))                     // 5
+print(collect(1, 2, 3, 4))           // [1, 2, 3, 4]
+
+// Identity-stable: same name, same VM → same callable.
+print(vm.getFunc("greet") == greet)  // true
+
+// Absent name → null. Idiomatic guard:
+var maybeMain = vm.getFunc("main")
+if (maybeMain != null) {
+    maybeMain()
+}
+```
+
+The result is a normal value: store it in a list/map, pass it to a
+parent-side higher-order function, hand it to another VM via
+`registerNative` — wherever a callable is accepted, the dispatcher
+fits in. Args go in the same way as `call` / `callv` (full marshalled
+graph, including Buffers and cross-VM closures); the return value
+comes back marshalled, so there's no separate `callResult` step.
+
+`getFunc` itself doesn't change phase — it's a read against the
+child's compiled global table. The returned callable, when invoked,
+flips the child into execution phase if it isn't already (same trigger
+as `call` / `callv`). Looking up a name before the child has been
+compiled returns `null` because the function genuinely isn't there
+yet.
 
 ### Calling variadic functions
 

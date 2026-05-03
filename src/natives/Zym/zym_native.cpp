@@ -498,6 +498,133 @@ ZymValue cv_runChunk(ZymVM* parentVm, ZymValue context, ZymValue chunkV) {
     return zym_newNumber((double)st);
 }
 
+// Forward decls — defined further down (alongside marshal_to_child).
+bool marshal_to_parent(ZymVM* child, ZymVM* parentVm, ZymValue v, ZymValue* out);
+
+// -----------------------------------------------------------------------------
+// vm.run(srcOrBuffer) and vm.runBytecode(bytecodeBuffer) — convenience helpers
+// that compress the standard
+//   newSourceMap → registerSourceFile → newChunk → compile → runChunk
+// (or newChunk → deserializeChunk → runChunk) sequence into a single call.
+// Return shape: { status, result } where `status` is a `Zym.STATUS` code and
+// `result` is the value returned by the chunk's top-level (or `null`).
+// -----------------------------------------------------------------------------
+
+ZymValue cv_run(ZymVM* parentVm, ZymValue context, ZymValue srcV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+
+    // Accept either a string or a Buffer carrying utf-8 source bytes.
+    const char* src = nullptr;
+    std::string srcStorage;
+    if (zym_isString(srcV)) {
+        src = zym_asCString(srcV);
+    } else {
+        const char* data = nullptr;
+        size_t size = 0;
+        if (!readBufferBytes(parentVm, srcV, &data, &size)) {
+            zym_runtimeError(parentVm,
+                "run(source) expects a string or a Buffer of source bytes");
+            return ZYM_ERROR;
+        }
+        srcStorage.assign(data, size);
+        src = srcStorage.c_str();
+    }
+
+    ZymSourceMap* sm = zym_newSourceMap(h->child);
+    ZymChunk*     ch = zym_newChunk(h->child);
+    if (!sm || !ch) {
+        if (sm) zym_freeSourceMap(h->child, sm);
+        if (ch) zym_freeChunk(h->child, ch);
+        zym_runtimeError(parentVm, "no such native");
+        return ZYM_ERROR;
+    }
+    ZymFileId fid = zym_registerSourceFile(h->child, "<inline>",
+                                           src, std::strlen(src));
+
+    // Run the preprocessor first so directives (e.g. imports/macros) are
+    // expanded before compilation, matching the manual pipeline.
+    const char* processed = nullptr;
+    ZymStatus st = zym_preprocess(h->child, src, sm, fid, &processed);
+    const char* compileSrc = (st == ZYM_STATUS_OK && processed) ? processed : src;
+
+    ZymCompilerConfig config = { /*include_line_info=*/ true };
+    if (st == ZYM_STATUS_OK) {
+        st = zym_compile(h->child, compileSrc, ch, sm, "<inline>", config, nullptr);
+    }
+    freeze(h);
+
+    ZymValue result = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, result);
+    if (st == ZYM_STATUS_OK) {
+        st = run_to_completion_chunk(h->child, ch);
+    }
+    zym_mapSet(parentVm, result, "status", zym_newNumber((double)st));
+
+    ZymValue marshalled = zym_newNull();
+    if (st == ZYM_STATUS_OK) {
+        ZymValue r = zym_getCallResult(h->child);
+        if (r != ZYM_ERROR) {
+            ZymValue tmp;
+            if (marshal_to_parent(h->child, parentVm, r, &tmp)) {
+                marshalled = tmp;
+            }
+        }
+    }
+    zym_mapSet(parentVm, result, "result", marshalled);
+
+    if (processed) zym_freeProcessedSource(h->child, processed);
+    zym_freeChunk(h->child, ch);
+    zym_freeSourceMap(h->child, sm);
+    zym_popRoot(parentVm);
+    return result;
+}
+
+ZymValue cv_runBytecode(ZymVM* parentVm, ZymValue context, ZymValue bufV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+
+    const char* data = nullptr;
+    size_t size = 0;
+    if (!readBufferBytes(parentVm, bufV, &data, &size)) {
+        zym_runtimeError(parentVm,
+            "runBytecode(bytes) expects a Buffer of bytecode");
+        return ZYM_ERROR;
+    }
+
+    ZymChunk* ch = zym_newChunk(h->child);
+    if (!ch) {
+        zym_runtimeError(parentVm, "no such native");
+        return ZYM_ERROR;
+    }
+
+    ZymStatus st = zym_deserializeChunk(h->child, ch, data, size);
+    freeze(h);
+
+    ZymValue result = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, result);
+    if (st == ZYM_STATUS_OK) {
+        st = run_to_completion_chunk(h->child, ch);
+    }
+    zym_mapSet(parentVm, result, "status", zym_newNumber((double)st));
+
+    ZymValue marshalled = zym_newNull();
+    if (st == ZYM_STATUS_OK) {
+        ZymValue r = zym_getCallResult(h->child);
+        if (r != ZYM_ERROR) {
+            ZymValue tmp;
+            if (marshal_to_parent(h->child, parentVm, r, &tmp)) {
+                marshalled = tmp;
+            }
+        }
+    }
+    zym_mapSet(parentVm, result, "result", marshalled);
+
+    zym_freeChunk(h->child, ch);
+    zym_popRoot(parentVm);
+    return result;
+}
+
 ZymValue cv_hasFunction(ZymVM* parentVm, ZymValue context,
                         ZymValue nameV, ZymValue arityV) {
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
@@ -509,6 +636,38 @@ ZymValue cv_hasFunction(ZymVM* parentVm, ZymValue context,
     return zym_newBool(zym_hasFunction(h->child,
                                        zym_asCString(nameV),
                                        (int)zym_asNumber(arityV)));
+}
+
+// hasFunc(name) — true if any callable named `name` exists at any arity
+//   (fixed or variadic). Delegates to `zym_hasAnyFunction`.
+// hasFunc(name, arity) — true if a callable named `name` is dispatchable
+//   with exactly `arity` args. Returns true for either an exact fixed-arity
+//   match (`name@arity`) or a variadic acceptance (`name@vF` with
+//   `arity >= F`). Delegates to `zym_canCallWith`.
+//
+// Variadic on the script side so the second arg is optional.
+ZymValue cv_hasFunc(ZymVM* parentVm, ZymValue context,
+                    ZymValue nameV, ZymValue* vargs, int vargc) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(nameV)) {
+        zym_runtimeError(parentVm, "hasFunc(name [, arity]): name must be a string");
+        return ZYM_ERROR;
+    }
+    if (vargc > 1) {
+        zym_runtimeError(parentVm, "hasFunc: too many arguments (expected name [, arity])");
+        return ZYM_ERROR;
+    }
+    const char* name = zym_asCString(nameV);
+
+    if (vargc == 1) {
+        if (!zym_isNumber(vargs[0])) {
+            zym_runtimeError(parentVm, "hasFunc(name, arity): arity must be a number");
+            return ZYM_ERROR;
+        }
+        return zym_newBool(zym_canCallWith(h->child, name, (int)zym_asNumber(vargs[0])));
+    }
+    return zym_newBool(zym_hasAnyFunction(h->child, name));
 }
 
 // Marshal a single primitive across VMs. PR 3 keeps this primitives-only,
@@ -548,6 +707,35 @@ ZymValue cv_call(ZymVM* parentVm, ZymValue context,
         argv.push_back(childArg);
     }
     ZymStatus st = call_to_completion(h->child, zym_asCString(nameV), n,
+                                      argv.empty() ? nullptr : argv.data());
+    freeze(h);
+    return zym_newNumber((double)st);
+}
+
+// Variadic positional-args sibling to `cv_call`. Mirrors `zym_callv` in
+// the C API: `vm.callv(name, a, b, c)` is the same call as
+// `vm.call(name, [a, b, c])`, just spelled with positional args at the
+// call site rather than an explicit list. Both write to the same
+// backing slot, so `vm.callResult()` reads the result of whichever
+// was used most recently.
+ZymValue cv_callv(ZymVM* parentVm, ZymValue context,
+                  ZymValue nameV, ZymValue* vargs, int vargc) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isString(nameV)) {
+        zym_runtimeError(parentVm, "callv(name, ...): name must be a string");
+        return ZYM_ERROR;
+    }
+    std::vector<ZymValue> argv;
+    argv.reserve((size_t)vargc);
+    for (int i = 0; i < vargc; i++) {
+        ZymValue childArg;
+        if (!marshal_to_child(parentVm, h->child, vargs[i], &childArg)) {
+            return ZYM_ERROR;
+        }
+        argv.push_back(childArg);
+    }
+    ZymStatus st = call_to_completion(h->child, zym_asCString(nameV), vargc,
                                       argv.empty() ? nullptr : argv.data());
     freeze(h);
     return zym_newNumber((double)st);
@@ -940,9 +1128,15 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mSer      = MK_CLOSURE("serializeChunk(chunk, opts)", cv_serializeChunk);           zym_pushRoot(parentVm, mSer);
     ZymValue mDes      = MK_CLOSURE("deserializeChunk(chunk, bytes)", cv_deserializeChunk);      zym_pushRoot(parentVm, mDes);
     ZymValue mRun      = MK_CLOSURE("runChunk(chunk)", cv_runChunk);                             zym_pushRoot(parentVm, mRun);
+    ZymValue mRunSrc   = MK_CLOSURE("run(source)", cv_run);                                      zym_pushRoot(parentVm, mRunSrc);
+    ZymValue mRunBc    = MK_CLOSURE("runBytecode(bytes)", cv_runBytecode);                       zym_pushRoot(parentVm, mRunBc);
     ZymValue mCall     = MK_CLOSURE("call(name, args)", cv_call);                                zym_pushRoot(parentVm, mCall);
+    ZymValue mCallV    = zym_createNativeClosureVariadic(parentVm,
+                            "callv(name, ...)", (void*)cv_callv, ctx);                            zym_pushRoot(parentVm, mCallV);
     ZymValue mCallR    = MK_CLOSURE("callResult()", cv_callResult);                              zym_pushRoot(parentVm, mCallR);
     ZymValue mHas      = MK_CLOSURE("hasFunction(name, arity)", cv_hasFunction);                 zym_pushRoot(parentVm, mHas);
+    ZymValue mHasFunc  = zym_createNativeClosureVariadic(parentVm,
+                            "hasFunc(name, ...)", (void*)cv_hasFunc, ctx);                       zym_pushRoot(parentVm, mHasFunc);
     ZymValue mDiag     = MK_CLOSURE("diagnostics()", cv_diagnostics);                            zym_pushRoot(parentVm, mDiag);
     ZymValue mFreeCh   = MK_CLOSURE("freeChunk(chunk)", cv_freeChunk);                           zym_pushRoot(parentVm, mFreeCh);
 
@@ -965,14 +1159,18 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "serializeChunk",     mSer);
     zym_mapSet(parentVm, obj, "deserializeChunk",   mDes);
     zym_mapSet(parentVm, obj, "runChunk",           mRun);
+    zym_mapSet(parentVm, obj, "run",                mRunSrc);
+    zym_mapSet(parentVm, obj, "runBytecode",        mRunBc);
     zym_mapSet(parentVm, obj, "call",               mCall);
+    zym_mapSet(parentVm, obj, "callv",              mCallV);
     zym_mapSet(parentVm, obj, "callResult",         mCallR);
     zym_mapSet(parentVm, obj, "hasFunction",        mHas);
+    zym_mapSet(parentVm, obj, "hasFunc",            mHasFunc);
     zym_mapSet(parentVm, obj, "diagnostics",        mDiag);
     zym_mapSet(parentVm, obj, "freeChunk",          mFreeCh);
 
-    // ctx + 19 closures + obj = 21
-    for (int i = 0; i < 21; i++) zym_popRoot(parentVm);
+    // ctx + 23 closures + obj = 25
+    for (int i = 0; i < 25; i++) zym_popRoot(parentVm);
     return obj;
 }
 

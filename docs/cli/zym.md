@@ -22,7 +22,9 @@ see `docs/buffer.md`.
 
 The shortest end-to-end path: spin up a VM, register one parent
 native, compile and run a script that uses it, call a function on the
-child, then free the VM.
+child, then free the VM. `vm.run(src)` collapses
+sourceMap + registerSourceFile + newChunk + compile + runChunk into a
+single call and returns `{ status, result }`.
 
 ```zym
 var src = "
@@ -34,12 +36,7 @@ var src = "
 var vm = Zym.newVM()
 vm.registerNative("hostHello(who)", func(who) { return "hi " + who })
 
-var sm  = vm.newSourceMap()
-var fid = vm.registerSourceFile("entry.zym", src)
-var ch  = vm.newChunk()
-
-vm.compile(src, ch, sm, "entry.zym", { includeLineInfo: true })
-vm.runChunk(ch)
+vm.run(src)
 
 vm.call("greet", ["ada"])
 print(vm.callResult())            // hi ada
@@ -50,7 +47,9 @@ vm.free()
 That's the whole loop. Everything else in this document is either an
 elaboration of one of these steps (capability grants, multi-file
 compiles, bytecode round-trips, diagnostics) or a different value
-shape crossing the bridge.
+shape crossing the bridge. The full pipeline (`newSourceMap`,
+`registerSourceFile`, `newChunk`, `compile`, `runChunk`) remains
+available when you need finer control.
 
 ---
 
@@ -125,7 +124,8 @@ they raise `no such native`.
 | Method | Returns | Notes |
 | --- | --- | --- |
 | `cv.cliNatives()` | `[string]` | The names this child has been granted, in grant order. Equivalent to "what this child could grant onward". |
-| `cv.hasFunction(name, arity)` | `bool` | True iff the child has a top-level function `name` with the given arity. |
+| `cv.hasFunction(name, arity)` | `bool` | True iff the child has a top-level function `name` with exactly the given fixed arity. Strict slot probe. |
+| `cv.hasFunc(name [, arity])` | `bool` | Existence probe with an optional arity. With one argument, returns `true` if **any** callable named `name` exists at any arity (fixed *or* variadic). With two arguments, returns `true` if calling `name` with exactly `arity` args can dispatch — i.e., either an exact fixed-arity match or a variadic with `arity >= fixed-prefix`. Useful for entry-point discovery (`if (vm.hasFunc("main")) ...`) before any `cv.call`. Not intended for hot paths. |
 | `cv.diagnostics()` | `[map]` | Drains the child's diagnostic sink. Each entry is `{ severity, file, fileId, line, column, startByte, length, message }`. `severity` is one of `"error"`, `"warning"`, `"info"`, `"hint"`. After this call the child's sink is empty. |
 
 ### Pipeline
@@ -143,8 +143,11 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.serializeChunk(chunk, opts)` | `{ status, bytes }` | Serializes a compiled chunk to a `Buffer` of `.zbc` bytes. `opts.includeLineInfo` mirrors compile. |
 | `cv.deserializeChunk(chunk, bytes)` | `int` (status) | Loads `.zbc` bytes (a `Buffer`) into a freshly-allocated chunk. **Flips the child into execution phase.** |
 | `cv.runChunk(chunk)` | `int` (status) | Runs a compiled or deserialized chunk on the child. Auto-loops on `YIELD`. **Flips the child into execution phase.** |
+| `cv.run(source)` | `{ status, result }` | One-shot helper: registers a hidden source file, **runs the preprocessor**, compiles, and runs the chunk in a single call. `source` is a `string` or a `Buffer` of utf-8 source bytes (not a `.zbc` Buffer — use `runBytecode` for that). `status` is a `Zym.STATUS` code; `result` is the marshalled top-level return value (or `null` on non-`OK` status). **Flips the child into execution phase.** |
+| `cv.runBytecode(bytes)` | `{ status, result }` | One-shot helper for serialized bytecode: deserializes `bytes` (a `Buffer` produced by `serializeChunk`) into a fresh chunk and runs it. Same return shape as `run`. **Flips the child into execution phase.** |
 | `cv.call(name, args)` | `int` (status) | Calls a top-level function on the child by name with positional `args` (a list). Args are marshalled across the VM boundary (full graph copy). Auto-loops on `YIELD`. **Flips the child into execution phase.** |
-| `cv.callResult()` | `value` | Returns the marshalled return value of the most recent successful `cv.call(...)`. Lists, maps, structs, enums, Buffers, and closures (wrapped on the parent side) all round-trip back. |
+| `cv.callv(name, ...args)` | `int` (status) | Positional-args sibling to `cv.call`. `vm.callv("greet", "ada")` is equivalent to `vm.call("greet", ["ada"])`, just spelled with positional args at the call site rather than an explicit list. Both write to the same backing slot, so `cv.callResult()` reads the result of whichever was used most recently. Mirrors the C `zym_callv` / `zym_call` split. |
+| `cv.callResult()` | `value` | Returns the marshalled return value of the most recent successful `cv.call(...)` / `cv.callv(...)`. Lists, maps, structs, enums, Buffers, and closures (wrapped on the parent side) all round-trip back. |
 
 ### Lifecycle
 
@@ -201,6 +204,45 @@ if (vm.compile(pre.source, ch, sm, "entry.zym", { includeLineInfo: true }) == Zy
     }
 }
 ```
+
+### One-shot `run` / `runBytecode`
+
+When you don't need to keep the source map or chunk around, `vm.run`
+collapses the boilerplate into a single call. It accepts either a
+source `string` or a `Buffer` carrying utf-8 source bytes, and returns
+`{ status, result }` where `result` is the top-level return value of
+the script (or `null` on non-`OK` status).
+
+```zym
+var vm = Zym.newVM()
+var r  = vm.run("func answer() { return 42 } answer()")
+print("%v", r)                       // {"status": 0, "result": 42}
+
+// Source from a Buffer (e.g. read from a file or sent across a VM
+// boundary) works the same.
+var blob = Buffer.fromString("func three() { return 3 } three()")
+print("%v", Zym.newVM().run(blob))   // {"status": 0, "result": 3}
+
+// run runs the preprocessor first, so directives expand transparently.
+var pp = Zym.newVM().run("#define ANSWER 42\nfunc a() { return ANSWER } a()")
+print("%v", pp)                      // {"status": 0, "result": 42}
+```
+
+`runBytecode` is the equivalent for serialized `.zbc` bytes — pass it
+the `Buffer` returned by `serializeChunk` and it deserializes + runs
+in one shot:
+
+```zym
+// Compile once, ship the bytes, run somewhere else.
+var ser = vm.serializeChunk(ch, { includeLineInfo: true })
+
+var vm2 = Zym.newVM()
+print("%v", vm2.runBytecode(ser.bytes))   // {"status": 0, "result": ...}
+```
+
+Both helpers flip the child into execution phase, so any
+setup-only call (`registerCliNative`, `defineGlobal`,
+`registerNative`) must happen *before* `run` / `runBytecode`.
 
 ### Round-trip through `.zbc` bytes
 
@@ -302,6 +344,52 @@ Notes:
 - `loadModules` does **not** flip the child into execution phase on its
   own; the subsequent `compile` call does.
 
+### Probing for a function before calling it
+
+`cv.hasFunc` answers "is this name callable?" without committing to a
+particular arity. It's the recommended pre-check before `cv.call` for
+optional entry points (`main`, lifecycle hooks, etc.). Pass an arity
+to narrow the question to a specific overload.
+
+```zym
+var vm = Zym.newVM()
+vm.run("
+    func answer() { return 42 }
+    func greet(who) { return who }
+    func add(a, b) { return a + b }
+")
+
+// Existence question — any arity counts.
+print(vm.hasFunc("answer"))          // true
+print(vm.hasFunc("greet"))           // true
+print(vm.hasFunc("missing"))         // false
+
+// Specific overload question — exact arity match.
+print(vm.hasFunc("add", 2))          // true
+print(vm.hasFunc("add", 3))          // false
+print(vm.hasFunc("answer", 0))       // true
+
+// Idiomatic optional entry-point dispatch.
+if (vm.hasFunc("main")) {
+    vm.call("main", [argv])
+}
+
+// Variadics are detected too — both script `func collect(...parts)` and
+// natives registered via `registerNative("collect(...parts)", fn)`.
+// With an arity, `hasFunc` answers "can I call it with N args?" — true
+// for variadics whenever `N >= fixed-prefix`.
+var vm2 = Zym.newVM()
+vm2.run("
+    func collect(...parts)         { return parts }
+    func label(name, ...rest)      { return [name, rest] }
+")
+print(vm2.hasFunc("collect"))        // true
+print(vm2.hasFunc("collect", 0))     // true (variadic accepts 0)
+print(vm2.hasFunc("collect", 5))     // true
+print(vm2.hasFunc("label", 1))       // true (just the fixed prefix)
+print(vm2.hasFunc("label", 0))       // false (below fixed prefix)
+```
+
 ### Calling regular (fixed-arity) functions
 
 `cv.call` takes a list of positional args. The result of the call —
@@ -332,6 +420,43 @@ var d = vm.callResult()
 print(d.who)                         // ada
 print(d.count)                       // 10
 ```
+
+### `callv` — positional args at the call site
+
+When the args are literals, `cv.callv(name, ...)` skips the
+list-wrapping ceremony of `cv.call`. The two are equivalent — both
+write to the same backing slot, both walk the same arity-resolution
+path, both return a `Zym.STATUS` code, and both leave the result
+where `cv.callResult()` reads it. Use whichever shape matches the
+call site.
+
+```zym
+var src = "
+    func greet(who) { return \"hi \" + who }
+    func add(a, b)  { return a + b }
+    func collect(...parts) { return parts }
+"
+
+var vm = Zym.newVM()
+vm.run(src)
+
+// Equivalent — pick whichever fits the call site:
+vm.call("greet", ["ada"])
+vm.callv("greet", "ada")             // same result, no list
+
+vm.callv("add", 2, 3)
+print(vm.callResult())               // 5
+
+// Variadics resolve naturally: trailing positional args are packed
+// into the child's rest parameter.
+vm.callv("collect", 1, 2, 3, 4)
+print(vm.callResult())               // [1, 2, 3, 4]
+```
+
+`callv` is most useful when the args are literals or come from a
+small, named set; `call` is the right choice when the args are
+already a list (e.g., a forwarded `...rest`, a parsed JSON payload,
+or a list built up by `map`/`reduce`).
 
 ### Calling variadic functions
 

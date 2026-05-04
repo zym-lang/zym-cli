@@ -91,6 +91,96 @@ var m2 = Meta { ...m1, .name = "updated" }
 assert_wrap(m2.id == 1 && m2.name == "updated", "3.5: Partial update via spread")
 
 // ============================================================================
+// SECTION 4: CALL SPREAD
+// ============================================================================
+print("=== SECTION 4: Call Spread ===")
+
+func sum3(a, b, c) {
+    return a + b + c
+}
+
+var args3 = [10, 20, 30]
+assert_wrap(sum3(...args3) == 60, "4.1: All args via spread")
+
+var args2 = [20, 30]
+assert_wrap(sum3(10, ...args2) == 60, "4.2: One fixed + spread of two")
+
+var args1 = [30]
+assert_wrap(sum3(10, 20, ...args1) == 60, "4.3: Two fixed + spread of one")
+
+// Multiple spreads in tail
+var partA = [10]
+var partB = [20, 30]
+assert_wrap(sum3(...partA, ...partB) == 60, "4.4: Multiple spreads")
+
+// Variadic interaction
+func variadic_sum(first, ...rest) {
+    var total = first
+    for (var i = 0; i < length(rest); i = i + 1) {
+        total = total + rest[i]
+    }
+    return total
+}
+
+var many = [2, 3, 4, 5]
+assert_wrap(variadic_sum(1, ...many) == 15, "4.5: Variadic with spread tail")
+
+var allArgs = [1, 2, 3, 4, 5]
+assert_wrap(variadic_sum(...allArgs) == 15, "4.6: Variadic, full spread")
+
+// Empty spread
+var empty = []
+assert_wrap(sum3(1, 2, 3, ...empty) == 6, "4.7: Empty spread keeps fixed args")
+
+// Nested call with spread arg expression: spread a list returned by a call
+func make_three() {
+    return [10, 20, 30]
+}
+assert_wrap(sum3(...make_three()) == 60, "4.8: Spread of list returned by a call")
+
+// ---- Interleaved fixed/spread args (universal-cursor) ----
+
+func sum5(a, b, c, d, e) {
+    return a + b + c + d + e
+}
+
+// Fixed after spread
+var p1 = [10, 20]
+assert_wrap(sum3(...p1, 30) == 60, "4.9: Fixed arg after spread")
+
+// Fixed surrounded by spreads
+var sA = [1]
+var sC = [3]
+assert_wrap(sum5(...sA, 2, ...sC, 4, 5) == 15, "4.10: Fixed args interleaved between spreads")
+
+// Crazy interleaving into a variadic function: f(...a, b, ...c, ...d, e)
+func vsum(...xs) {
+    var t = 0
+    for (var i = 0; i < length(xs); i = i + 1) { t = t + xs[i] }
+    return t
+}
+var aL = [1, 2]
+var cL = [4]
+var dL = [5, 6]
+assert_wrap(vsum(...aL, 3, ...cL, ...dL, 7) == (1+2+3+4+5+6+7),
+            "4.11: Crazy interleaving f(...a, b, ...c, ...d, e) into variadic")
+
+// Empty spread between fixed args
+var emp = []
+assert_wrap(sum3(1, ...emp, 2, ...emp, 3) == 6,
+            "4.12: Empty spreads interleaved with fixed args")
+
+// Empty spread at the very end
+assert_wrap(sum3(1, 2, ...emp, 3) == 6,
+            "4.13: Empty spread before final fixed arg")
+
+// All spreads, multiple, with fixed wrapping
+var oneL = [1]
+var twoL = [2, 3]
+assert_wrap(vsum(0, ...oneL, ...twoL, 4, ...emp, 5) == (0+1+2+3+4+5),
+            "4.14: Mix of fixed, multi-spread, empty spread, trailing fixed")
+
+// ============================================================================
 // SUMMARY
 // ============================================================================
 print("")

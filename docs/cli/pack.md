@@ -99,6 +99,7 @@ print the format level a bundle was written against.
 | `stub`       | string   | no       | none    | Path to a CLI runtime binary to prepend as the executable stub. Ignored when `output` ends in `.zpk`. **If the stub file already carries a ZPK payload, only its native portion is taken — the existing payload is dropped and replaced with the new one.** This means a stub-wrapped binary can be re-packed in place without ever stacking multiple ZPK regions; `Pack` enforces "exactly one ZPK per executable" by construction. No `mode` flag is needed: append-vs-swap is decided by what the stub file actually contains. |
 | `compression`| bool     | no       | `false` | Bundle-wide compression default (zstd). When `true`, every entry is compressed unless it sets `compression: false`. When `false` (or omitted) entries default to uncompressed and opt in with `compression: true`. |
 | `level`      | number   | no       | `3`     | Default zstd level (`1..22`). Per-entry `level` overrides this. Ignored on entries that resolve to uncompressed. `3` matches zstd's own default; `19+` is the "release-build" sweet spot. |
+| `setExecutable` | bool  | no       | `false` | When `true`, mark the output file as executable after writing. **POSIX (Linux/macOS):** adds execute bits mirrored from the read bits, masked by the process umask (matches `chmod +x` honoring umask). **Windows:** silent no-op — executability there is decided by file extension (`.exe`, `.bat`, …) and the PE header, neither of which `Pack` touches. A `chmod` failure on POSIX warns to stderr but does **not** fail the build (the bundle bytes were written successfully; the user can retry the chmod themselves). |
 
 ### Entry map
 
@@ -337,6 +338,15 @@ without round-tripping the entries through script memory.
   decided by what the stub file actually contains.
 - If the source `.zpk` argument is itself a stub-wrapped binary, only
   its payload is taken and grafted onto the new stub.
+- On POSIX (Linux/macOS), the output file inherits the **permission
+  bits of the source stub** (so splicing an executable stub yields an
+  executable result, and splicing a non-executable file yields a
+  non-executable result). No `setExecutable` field is needed on
+  `Pack.splice`: the mode is mirrored automatically because the
+  result *is* whatever the input stub already was. On Windows this
+  is a silent no-op (executability is decided by extension / PE
+  header). A `chmod` failure warns to stderr but does not fail the
+  splice.
 - After concatenation, the appended payload's absolute offsets
   (footer's `manifest_offset` / `strtab_offset`, every entry's
   `data_offset`) are rewritten to account for the new stub prefix

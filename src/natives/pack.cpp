@@ -33,6 +33,11 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+#  include <sys/stat.h>
+#  include <errno.h>
+#endif
+
 // Provided by buffer.cpp — type-clean Buffer reader / builder so we
 // don't have to drag Godot's `PackedByteArray` header into this
 // translation unit.
@@ -62,6 +67,80 @@ char* slurp_binary(const char* path, size_t* out_size) {
     if (got != static_cast<size_t>(sz)) { std::free(buf); return nullptr; }
     *out_size = static_cast<size_t>(sz);
     return buf;
+}
+
+// Apply executable permission bits to a file. POSIX-only; on Windows
+// (where "executable" is determined by extension and the PE header,
+// neither of which we touch) this is a silent no-op returning true.
+//
+// On POSIX, the file's current mode is read via `stat` and the
+// execute bits are mirrored onto each user/group/world class that
+// already has the corresponding read bit set, masked by the process
+// umask. This matches the behavior of `install -m +x` and `chmod +x`
+// honoring umask, which is the least-surprising default. Returns
+// `true` on success, `false` (with a stderr line) on stat/chmod
+// failure — the caller is expected to treat failure as "warn but
+// the bundle was written successfully".
+bool apply_executable_bit(const char* path, const char* origin) {
+#ifdef _WIN32
+    (void)path;
+    (void)origin;
+    return true;
+#else
+    struct stat st;
+    if (::stat(path, &st) != 0) {
+        std::fprintf(stderr,
+            "%s: stat(\"%s\") failed: %s; bundle written but executable bit not set.\n",
+            origin, path, std::strerror(errno));
+        return false;
+    }
+    mode_t m = st.st_mode;
+    // Mirror read bits to execute bits, then mask by umask.
+    mode_t add = 0;
+    if (m & S_IRUSR) add |= S_IXUSR;
+    if (m & S_IRGRP) add |= S_IXGRP;
+    if (m & S_IROTH) add |= S_IXOTH;
+    mode_t cur = ::umask(0); ::umask(cur);
+    add &= ~cur;
+    mode_t target = (m | add) & 07777;
+    if (target == (m & 07777)) return true; // already executable
+    if (::chmod(path, target) != 0) {
+        std::fprintf(stderr,
+            "%s: chmod(\"%s\") failed: %s; bundle written but executable bit not set.\n",
+            origin, path, std::strerror(errno));
+        return false;
+    }
+    return true;
+#endif
+}
+
+// Mirror the source file's permission bits onto `dst`. POSIX-only;
+// silent no-op + true on Windows. Used by `Pack.splice` so the
+// rebuilt binary inherits the source stub's executable-ness without
+// needing an explicit toggle. Failure warns but does not fail the
+// operation.
+bool mirror_mode_bits(const char* src, const char* dst, const char* origin) {
+#ifdef _WIN32
+    (void)src;
+    (void)dst;
+    (void)origin;
+    return true;
+#else
+    struct stat st;
+    if (::stat(src, &st) != 0) {
+        std::fprintf(stderr,
+            "%s: stat(\"%s\") failed: %s; output mode bits not mirrored.\n",
+            origin, src, std::strerror(errno));
+        return false;
+    }
+    if (::chmod(dst, st.st_mode & 07777) != 0) {
+        std::fprintf(stderr,
+            "%s: chmod(\"%s\") failed: %s; output mode bits not mirrored.\n",
+            origin, dst, std::strerror(errno));
+        return false;
+    }
+    return true;
+#endif
 }
 
 bool ends_with(const char* s, const char* suffix) {
@@ -432,11 +511,39 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         }
     }
 
+    // ----- setExecutable (optional, default false) -----
+    //
+    // After the bundle is written, optionally mark the output file
+    // as executable. POSIX adds the execute bits (mirrored from the
+    // read bits, masked by umask); Windows is a silent no-op since
+    // executability there is decided by extension / PE header. A
+    // chmod failure warns to stderr but does not fail the build —
+    // the bundle bytes themselves were written successfully.
+    bool set_exec = false;
+    {
+        ZymValue sv = zym_mapGet(vm, specV, "setExecutable");
+        if (sv != ZYM_ERROR && !zym_isNull(sv)) {
+            if (!zym_isBool(sv)) {
+                zym_runtimeError(vm,
+                    "Pack.build(spec): spec.setExecutable must be a bool");
+                return ZYM_ERROR;
+            }
+            set_exec = zym_asBool(sv);
+        }
+    }
+
     int ok = zpk_write_bundle(output_path,
                               stub_data, stub_size,
                               infos.data(), (size_t)n,
                               entry_index);
     if (stub_data) std::free(stub_data);
+
+    if (ok != 0 && set_exec) {
+        // Failure here is intentionally non-fatal: the bundle is
+        // valid, just not chmod'd. The user can retry the chmod
+        // themselves. We still warn so the failure is visible.
+        (void)apply_executable_bit(output_path, "Pack.build");
+    }
 
     return zym_newBool(ok != 0);
 }
@@ -1234,6 +1341,14 @@ ZymValue f_splice(ZymVM* vm, ZymValue, ZymValue stubPathV, ZymValue zpkPathV, Zy
             "Pack.splice: short write to \"%s\".\n", out_path);
         return zym_newBool(false);
     }
+
+    // Mirror the source stub's permission bits onto the output so a
+    // splice of an executable stub yields an executable result, and
+    // a splice of a non-executable file yields a non-executable
+    // result. POSIX-only; no-op on Windows. Failure warns but does
+    // not fail the operation — the splice itself succeeded.
+    (void)mirror_mode_bits(stub_path, out_path, "Pack.splice");
+
     return zym_newBool(true);
 }
 

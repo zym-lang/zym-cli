@@ -33,9 +33,8 @@ Pack.hasSelf()             -> bool
 Pack.entryName()           -> string | null
 Pack.list()                -> [entryInfo, ...] | null
 Pack.has(name)             -> bool
-Pack.open(name)            -> Buffer | null
-Pack.openIndex(i)          -> Buffer | null
-Pack.info(name)            -> entryInfo | null
+Pack.open(arg)             -> Buffer | null    // arg: name string or numeric index
+Pack.info(arg)             -> entryInfo | null // arg: name string or numeric index
 Pack.closeSelf()           -> bool
 
 // --- arbitrary bundles ---
@@ -43,9 +42,8 @@ var bundle = Pack.openFile(path)  // -> bundle | null
 bundle.list()              -> [entryInfo, ...] | null
 bundle.entryName()         -> string | null
 bundle.has(name)           -> bool
-bundle.open(name)          -> Buffer | null
-bundle.openIndex(i)        -> Buffer | null
-bundle.info(name)          -> entryInfo | null
+bundle.open(arg)           -> Buffer | null    // arg: name string or numeric index
+bundle.info(arg)           -> entryInfo | null // arg: name string or numeric index
 bundle.close()             -> bool
 ```
 
@@ -207,10 +205,29 @@ by future writers without an API churn.
 | `custom`           | number   | Free per-kind 32-bit field, surfaced verbatim.                                         |
 | `isEntry`          | bool     | `true` when this entry is the program entry point.                                     |
 
+### `open(arg)` / `info(arg)` — name or numeric index
+
+`Pack.open`, `Pack.info`, `bundle.open`, and `bundle.info` all accept
+either a **string** entry name or a **numeric** manifest index:
+
+- `open("main.zbc")` / `info("main.zbc")` — looks up the first entry
+  whose name matches. Returns `null` if no entry has that name.
+- `open(0)` / `info(0)` — looks up the entry at that 0-based manifest
+  position. Returns `null` if the index is out of range.
+
+Bundles may legally contain multiple entries that share the same
+name (each manifest slot is independent). When that happens the
+string form resolves to the first match only — use the numeric index
+to address any subsequent entry. `Pack.list()` (and `bundle.list()`)
+return entries in manifest order, so a typical pattern is to walk
+`list()` to find duplicates and then call `open(index)` / `info(index)`
+on the specific entries you care about. The single-arg `verify(arg)`
+on both surfaces follows the same string/number dispatch.
+
 ### Self-bundle vs. `openFile` lifecycle
 
 - The self-bundle methods (`Pack.hasSelf`, `Pack.entryName`, `Pack.list`,
-  `Pack.has`, `Pack.open`, `Pack.openIndex`, `Pack.info`) lazily open
+  `Pack.has`, `Pack.open`, `Pack.info`) lazily open
   the running executable's reader on the first call and keep it
   cached. `Pack.closeSelf()` returns `true` if a cached reader was
   released (and `false` if there was nothing to close). The very next
@@ -249,8 +266,79 @@ if (b == null) {
     if (info != null) {
         // info.dataSize, info.dataCrc32, info.kind, ...
     }
-    var first = b.openIndex(0);    // Buffer of the first entry's bytes
+    var first = b.open(0);         // Buffer of the first entry's bytes
     b.close();                     // free cache
+}
+```
+
+## Verifying CRCs
+
+Every bundle stores three independent CRC-32s — one over the footer,
+one over the manifest table (entries plus the string table), and one
+per entry over its on-disk bytes. The footer CRC is enforced when a
+bundle is opened: a bundle with a bad footer CRC is rejected, so
+`Pack.openFile` returns `null` and `Pack.hasSelf()` returns `false`.
+The manifest CRC and per-entry data CRCs are not enforced at open
+time — they're surfaced through `verify()` so scripts can decide what
+to do on mismatch.
+
+Both `Pack` (the self bundle) and a `Pack.openFile` handle expose the
+same two-arity `verify`:
+
+### `Pack.verify()` / `bundle.verify() -> map | null`
+
+Runs all three CRC checks and returns a structured report. Returns
+`null` when there is no self bundle / when the handle has been closed.
+
+```
+{
+    ok:       <bool>,                    // true iff every CRC matches
+    footer:   { ok, expected, computed },
+    manifest: { ok, expected, computed },
+    entries:  [
+        { index, name, ok, expected, computed, readable },
+        ...                              // one per manifest entry
+    ]
+}
+```
+
+- `ok` (top-level) is the AND of `footer.ok`, `manifest.ok`, and every
+  `entries[i].ok`.
+- `expected` is the value stored in the bundle; `computed` is the
+  value computed locally. Both are surfaced as numbers so scripts
+  can log / compare them on mismatch.
+- `readable` (per entry) is `false` only when the entry's
+  `dataOffset` / `dataSize` falls outside the file (a corrupt
+  manifest); in that case `computed` is reported as `0` and `ok` is
+  `false`.
+
+### `Pack.verify(arg)` / `bundle.verify(arg) -> bool`
+
+Quick per-entry CRC check. `arg` is either a string entry name or a
+numeric manifest index. Returns:
+
+- `true` when the entry exists and its on-disk bytes hash to the
+  recorded CRC.
+- `false` when the entry doesn't exist, the index is out of range,
+  the bytes are bounds-busted, the CRC doesn't match, or there is no
+  self bundle / the handle has been closed.
+
+Use `verify()` when you want a full report; use `verify(arg)` when
+you just want a one-shot bool for a single entry. The full
+`verify()` already contains the per-entry detail, so the one-arg
+form is purely a convenience for the common case.
+
+```
+var b = Pack.openFile("dist/app.zpk");
+if (b != null) {
+    var rep = b.verify();
+    if (!rep.ok) {
+        // rep.entries[i] tells you exactly which entry tripped.
+    }
+    if (b.verify("main.zbc")) {
+        // ready to load.
+    }
+    b.close();
 }
 ```
 

@@ -380,6 +380,145 @@ int find_entry_by_name(const ZpkReader* r, const char* name) {
     return -1;
 }
 
+// ---- CRC verification ----------------------------------------------------
+//
+// All three CRCs (footer, manifest+strtab, per-entry data) are
+// computed locally using `zpk_crc32` over the in-memory `file_data`
+// the reader holds. The reader rejects any open with a bad footer
+// CRC (so an opened reader always has `footer.ok == true`); manifest
+// and per-entry CRCs are warn-only at open time, which is exactly
+// why this surface exists — scripts can decide what to do on
+// mismatch instead of relying on the stderr warning.
+
+uint32_t compute_footer_crc(const ZpkReader* r) {
+    ZpkFooter tmp = r->footer;
+    tmp.footer_crc32 = 0;
+    return zpk_crc32(0, &tmp, sizeof(tmp));
+}
+
+uint32_t compute_manifest_crc(const ZpkReader* r) {
+    const size_t mfs = static_cast<size_t>(r->footer.entry_count) * ZPK_ENTRY_SIZE;
+    uint32_t crc = zpk_crc32(0, r->manifest, mfs);
+    if (r->footer.strtab_size > 0 && r->strtab) {
+        crc = zpk_crc32(crc, r->strtab, static_cast<size_t>(r->footer.strtab_size));
+    }
+    return crc;
+}
+
+// Compute the data CRC for entry `index` over its on-disk bytes.
+// Returns false (with `*out_crc` left untouched) if the entry's
+// `data_offset` / `data_size` falls outside the loaded `file_data`.
+bool compute_entry_crc(const ZpkReader* r, uint32_t index, uint32_t* out_crc) {
+    const ZpkEntry& e = r->manifest[index];
+    if (e.data_offset > r->file_size) return false;
+    if (e.data_offset + e.data_size > r->file_size) return false;
+    *out_crc = zpk_crc32(0, r->file_data + e.data_offset, (size_t)e.data_size);
+    return true;
+}
+
+// Quick per-entry verify used by the bool-returning one-shot form.
+bool entry_crc_ok(const ZpkReader* r, uint32_t index) {
+    uint32_t computed = 0;
+    if (!compute_entry_crc(r, index, &computed)) return false;
+    return computed == r->manifest[index].data_crc32;
+}
+
+// Build the full structured report. Shape:
+//   {
+//     ok:       <bool>,
+//     footer:   { ok, expected, computed },
+//     manifest: { ok, expected, computed },
+//     entries:  [ { index, name, ok, expected, computed, readable }, ... ]
+//   }
+// `readable` is false only when an entry's `data_offset`/`data_size`
+// is bounds-busted (a corrupt manifest); in that case `computed` is
+// surfaced as 0 and `ok` is false.
+ZymValue build_verify_report(ZymVM* vm, const ZpkReader* r) {
+    ZymValue report = zym_newMap(vm);
+    zym_pushRoot(vm, report);
+
+    // Footer.
+    const uint32_t footer_expected = r->footer.footer_crc32;
+    const uint32_t footer_computed = compute_footer_crc(r);
+    const bool footer_ok = (footer_expected == footer_computed);
+    {
+        ZymValue m = zym_newMap(vm);
+        zym_pushRoot(vm, m);
+        zym_mapSet(vm, m, "ok",       zym_newBool(footer_ok));
+        zym_mapSet(vm, m, "expected", zym_newNumber((double)footer_expected));
+        zym_mapSet(vm, m, "computed", zym_newNumber((double)footer_computed));
+        zym_mapSet(vm, report, "footer", m);
+        zym_popRoot(vm);
+    }
+
+    // Manifest+strtab.
+    const uint32_t manifest_expected = r->footer.manifest_crc32;
+    const uint32_t manifest_computed = compute_manifest_crc(r);
+    const bool manifest_ok = (manifest_expected == manifest_computed);
+    {
+        ZymValue m = zym_newMap(vm);
+        zym_pushRoot(vm, m);
+        zym_mapSet(vm, m, "ok",       zym_newBool(manifest_ok));
+        zym_mapSet(vm, m, "expected", zym_newNumber((double)manifest_expected));
+        zym_mapSet(vm, m, "computed", zym_newNumber((double)manifest_computed));
+        zym_mapSet(vm, report, "manifest", m);
+        zym_popRoot(vm);
+    }
+
+    // Per-entry data CRCs.
+    bool all_entries_ok = true;
+    ZymValue entries = zym_newList(vm);
+    zym_pushRoot(vm, entries);
+    for (uint32_t i = 0; i < r->footer.entry_count; i++) {
+        const ZpkEntry& e = r->manifest[i];
+        uint32_t computed = 0;
+        const bool readable = compute_entry_crc(r, i, &computed);
+        const bool ok = readable && (computed == e.data_crc32);
+        if (!ok) all_entries_ok = false;
+
+        ZymValue m = zym_newMap(vm);
+        zym_pushRoot(vm, m);
+        zym_mapSet(vm, m, "index",    zym_newNumber((double)i));
+        if (e.name_length > 0 && r->strtab) {
+            zym_mapSet(vm, m, "name",
+                zym_newStringN(vm, (const char*)(r->strtab + e.name_offset), (int)e.name_length));
+        } else {
+            zym_mapSet(vm, m, "name", zym_newString(vm, ""));
+        }
+        zym_mapSet(vm, m, "ok",       zym_newBool(ok));
+        zym_mapSet(vm, m, "expected", zym_newNumber((double)e.data_crc32));
+        zym_mapSet(vm, m, "computed", zym_newNumber((double)computed));
+        zym_mapSet(vm, m, "readable", zym_newBool(readable));
+        zym_listAppend(vm, entries, m);
+        zym_popRoot(vm);
+    }
+    zym_mapSet(vm, report, "entries", entries);
+    zym_popRoot(vm);
+
+    zym_mapSet(vm, report, "ok",
+        zym_newBool(footer_ok && manifest_ok && all_entries_ok));
+
+    zym_popRoot(vm);
+    return report;
+}
+
+// Resolve a one-arg verify(arg) parameter (string name or numeric
+// index) to a manifest index. Returns -1 on out-of-range / not-found
+// (callers translate that to `false`); raises a runtime error and
+// returns -2 on a wrong-type argument.
+int resolve_entry_arg(ZymVM* vm, const ZpkReader* r, ZymValue arg, const char* fn_name) {
+    if (zym_isNumber(arg)) {
+        double d = zym_asNumber(arg);
+        if (d < 0 || d >= (double)r->footer.entry_count) return -1;
+        return (int)d;
+    }
+    if (zym_isString(arg)) {
+        return find_entry_by_name(r, zym_asCString(arg));
+    }
+    zym_runtimeError(vm, "%s expects a string entry name or a numeric index", fn_name);
+    return -2;
+}
+
 // Read entry bytes by index, return as Buffer (or null on failure).
 ZymValue read_entry_as_buffer(ZymVM* vm, const ZpkReader* r, uint32_t index) {
     size_t sz = 0;
@@ -468,40 +607,51 @@ ZymValue f_self_has(ZymVM* vm, ZymValue, ZymValue nameV) {
     return zym_newBool(find_entry_by_name(r, zym_asCString(nameV)) >= 0);
 }
 
-ZymValue f_self_open(ZymVM* vm, ZymValue, ZymValue nameV) {
-    if (!zym_isString(nameV)) {
-        zym_runtimeError(vm, "Pack.open(name) expects a string");
-        return ZYM_ERROR;
-    }
+// Pack.open(arg) — string entry name or numeric manifest index.
+// Names with multiple matching entries resolve to the first hit
+// (use the numeric form to disambiguate). Returns null when there's
+// no self bundle, or the name/index doesn't resolve.
+ZymValue f_self_open(ZymVM* vm, ZymValue, ZymValue arg) {
     const ZpkReader* r = self_reader_get();
     if (!r) return zym_newNull();
-    int idx = find_entry_by_name(r, zym_asCString(nameV));
-    if (idx < 0) return zym_newNull();
+    int idx = resolve_entry_arg(vm, r, arg, "Pack.open(arg)");
+    if (idx == -2) return ZYM_ERROR;
+    if (idx < 0)   return zym_newNull();
     return read_entry_as_buffer(vm, r, (uint32_t)idx);
 }
 
-ZymValue f_self_openIndex(ZymVM* vm, ZymValue, ZymValue iV) {
-    if (!zym_isNumber(iV)) {
-        zym_runtimeError(vm, "Pack.openIndex(i) expects a number");
-        return ZYM_ERROR;
-    }
+// Pack.info(arg) — `arg` is a string entry name or a numeric index.
+// Names with multiple matching entries resolve to the first hit (use
+// the numeric form to disambiguate). Returns null when there's no
+// self bundle, or the name/index doesn't resolve.
+ZymValue f_self_info(ZymVM* vm, ZymValue, ZymValue arg) {
     const ZpkReader* r = self_reader_get();
     if (!r) return zym_newNull();
-    double d = zym_asNumber(iV);
-    if (d < 0 || d >= (double)r->footer.entry_count) return zym_newNull();
-    return read_entry_as_buffer(vm, r, (uint32_t)d);
+    int idx = resolve_entry_arg(vm, r, arg, "Pack.info(arg)");
+    if (idx == -2) return ZYM_ERROR;
+    if (idx < 0)   return zym_newNull();
+    return make_entry_info(vm, r, (uint32_t)idx);
 }
 
-ZymValue f_self_info(ZymVM* vm, ZymValue, ZymValue nameV) {
-    if (!zym_isString(nameV)) {
-        zym_runtimeError(vm, "Pack.info(name) expects a string");
-        return ZYM_ERROR;
-    }
+// Pack.verify() — full structured CRC report for the self bundle, or
+// null when there's no self bundle.
+ZymValue f_self_verify0(ZymVM* vm, ZymValue) {
     const ZpkReader* r = self_reader_get();
     if (!r) return zym_newNull();
-    int idx = find_entry_by_name(r, zym_asCString(nameV));
-    if (idx < 0) return zym_newNull();
-    return make_entry_info(vm, r, (uint32_t)idx);
+    return build_verify_report(vm, r);
+}
+
+// Pack.verify(arg) — quick per-entry bool check for the self bundle.
+// `arg` may be a string entry name or a numeric index. Returns false
+// for "no self bundle", "no such entry", or "CRC mismatch"; raises a
+// runtime error only on a wrong-type argument.
+ZymValue f_self_verify1(ZymVM* vm, ZymValue, ZymValue arg) {
+    const ZpkReader* r = self_reader_get();
+    if (!r) return zym_newBool(false);
+    int idx = resolve_entry_arg(vm, r, arg, "Pack.verify(arg)");
+    if (idx == -2) return ZYM_ERROR;
+    if (idx < 0)   return zym_newBool(false);
+    return zym_newBool(entry_crc_ok(r, (uint32_t)idx));
 }
 
 ZymValue f_closeSelf(ZymVM* /*vm*/, ZymValue) {
@@ -567,40 +717,47 @@ ZymValue b_has(ZymVM* vm, ZymValue self, ZymValue nameV) {
     return zym_newBool(find_entry_by_name(&h->reader, zym_asCString(nameV)) >= 0);
 }
 
-ZymValue b_open(ZymVM* vm, ZymValue self, ZymValue nameV) {
-    if (!zym_isString(nameV)) {
-        zym_runtimeError(vm, "bundle.open(name) expects a string");
-        return ZYM_ERROR;
-    }
+// bundle.open(arg) — string name or numeric index, mirroring
+// `Pack.open(arg)`. Numeric form is the way to disambiguate when
+// multiple entries share a name.
+ZymValue b_open(ZymVM* vm, ZymValue self, ZymValue arg) {
     BundleHandle* h = unwrap_bundle_with_vm(vm, self);
     if (!h || !h->open) return zym_newNull();
-    int idx = find_entry_by_name(&h->reader, zym_asCString(nameV));
-    if (idx < 0) return zym_newNull();
+    int idx = resolve_entry_arg(vm, &h->reader, arg, "bundle.open(arg)");
+    if (idx == -2) return ZYM_ERROR;
+    if (idx < 0)   return zym_newNull();
     return read_entry_as_buffer(vm, &h->reader, (uint32_t)idx);
 }
 
-ZymValue b_openIndex(ZymVM* vm, ZymValue self, ZymValue iV) {
-    if (!zym_isNumber(iV)) {
-        zym_runtimeError(vm, "bundle.openIndex(i) expects a number");
-        return ZYM_ERROR;
-    }
+// bundle.info(arg) — string name or numeric index, mirroring
+// `Pack.info(arg)`. Numeric form is the way to disambiguate when
+// multiple entries share a name.
+ZymValue b_info(ZymVM* vm, ZymValue self, ZymValue arg) {
     BundleHandle* h = unwrap_bundle_with_vm(vm, self);
     if (!h || !h->open) return zym_newNull();
-    double d = zym_asNumber(iV);
-    if (d < 0 || d >= (double)h->reader.footer.entry_count) return zym_newNull();
-    return read_entry_as_buffer(vm, &h->reader, (uint32_t)d);
+    int idx = resolve_entry_arg(vm, &h->reader, arg, "bundle.info(arg)");
+    if (idx == -2) return ZYM_ERROR;
+    if (idx < 0)   return zym_newNull();
+    return make_entry_info(vm, &h->reader, (uint32_t)idx);
 }
 
-ZymValue b_info(ZymVM* vm, ZymValue self, ZymValue nameV) {
-    if (!zym_isString(nameV)) {
-        zym_runtimeError(vm, "bundle.info(name) expects a string");
-        return ZYM_ERROR;
-    }
+// bundle.verify() — full structured CRC report for the open handle,
+// or null after the handle has been closed.
+ZymValue b_verify0(ZymVM* vm, ZymValue self) {
     BundleHandle* h = unwrap_bundle_with_vm(vm, self);
     if (!h || !h->open) return zym_newNull();
-    int idx = find_entry_by_name(&h->reader, zym_asCString(nameV));
-    if (idx < 0) return zym_newNull();
-    return make_entry_info(vm, &h->reader, (uint32_t)idx);
+    return build_verify_report(vm, &h->reader);
+}
+
+// bundle.verify(arg) — quick per-entry bool check on the handle.
+// Same string/number dispatch as `Pack.verify(arg)`.
+ZymValue b_verify1(ZymVM* vm, ZymValue self, ZymValue arg) {
+    BundleHandle* h = unwrap_bundle_with_vm(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    int idx = resolve_entry_arg(vm, &h->reader, arg, "bundle.verify(arg)");
+    if (idx == -2) return ZYM_ERROR;
+    if (idx < 0)   return zym_newBool(false);
+    return zym_newBool(entry_crc_ok(&h->reader, (uint32_t)idx));
 }
 
 ZymValue b_close(ZymVM* vm, ZymValue self) {
@@ -630,12 +787,29 @@ ZymValue make_bundle_instance(ZymVM* vm, BundleHandle* handle) {
     M("list",      "list()",       b_list);
     M("entryName", "entryName()",  b_entryName);
     M("has",       "has(name)",    b_has);
-    M("open",      "open(name)",   b_open);
-    M("openIndex", "openIndex(i)", b_openIndex);
-    M("info",      "info(name)",   b_info);
+    M("open",      "open(arg)",    b_open);
+    M("info",      "info(arg)",    b_info);
     M("close",     "close()",      b_close);
 
 #undef M
+
+    // `verify` is overloaded by arity:
+    //   verify()    -> full structured report (or null after close)
+    //   verify(arg) -> bool quick check; arg is a name or numeric index
+    {
+        ZymValue v0 = zym_createNativeClosure(vm, "verify()",    (void*)b_verify0, ctxv);
+        zym_pushRoot(vm, v0);
+        ZymValue v1 = zym_createNativeClosure(vm, "verify(arg)", (void*)b_verify1, ctxv);
+        zym_pushRoot(vm, v1);
+        ZymValue dispatcher = zym_createDispatcher(vm);
+        zym_pushRoot(vm, dispatcher);
+        zym_addOverload(vm, dispatcher, v0);
+        zym_addOverload(vm, dispatcher, v1);
+        zym_mapSet(vm, obj, "verify", dispatcher);
+        zym_popRoot(vm); // dispatcher
+        zym_popRoot(vm); // v1
+        zym_popRoot(vm); // v0
+    }
 
     zym_popRoot(vm);
     zym_popRoot(vm);
@@ -680,15 +854,32 @@ ZymValue nativePack_create(ZymVM* vm) {
     F("entryName",  "entryName()",     f_self_entryName);
     F("list",       "list()",          f_self_list);
     F("has",        "has(name)",       f_self_has);
-    F("open",       "open(name)",      f_self_open);
-    F("openIndex",  "openIndex(i)",    f_self_openIndex);
-    F("info",       "info(name)",      f_self_info);
+    F("open",       "open(arg)",       f_self_open);
+    F("info",       "info(arg)",       f_self_info);
     F("closeSelf",  "closeSelf()",     f_closeSelf);
 
     // Arbitrary bundle.
     F("openFile",   "openFile(path)",  f_openFile);
 
 #undef F
+
+    // `Pack.verify` overloaded by arity (same shape as the bundle handle):
+    //   Pack.verify()    -> full report for the self bundle, or null when none
+    //   Pack.verify(arg) -> bool quick per-entry check; arg is a name or index
+    {
+        ZymValue v0 = zym_createNativeClosure(vm, "verify()",    (void*)f_self_verify0, ctxv);
+        zym_pushRoot(vm, v0);
+        ZymValue v1 = zym_createNativeClosure(vm, "verify(arg)", (void*)f_self_verify1, ctxv);
+        zym_pushRoot(vm, v1);
+        ZymValue dispatcher = zym_createDispatcher(vm);
+        zym_pushRoot(vm, dispatcher);
+        zym_addOverload(vm, dispatcher, v0);
+        zym_addOverload(vm, dispatcher, v1);
+        zym_mapSet(vm, obj, "verify", dispatcher);
+        zym_popRoot(vm);
+        zym_popRoot(vm);
+        zym_popRoot(vm);
+    }
 
     zym_popRoot(vm);
     zym_popRoot(vm);

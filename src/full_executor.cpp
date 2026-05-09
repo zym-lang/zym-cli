@@ -830,8 +830,12 @@ static int execute_bytecode(char* bytecode, size_t bytecode_size, int script_arg
 #if DEBUG_SHOW
     printf("Calling main function...\n");
 #endif
+    char exe_path_buf[4096];
+    const char* resolved_argv0 = get_executable_path(exe_path_buf, sizeof(exe_path_buf));
+    if (!resolved_argv0) resolved_argv0 = program_name ? program_name : "";
+
     ZymValue argv_list = zym_newList(run_vm);
-    zym_listAppend(run_vm, argv_list, zym_newString(run_vm, program_name));
+    zym_listAppend(run_vm, argv_list, zym_newString(run_vm, resolved_argv0));
     for (int i = 0; i < script_argc; i++) {
         zym_listAppend(run_vm, argv_list, zym_newString(run_vm, script_argv[i]));
     }

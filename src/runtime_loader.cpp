@@ -172,8 +172,13 @@ static int run_source_entry(const char* source, size_t source_size,
         return 1;
     }
 
+    char exe_path_buf[4096];
+    const char* argv0 = get_executable_path(exe_path_buf, sizeof(exe_path_buf));
+    if (!argv0) argv0 = (argc > 0 ? argv[0] : "");
+
     ZymValue argv_list = zym_newList(vm);
-    for (int i = 0; i < argc; i++) {
+    zym_listAppend(vm, argv_list, zym_newString(vm, argv0));
+    for (int i = 1; i < argc; i++) {
         zym_listAppend(vm, argv_list, zym_newString(vm, argv[i]));
     }
     if (zym_hasFunction(vm, "main", 1)) {
@@ -284,8 +289,13 @@ int runtime_main(int argc, char** argv, ZymAllocator* allocator) {
         return 1;
     }
 
+    char exe_path_buf[4096];
+    const char* argv0 = get_executable_path(exe_path_buf, sizeof(exe_path_buf));
+    if (!argv0) argv0 = (argc > 0 ? argv[0] : "");
+
     ZymValue argv_list = zym_newList(vm);
-    for (int i = 0; i < argc; i++) {
+    zym_listAppend(vm, argv_list, zym_newString(vm, argv0));
+    for (int i = 1; i < argc; i++) {
         zym_listAppend(vm, argv_list, zym_newString(vm, argv[i]));
     }
 

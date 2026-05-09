@@ -41,7 +41,7 @@ extern "C" {
 typedef enum {
     ZPK_KIND_RESERVED        = 0x00, // invalid; rejected
     ZPK_KIND_ENTRY_BYTECODE  = 0x01, // .zbc, used as program entry
-    ZPK_KIND_MODULE_BYTECODE = 0x02, // .zbc, importable module
+    ZPK_KIND_BYTECODE        = 0x02, // .zbc; not auto-resolved by the module system (modules are compile-time resolved)
     ZPK_KIND_SOURCE_MAP      = 0x03, // optional debug pairing
     ZPK_KIND_ASSET_BLOB      = 0x04, // arbitrary bytes by name
     ZPK_KIND_ASSET_TEXT      = 0x05, // UTF-8 text (hint only)

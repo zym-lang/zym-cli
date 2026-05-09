@@ -133,7 +133,7 @@ The accepted entry kind strings are:
 | ---                 | ---                                                  |
 | `"entry_bytecode"`  | The program entry point's compiled bytecode (`.zbc`). The runtime loader deserializes and runs it directly. |
 | `"entry_source"`    | The program entry point's raw source (`.zym`). The runtime loader compiles it on boot, then runs. Only one of `entry_bytecode` / `entry_source` is permitted per bundle. |
-| `"module_bytecode"` | A non-entry bytecode module.                         |
+| `"bytecode"`        | A non-entry compiled bytecode (`.zbc`) blob. Stored by name; **not** auto-resolved by the module system (modules are a compile-time concept — they're already baked into an `entry_bytecode` chunk). Use this kind when you want a script to read a `.zbc` payload out of the bundle by name and do something with it explicitly. |
 | `"source_map"`      | A source map for one of the bytecode entries.        |
 | `"asset"`           | A binary asset blob.                                 |
 | `"asset_blob"`      | Alias of `"asset"`.                                  |
@@ -176,21 +176,25 @@ A bundle's program entry can be either compiled bytecode
 (`entry_bytecode`) or raw `.zym` source (`entry_source`). Pick one:
 
 - **`entry_bytecode`** — the runtime loader deserializes and runs the
-  chunk directly. Use this for shipping production builds and for any
-  app that imports modules from inside the bundle (`module_bytecode`
-  entries are resolved by the bytecode loader).
+  chunk directly. Use this for shipping production builds. Modules
+  are resolved at compile time, so a fully-compiled `entry_bytecode`
+  chunk already contains everything its entry script imported — no
+  runtime resolution against the bundle is performed (or needed).
 - **`entry_source`** — the runtime loader compiles the source on every
   boot, then runs it. Useful for small single-file tools, tweak-and-run
   debugging workflows, and "patch the script, re-launch" iteration.
 
-**Module resolution policy.** When the entry is `entry_source`, module
-imports are resolved **from disk only** — the loader's module reader
-opens files relative to the running process's working directory. ZPK
-*does not* resolve `module_bytecode` (or any other) entries from
-inside the bundle when the entry is source. If your app needs
-bundle-internal module resolution, ship it as `entry_bytecode` with
-the modules as `module_bytecode` entries; the bytecode entry was
-compiled with all imports already resolved.
+**Module resolution policy.** Module imports are a **compile-time**
+concept; ZPK never resolves modules from inside the bundle at runtime,
+regardless of entry kind. When the entry is `entry_source`, the
+loader compiles on boot and module imports are resolved **from disk
+only** (relative to the running process's working directory). When
+the entry is `entry_bytecode`, the chunk was compiled ahead of time
+with all of its imports already inlined, so no runtime resolution
+happens at all. If you need a self-contained, no-disk-required
+bundle, compile to `entry_bytecode`. The `bytecode` kind exists for
+storing additional `.zbc` blobs by name (read explicitly via
+`open(arg)`); it is **not** consulted by any import statement.
 
 A bundle may contain **at most one** entry-kind entry; mixing
 `entry_bytecode` and `entry_source` in the same bundle is rejected at
@@ -203,7 +207,7 @@ source-entry bundles to other users.
 
 ## Examples
 
-### Headless `.zpk` with two modules
+### Headless `.zpk` with an entry and a named bytecode blob
 
 ```
 var bytecodeMain = File.readAllBytes("build/main.zbc");
@@ -213,7 +217,7 @@ var ok = Pack.build({
     output: "dist/app.zpk",
     entries: [
         { name: "main.zbc", kind: "entry_bytecode",  data: bytecodeMain },
-        { name: "util.zbc", kind: "module_bytecode", data: bytecodeUtil }
+        { name: "util.zbc", kind: "bytecode",       data: bytecodeUtil }
     ]
 });
 if (!ok) {

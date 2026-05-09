@@ -163,14 +163,15 @@ points at. `kind` and `entry_index` are orthogonal.
 | --- | --- | --- |
 | `0x00` | `RESERVED`       | Invalid. Catches all‑zero corruption. Readers must reject. |
 | `0x01` | `ENTRY_BYTECODE` | A `.zbc` bytecode module suitable for use as the program entry point. Must be the kind of the entry indexed by `entry_index`. |
-| `0x02` | `MODULE_BYTECODE`| A `.zbc` bytecode module imported by name via the loader's module resolver. |
+| `0x02` | `BYTECODE`       | A `.zbc` bytecode blob stored by name. **Not** auto‑resolved by the module system — modules are a compile‑time concept and are baked into an `ENTRY_BYTECODE` chunk at compile time. Consumers may read these blobs explicitly by name (e.g. via `pack.open`). |
 | `0x03` | `SOURCE_MAP`     | Optional debug information paired with a bytecode module. The pairing is by name (e.g. module `"foo"` → source map `"foo.map"`); the loader is free to ignore source maps it does not consume. |
 | `0x04` | `ASSET_BLOB`     | Arbitrary bytes addressable by name. |
 | `0x05` | `ASSET_TEXT`     | UTF‑8 text. Identical to `ASSET_BLOB` on disk; the kind exists only as a convenience hint to consumers. |
 | `0x06` | `NATIVE_LIB`     | (Reserved.) Bundled native shared library. Not loaded by v1. |
 | `0x07` | `MANIFEST_EXT`   | (Reserved.) Structured metadata (e.g. TOML/JSON) consumed by the loader for build info, target ABI, copyright, etc. Not consumed by v1. |
 | `0x08` | `SIGNATURE`      | (Reserved.) Detached signature blob covering the file outside this entry's data range. Not validated by v1. |
-| `0x09 .. 0x7E` | _reserved_ | Reserved for future Zym use. |
+| `0x09` | `ENTRY_SOURCE`   | Raw `.zym` source suitable for use as the program entry point. The runtime loader compiles it on boot and runs the resulting chunk. Module imports are resolved from disk only (not from inside the bundle). Mutually exclusive with `ENTRY_BYTECODE` as the program entry. |
+| `0x0A .. 0x7E` | _reserved_ | Reserved for future Zym use. |
 | `0x7F .. 0xFF` | `USER_*`   | Free for user/plugin use. The runtime ignores entries with user kinds; scripts may consume them via the `pack.*` API. |
 
 A reader **must not** treat unknown `kind` values as errors — it must
@@ -342,4 +343,4 @@ versions may give them meaning; readers must not interpret them.
 - Manifest entry: bytes `12..15` (`reserved`), `flags` bits `2..15`.
 - Compression values other than `0` (until activated by a later
   version of this document).
-- Entry kinds `0x09..0x7E`.
+- Entry kinds `0x0A..0x7E`.

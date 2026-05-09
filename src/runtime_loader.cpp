@@ -123,9 +123,10 @@ static int run_source_entry(const char* source, size_t source_size,
         return 1;
     }
 
-    // Modules are resolved from disk only — packing modules inside the
-    // bundle is not supported for source entries (use entry_bytecode +
-    // module_bytecode for that).
+    // Modules are resolved from disk only — modules are a compile-time
+    // concept and are not resolved from inside the bundle at runtime.
+    // Ship a fully-compiled `entry_bytecode` if you need a self-contained
+    // bundle.
     ModuleLoadResult* mr = loadModules(vm, processed, source_map, source_label,
                                        disk_module_read_cb, vm,
                                        /*use_debug_names=*/true,

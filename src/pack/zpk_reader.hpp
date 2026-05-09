@@ -35,6 +35,13 @@ typedef struct {
 // the reader and must call `zpk_reader_close` to release it.
 int zpk_reader_open_path(ZpkReader* out, const char* path);
 
+// Open a `.zpk` from an in-memory byte buffer. The reader takes its
+// own copy of the bytes (so the caller's buffer is independent and
+// may be freed immediately after this returns). Returns 1 on success,
+// 0 on failure (with diagnostics on stderr). On success, the caller
+// owns the reader and must call `zpk_reader_close` to release it.
+int zpk_reader_open_memory(ZpkReader* out, const void* bytes, size_t size);
+
 // Open the running executable (resolved via /proc/self/exe on Linux,
 // GetModuleFileNameA on Windows) and parse it as a `.zpk`. Returns 1
 // on success, 0 on failure.

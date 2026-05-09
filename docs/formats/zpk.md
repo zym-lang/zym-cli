@@ -165,8 +165,8 @@ points at. `kind` and `entry_index` are orthogonal.
 | `0x01` | `ENTRY_BYTECODE` | A `.zbc` bytecode module suitable for use as the program entry point. Must be the kind of the entry indexed by `entry_index`. |
 | `0x02` | `BYTECODE`       | A `.zbc` bytecode blob stored by name. **Not** auto‑resolved by the module system — modules are a compile‑time concept and are baked into an `ENTRY_BYTECODE` chunk at compile time. Consumers may read these blobs explicitly by name (e.g. via `pack.open`). |
 | `0x03` | `SOURCE_MAP`     | Optional debug information paired with a bytecode module. The pairing is by name (e.g. module `"foo"` → source map `"foo.map"`); the loader is free to ignore source maps it does not consume. |
-| `0x04` | `ASSET_BLOB`     | Arbitrary bytes addressable by name. |
-| `0x05` | `ASSET_TEXT`     | UTF‑8 text. Identical to `ASSET_BLOB` on disk; the kind exists only as a convenience hint to consumers. |
+| `0x04` | `ASSET`          | Arbitrary bytes addressable by name. The single asset kind — there is no separate text/blob distinction. Consumers that need to discriminate sub-kinds of assets do so via the per-entry `flags` / `custom` fields, which the writer forwards verbatim. |
+| `0x05` | _reserved_       | Reserved for future Zym use. (Formerly `ASSET_TEXT` in earlier drafts.) |
 | `0x06` | `NATIVE_LIB`     | (Reserved.) Bundled native shared library. Not loaded by v1. |
 | `0x07` | `MANIFEST_EXT`   | (Reserved.) Structured metadata (e.g. TOML/JSON) consumed by the loader for build info, target ABI, copyright, etc. Not consumed by v1. |
 | `0x08` | `SIGNATURE`      | (Reserved.) Detached signature blob covering the file outside this entry's data range. Not validated by v1. |
@@ -191,14 +191,15 @@ forward‑compatibility hinge.
 
 | Value | Algorithm | Status |
 | --- | --- | --- |
-| `0` | none      | Required. Always supported. |
-| `1` | zstd      | Reserved. Not produced by v1 writer; readers may decline. |
-| `2` | deflate   | Reserved. Not produced by v1 writer; readers may decline. |
+| `0` | none      | Required. Always supported. `uncompressed_size == data_size`. |
+| `1` | zstd      | Supported. On-disk bytes are a single zstd frame; readers decompress to a buffer of `uncompressed_size`. |
 | other | _reserved_ | Reader rejects unless it understands the value. |
 
-In v1 the writer must emit `compression == 0` for every entry, and
-`uncompressed_size == data_size`. The byte exists in the layout from day
-one so that compression can be added later without a format bump.
+Zym does not produce or consume any other compression algorithm. The
+`compression` byte is per-entry, so a bundle may freely mix `none`
+and `zstd` entries; the writer is permitted (and encouraged) to fall
+back to `none` for an entry whose zstd-encoded payload would not be
+smaller than the raw bytes.
 
 ---
 
@@ -247,9 +248,12 @@ entry is the program entry point.
 1. If a stub is provided, write it first. Record `stub_end` as the
    current file position. Otherwise `stub_end == 0`.
 2. For each entry input, write its bytes to the file, recording the
-   absolute `data_offset` and the actual `data_size`. In v1
-   `uncompressed_size == data_size`. Compute `data_crc32` over the
-   bytes as written.
+   absolute `data_offset` and the actual `data_size`. For
+   `compression == 0` entries, `uncompressed_size == data_size`; for
+   `compression == 1` (zstd) entries, `data_size` is the size of the
+   on-disk zstd frame and `uncompressed_size` is the logical decoded
+   size. Compute `data_crc32` over the bytes as written (i.e. over the
+   on-disk, post-compression bytes).
 3. Write the string table, recording `strtab_offset` and `strtab_size`.
 4. Compute and write the manifest entries, recording
    `manifest_offset`. `name_offset`/`name_length` reference the string
@@ -291,8 +295,10 @@ running executable, validates, and exposes random access to entries.
    - Bounds‑check `index < entry_count`.
    - If `compression == 0`: return a borrowed slice
      `[data_offset, data_offset + data_size)`.
-   - Otherwise: decompress to an owned buffer of size
-     `uncompressed_size`. (Not implemented in v1.)
+   - If `compression == 1` (zstd): decompress the on-disk frame to an
+     owned buffer of size `uncompressed_size`. A length mismatch is a
+     hard failure.
+   - Other compression values: reject with a clear error.
    - Optionally verify `data_crc32`.
 8. The "entry bytecode" used by `runtime_loader` is simply
    `read(footer.entry_index)`.
@@ -341,6 +347,6 @@ versions may give them meaning; readers must not interpret them.
 - Footer: bytes `56..63` (the trailing 8‑byte reserved region).
 - Footer flag bits `2..31`.
 - Manifest entry: bytes `12..15` (`reserved`), `flags` bits `2..15`.
-- Compression values other than `0` (until activated by a later
-  version of this document).
+- Compression values other than `0` and `1` (until activated by a
+  later version of this document).
 - Entry kinds `0x0A..0x7E`.

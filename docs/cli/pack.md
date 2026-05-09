@@ -35,15 +35,18 @@ Pack.list()                -> [entryInfo, ...] | null
 Pack.has(name)             -> bool
 Pack.open(arg)             -> Buffer | null    // arg: name string or numeric index
 Pack.info(arg)             -> entryInfo | null // arg: name string or numeric index
+Pack.formatVersion()       -> number | null   // null when no self bundle
 Pack.closeSelf()           -> bool
 
 // --- arbitrary bundles ---
-var bundle = Pack.openFile(path)  // -> bundle | null
+var bundle = Pack.openFile(path)      // open from a filesystem path
+var bundle = Pack.openBuffer(buffer)  // open from an in-memory Buffer
 bundle.list()              -> [entryInfo, ...] | null
 bundle.entryName()         -> string | null
 bundle.has(name)           -> bool
 bundle.open(arg)           -> Buffer | null    // arg: name string or numeric index
 bundle.info(arg)           -> entryInfo | null // arg: name string or numeric index
+bundle.formatVersion()     -> number | null    // null after close()
 bundle.close()             -> bool
 ```
 
@@ -66,6 +69,21 @@ The read API is split into two surfaces:
   close, every method on the handle returns `null` / `false`. A GC
   finalizer also closes the reader as a safety net if the script
   forgets to call `close()`.
+- **`Pack.openBuffer(buffer)`** opens a `.zpk` whose bytes already
+  live in script memory (e.g. fetched over the network, decrypted
+  in-process, generated on the fly). The reader takes its own copy of
+  the bytes, so the source `Buffer` is independent and may be reused
+  or discarded immediately. The returned handle behaves identically
+  to one returned by `openFile` — same methods, same caching, same
+  `close()` lifecycle, same GC-finalizer safety net.
+
+### Format version
+
+`Pack.formatVersion()` and `bundle.formatVersion()` report the
+on-disk `format_version` of the bundle as a number, or `null` when
+there is nothing to query (no self bundle, or the handle has been
+closed). Useful for tooling such as `zym pack info` that wants to
+print the format level a bundle was written against.
 
 ### `spec` map
 
@@ -135,9 +153,7 @@ The accepted entry kind strings are:
 | `"entry_source"`    | The program entry point's raw source (`.zym`). The runtime loader compiles it on boot, then runs. Only one of `entry_bytecode` / `entry_source` is permitted per bundle. |
 | `"bytecode"`        | A non-entry compiled bytecode (`.zbc`) blob. Stored by name; **not** auto-resolved by the module system (modules are a compile-time concept — they're already baked into an `entry_bytecode` chunk). Use this kind when you want a script to read a `.zbc` payload out of the bundle by name and do something with it explicitly. |
 | `"source_map"`      | A source map for one of the bytecode entries.        |
-| `"asset"`           | A binary asset blob.                                 |
-| `"asset_blob"`      | Alias of `"asset"`.                                  |
-| `"asset_text"`      | A text asset.                                        |
+| `"asset"`           | Arbitrary bytes addressable by name. The single asset kind: text, binary, audio, images, etc. all use this kind. Scripts that need to distinguish kinds of assets among themselves can do so via the per-entry `flags` / `custom` fields, which are forwarded verbatim. |
 
 Strings are used (rather than numeric constants) so scripts don't have
 to know the on-disk byte values.
@@ -238,8 +254,8 @@ var ok = Pack.build({
     entryIndex: 0,
     entries: [
         { name: "main.zbc", kind: "entry_bytecode", data: bytecode },
-        { name: "level1.bin", kind: "asset",  path: "assets/level1.bin" },
-        { name: "credits.txt", kind: "asset_text", path: "assets/credits.txt" }
+        { name: "level1.bin", kind: "asset", path: "assets/level1.bin" },
+        { name: "credits.txt", kind: "asset", path: "assets/credits.txt" }
     ]
 });
 ```

@@ -43,13 +43,13 @@ typedef enum {
     ZPK_KIND_ENTRY_BYTECODE  = 0x01, // .zbc, used as program entry
     ZPK_KIND_BYTECODE        = 0x02, // .zbc; not auto-resolved by the module system (modules are compile-time resolved)
     ZPK_KIND_SOURCE_MAP      = 0x03, // optional debug pairing
-    ZPK_KIND_ASSET_BLOB      = 0x04, // arbitrary bytes by name
-    ZPK_KIND_ASSET_TEXT      = 0x05, // UTF-8 text (hint only)
+    ZPK_KIND_ASSET           = 0x04, // arbitrary bytes by name (no text/blob distinction)
+    // 0x05 reserved for future Zym use (formerly ASSET_TEXT)
     ZPK_KIND_NATIVE_LIB      = 0x06, // reserved
     ZPK_KIND_MANIFEST_EXT    = 0x07, // reserved (TOML/JSON sidecar)
     ZPK_KIND_SIGNATURE       = 0x08, // reserved
     ZPK_KIND_ENTRY_SOURCE    = 0x09, // .zym source, compiled-on-load entry
-    // 0x0A..0x7E reserved for future Zym use
+    // 0x05, 0x0A..0x7E reserved for future Zym use
     ZPK_KIND_USER_MIN        = 0x7F,
     ZPK_KIND_USER_MAX        = 0xFF
 } ZpkKind;

@@ -130,19 +130,12 @@ int validate_footer(const uint8_t* file_data, size_t file_size,
     return 1;
 }
 
-} // namespace
-
-int zpk_reader_open_path(ZpkReader* out, const char* path) {
-    if (!out || !path) return 0;
-    memset(out, 0, sizeof(*out));
-
-    size_t file_size = 0;
-    uint8_t* file_data = slurp(path, &file_size);
-    if (!file_data) {
-        fprintf(stderr, "zpk: could not read \"%s\".\n", path);
-        return 0;
-    }
-
+// Take ownership of a malloc'd `file_data` of `file_size` bytes,
+// validate its footer/manifest, and populate `out`. On failure the
+// buffer is freed and 0 is returned. `label` is used in diagnostic
+// messages to identify the source of the bytes.
+int finalize_open(ZpkReader* out, uint8_t* file_data, size_t file_size,
+                  const char* label) {
     ZpkFooter footer;
     if (!validate_footer(file_data, file_size, &footer, /*verbose=*/true)) {
         free(file_data);
@@ -166,7 +159,7 @@ int zpk_reader_open_path(ZpkReader* out, const char* path) {
             // Per docs/formats/zpk.md: warn-only in v1.
             fprintf(stderr, "zpk: warning: manifest CRC mismatch in \"%s\" "
                             "(file=%08x computed=%08x). Continuing.\n",
-                    path, footer.manifest_crc32, crc);
+                    label ? label : "<memory>", footer.manifest_crc32, crc);
         }
     }
 
@@ -193,6 +186,38 @@ int zpk_reader_open_path(ZpkReader* out, const char* path) {
     out->manifest  = manifest;
     out->strtab    = strtab;
     return 1;
+}
+
+} // namespace
+
+int zpk_reader_open_path(ZpkReader* out, const char* path) {
+    if (!out || !path) return 0;
+    memset(out, 0, sizeof(*out));
+
+    size_t file_size = 0;
+    uint8_t* file_data = slurp(path, &file_size);
+    if (!file_data) {
+        fprintf(stderr, "zpk: could not read \"%s\".\n", path);
+        return 0;
+    }
+
+    return finalize_open(out, file_data, file_size, path);
+}
+
+int zpk_reader_open_memory(ZpkReader* out, const void* bytes, size_t size) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    if (!bytes || size == 0) {
+        fprintf(stderr, "zpk: empty buffer passed to zpk_reader_open_memory.\n");
+        return 0;
+    }
+    uint8_t* copy = static_cast<uint8_t*>(malloc(size));
+    if (!copy) {
+        fprintf(stderr, "zpk: out of memory copying %zu-byte buffer.\n", size);
+        return 0;
+    }
+    memcpy(copy, bytes, size);
+    return finalize_open(out, copy, size, "<memory>");
 }
 
 int zpk_reader_open_self_exe(ZpkReader* out) {

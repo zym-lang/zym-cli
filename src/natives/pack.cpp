@@ -81,9 +81,7 @@ bool kind_from_string(const char* s, uint8_t* out) {
     if (std::strcmp(s, "entry_source")    == 0) { *out = ZPK_KIND_ENTRY_SOURCE;    return true; }
     if (std::strcmp(s, "bytecode") == 0) { *out = ZPK_KIND_BYTECODE; return true; }
     if (std::strcmp(s, "source_map")      == 0) { *out = ZPK_KIND_SOURCE_MAP;      return true; }
-    if (std::strcmp(s, "asset")           == 0) { *out = ZPK_KIND_ASSET_BLOB;      return true; }
-    if (std::strcmp(s, "asset_blob")      == 0) { *out = ZPK_KIND_ASSET_BLOB;      return true; }
-    if (std::strcmp(s, "asset_text")      == 0) { *out = ZPK_KIND_ASSET_TEXT;      return true; }
+    if (std::strcmp(s, "asset")           == 0) { *out = ZPK_KIND_ASSET;           return true; }
     return false;
 }
 
@@ -228,7 +226,7 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         if (!kind_from_string(kind_str, &kind_byte)) {
             zym_runtimeError(vm,
                 "Pack.build(spec): spec.entries[%d].kind '%s' is not a known kind "
-                "(expected 'entry_bytecode', 'entry_source', 'bytecode', 'source_map', 'asset', or 'asset_text')",
+                "(expected 'entry_bytecode', 'entry_source', 'bytecode', 'source_map', or 'asset')",
                 i, kind_str);
             return ZYM_ERROR;
         }
@@ -400,8 +398,7 @@ const char* kind_to_string(uint8_t k, char* user_buf /*>=16 bytes*/) {
         case ZPK_KIND_ENTRY_BYTECODE:  return "entry_bytecode";
         case ZPK_KIND_BYTECODE: return "bytecode";
         case ZPK_KIND_SOURCE_MAP:      return "source_map";
-        case ZPK_KIND_ASSET_BLOB:      return "asset_blob";
-        case ZPK_KIND_ASSET_TEXT:      return "asset_text";
+        case ZPK_KIND_ASSET:           return "asset";
         case ZPK_KIND_NATIVE_LIB:      return "native_lib";
         case ZPK_KIND_MANIFEST_EXT:    return "manifest_ext";
         case ZPK_KIND_SIGNATURE:       return "signature";
@@ -764,6 +761,17 @@ ZymValue f_closeSelf(ZymVM* /*vm*/, ZymValue) {
     return zym_newBool(was_open);
 }
 
+// Pack.formatVersion() -> number | null
+//   The on-disk `format_version` recorded in the self bundle's footer,
+//   or `null` when the running executable has no self bundle. Useful
+//   for tooling that wants to report the bundle format level (e.g.
+//   `zym pack info`).
+ZymValue f_self_formatVersion(ZymVM* /*vm*/, ZymValue) {
+    const ZpkReader* r = self_reader_get();
+    if (!r) return zym_newNull();
+    return zym_newNumber((double)r->footer.format_version);
+}
+
 // ---- arbitrary-bundle handle ----------------------------------------------
 
 struct BundleHandle {
@@ -873,6 +881,15 @@ ZymValue b_close(ZymVM* vm, ZymValue self) {
     return zym_newBool(true);
 }
 
+// bundle.formatVersion() -> number | null
+//   The on-disk `format_version` recorded in the bundle's footer.
+//   Returns `null` after the handle has been closed.
+ZymValue b_formatVersion(ZymVM* vm, ZymValue self) {
+    BundleHandle* h = unwrap_bundle_with_vm(vm, self);
+    if (!h || !h->open) return zym_newNull();
+    return zym_newNumber((double)h->reader.footer.format_version);
+}
+
 // ---- bundle assembly ------------------------------------------------------
 
 ZymValue make_bundle_instance(ZymVM* vm, BundleHandle* handle) {
@@ -888,12 +905,13 @@ ZymValue make_bundle_instance(ZymVM* vm, BundleHandle* handle) {
         zym_pushRoot(vm, cl); zym_mapSet(vm, obj, name, cl); zym_popRoot(vm); \
     } while (0)
 
-    M("list",      "list()",       b_list);
-    M("entryName", "entryName()",  b_entryName);
-    M("has",       "has(name)",    b_has);
-    M("open",      "open(arg)",    b_open);
-    M("info",      "info(arg)",    b_info);
-    M("close",     "close()",      b_close);
+    M("list",          "list()",          b_list);
+    M("entryName",     "entryName()",     b_entryName);
+    M("has",           "has(name)",       b_has);
+    M("open",          "open(arg)",       b_open);
+    M("info",          "info(arg)",       b_info);
+    M("close",         "close()",         b_close);
+    M("formatVersion", "formatVersion()", b_formatVersion);
 
 #undef M
 
@@ -935,6 +953,28 @@ ZymValue f_openFile(ZymVM* vm, ZymValue, ZymValue pathV) {
     return make_bundle_instance(vm, h);
 }
 
+// Pack.openBuffer(buffer) -> bundle | null
+//   Opens a `.zpk` from an in-memory `Buffer`. The reader takes its own
+//   copy of the bytes (so the caller's `Buffer` is independent and may
+//   be reused or freed immediately afterwards). Useful when the bundle
+//   is fetched over the network, decrypted in-process, or otherwise
+//   produced without ever touching the filesystem.
+ZymValue f_openBuffer(ZymVM* vm, ZymValue, ZymValue bufV) {
+    const char* bytes = nullptr;
+    size_t size = 0;
+    if (!readBufferBytes(vm, bufV, &bytes, &size)) {
+        zym_runtimeError(vm, "Pack.openBuffer(buffer) expects a Buffer");
+        return ZYM_ERROR;
+    }
+    auto* h = new BundleHandle();
+    if (zpk_reader_open_memory(&h->reader, bytes, size) != 1) {
+        delete h;
+        return zym_newNull();
+    }
+    h->open = true;
+    return make_bundle_instance(vm, h);
+}
+
 } // namespace
 
 // ---- factory --------------------------------------------------------------
@@ -951,19 +991,21 @@ ZymValue nativePack_create(ZymVM* vm) {
         zym_pushRoot(vm, cl); zym_mapSet(vm, obj, name, cl); zym_popRoot(vm); \
     } while (0)
 
-    F("build",      "build(spec)",     f_build);
+    F("build",         "build(spec)",       f_build);
 
     // Self-bundle introspection.
-    F("hasSelf",    "hasSelf()",       f_hasSelf);
-    F("entryName",  "entryName()",     f_self_entryName);
-    F("list",       "list()",          f_self_list);
-    F("has",        "has(name)",       f_self_has);
-    F("open",       "open(arg)",       f_self_open);
-    F("info",       "info(arg)",       f_self_info);
-    F("closeSelf",  "closeSelf()",     f_closeSelf);
+    F("hasSelf",       "hasSelf()",         f_hasSelf);
+    F("entryName",     "entryName()",       f_self_entryName);
+    F("list",          "list()",            f_self_list);
+    F("has",           "has(name)",         f_self_has);
+    F("open",          "open(arg)",         f_self_open);
+    F("info",          "info(arg)",         f_self_info);
+    F("closeSelf",     "closeSelf()",       f_closeSelf);
+    F("formatVersion", "formatVersion()",   f_self_formatVersion);
 
     // Arbitrary bundle.
-    F("openFile",   "openFile(path)",  f_openFile);
+    F("openFile",      "openFile(path)",    f_openFile);
+    F("openBuffer",    "openBuffer(buffer)",f_openBuffer);
 
 #undef F
 

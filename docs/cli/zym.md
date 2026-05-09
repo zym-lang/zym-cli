@@ -139,7 +139,7 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.registerSourceFile(path, source)` | `int` (fileId) | Registers a buffer with the child's file registry. The returned `fileId` is what `preprocess` and diagnostics use to refer to this source. |
 | `cv.preprocess(source, sourceMap, fileId)` | `{ source, status }` | Runs the preprocessor. On success, `source` is the expanded buffer and `status == Zym.STATUS.OK`; on failure `source` is `null` and the status is non-`OK` (drain via `diagnostics()`). |
 | `cv.compile(source, chunk, sourceMap, entryFile, opts)` | `int` (status) | Compiles `source` into `chunk`. `sourceMap` may be `null` for raw text. `opts.includeLineInfo` (default `true`) controls whether line info is embedded. **Flips the child into execution phase.** |
-| `cv.loadModules(source, sourceMap, entryFile, callback, opts)` | `{ status, combinedSource, modulePaths }` or `{ status, error }` | Multi-file compile. The parent `callback(path)` mirrors the C `readAndPreprocessCallback`: it must return `{ source, sourceMap, fileId }` for each imported module, or `null` to signal a missing file. Returns the combined preprocessed source plus the resolved module paths on success. |
+| `cv.loadModules(source, sourceMap, entryFile, callback, opts)` | `{ status, combinedSource, combinedSourceMap, modulePaths }` or `{ status, error }` | Multi-file compile. The parent `callback(path)` mirrors the C `readAndPreprocessCallback`: it must return `{ source, sourceMap, fileId }` for each imported module (the per-module `sourceMap` is the one produced by `preprocess` for *that module's raw source*), or `null` to signal a missing file. The native trampoline deep-clones the per-module SourceMap into the child VM so the parent wrapper retains ownership safely. On success, returns the combined preprocessed source together with the **combined** `SourceMap` (`combinedSourceMap`) — that's the map that must be passed to `compile`, not the entry-only map. |
 | `cv.serializeChunk(chunk, opts)` | `{ status, bytes }` | Serializes a compiled chunk to a `Buffer` of `.zbc` bytes. `opts.includeLineInfo` mirrors compile. |
 | `cv.deserializeChunk(chunk, bytes)` | `int` (status) | Loads `.zbc` bytes (a `Buffer`) into a freshly-allocated chunk. **Flips the child into execution phase.** |
 | `cv.runChunk(chunk)` | `int` (status) | Runs a compiled or deserialized chunk on the child. Auto-loops on `YIELD`. **Flips the child into execution phase.** |
@@ -270,15 +270,29 @@ source ready for `compile`. The callback runs with the **parent's**
 capabilities (it's a parent closure), so a child without `File`
 cannot read modules — the closure simply isn't expressible.
 
-The callback must return a map shaped exactly like the C
-`ModuleReadResult`:
+The callback must return a map shaped like the C `ModuleReadResult`:
 
 ```zym
 { source: <string>, sourceMap: <SourceMap>, fileId: <int> }
 ```
 
-Returning `null` signals "file not found"; the loader will push a
-diagnostic and continue.
+`sourceMap` is the per-module map produced by `preprocess` for *that
+module's raw source* — exactly the same thing the C
+`readAndPreprocessCallback` hands back. The native trampoline
+deep-clones it into the child VM's allocator before forwarding to
+`loadModules`, so there's no cross-allocator hazard: the parent
+wrapper retains ownership of the original (and is freed by its own
+finalizer / explicit `.free()`), while the clone is owned by
+`loadModules` and released through the child's allocator. Returning
+the per-module map is what gives diagnostics full sub-line origin
+precision (originStartByte / originLength / originLine point at the
+exact byte range in the raw module source). Passing `null` is also
+accepted: origin attribution falls back to `fileId` for every line of
+`source`, which is correct at file/line granularity but loses
+sub-line precision after preprocessor expansion.
+
+Returning `null` (instead of a map) from the callback signals
+"file not found"; the loader will push a diagnostic and continue.
 
 ```zym
 var entry = "
@@ -312,17 +326,25 @@ var modules = {
 var loaded = vm.loadModules(pre.source, sm, "entry.zym",
     func(path) {
         if (!modules[path]) { return null }       // miss → diagnostic
-        var raw = modules[path]
-        var sub = vm.registerSourceFile(path, raw)
-        var pp  = vm.preprocess(raw, sm, sub)
-        return { source: pp.source, sourceMap: sm, fileId: sub }
+        var raw    = modules[path]
+        var sub    = vm.registerSourceFile(path, raw)
+        var sub_sm = vm.newSourceMap()             // per-module map
+        var pp     = vm.preprocess(raw, sub_sm, sub)
+        // Return the per-module SourceMap from preprocess so diagnostics
+        // get full sub-line origin precision. The native trampoline
+        // deep-clones it into the child VM; the parent wrapper retains
+        // ownership of the original.
+        return { source: pp.source, sourceMap: sub_sm, fileId: sub }
     },
     { debugNames: true }
 )
 
 if (loaded.status == Zym.STATUS.OK) {
     var ch = vm.newChunk()
-    vm.compile(loaded.combinedSource, ch, sm, "entry.zym", { includeLineInfo: true })
+    // Pass `loaded.combinedSourceMap` (NOT the entry-only `sm`) — it's
+    // sized for the combined buffer. Using `sm` here would produce
+    // misaligned diagnostics on the post-loader source.
+    vm.compile(loaded.combinedSource, ch, loaded.combinedSourceMap, "entry.zym", { includeLineInfo: true })
     vm.runChunk(ch)
     vm.call("main", [])
     var r = vm.callResult()
@@ -344,6 +366,11 @@ Notes:
   for diagnostics, caching, and watch-mode reloads.
 - `loadModules` does **not** flip the child into execution phase on its
   own; the subsequent `compile` call does.
+- `loaded.combinedSourceMap` is owned by the script after this call
+  (transferred out of the internal result struct). It will be freed
+  automatically when its wrapper is collected, or you can call
+  `loaded.combinedSourceMap.free()` explicitly. When `loadModules`
+  fails (`status != OK`), `combinedSourceMap` is absent.
 
 ### Probing for a function before calling it
 

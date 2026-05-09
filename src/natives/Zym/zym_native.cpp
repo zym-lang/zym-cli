@@ -1119,18 +1119,38 @@ static ModuleReadResult zym_loadModules_trampoline(const char* path, void* user_
     if (!heap_src) return result;
     std::memcpy(heap_src, src, n + 1);
 
-    ZymSourceMap* smPtr = nullptr;
+    // The script-provided `sourceMap` is owned by the *parent* VM's
+    // allocator (it's a parent-VM `ZymSourceMap*` wrapped in a
+    // `SourceMapRes`). `loadModules` takes ownership of every SourceMap
+    // it receives via this callback and later frees it through the
+    // *child* VM's allocator (`sourcemap_map_free` in module_loader.c).
+    // Forwarding the parent pointer directly is therefore a
+    // cross-allocator free + double-free against the parent wrapper.
+    //
+    // Instead: deep-clone the parent SourceMap into a fresh child-VM-
+    // owned SourceMap and forward the clone. This preserves all
+    // per-segment origin precision (originStartByte/Length/Line) so
+    // diagnostics resolve to the exact byte range in the original raw
+    // source — matching the C `full_executor.c` pipeline. The parent
+    // wrapper continues to own the parent map and will free it on its
+    // own finalizer; the clone becomes child-owned.
+    ZymSourceMap* smClone = nullptr;
     if (smV != ZYM_ERROR && !zym_isNull(smV)) {
         auto* smr = unwrap_source_map(ctx->parentVm, smV);
-        if (smr && !smr->freed) smPtr = smr->sm;
+        if (smr && !smr->freed && smr->sm) {
+            smClone = zym_cloneSourceMap(ctx->child, smr->sm);
+            // Allocation failure → fall through with NULL; loadModules'
+            // `add_mapped_lines` will fall back to file_id for origin.
+        }
     }
+
     ZymFileId fid = ZYM_FILE_ID_INVALID;
     if (fidV != ZYM_ERROR && zym_isNumber(fidV)) {
         fid = (ZymFileId)(int)zym_asNumber(fidV);
     }
 
     result.source     = heap_src;
-    result.source_map = smPtr;
+    result.source_map = smClone;
     result.file_id    = fid;
     return result;
 }
@@ -1181,6 +1201,18 @@ ZymValue cv_loadModules(ZymVM* parentVm, ZymValue context,
         zym_mapSet(parentVm, result, "status", zym_newNumber((double)ZYM_STATUS_OK));
         zym_mapSet(parentVm, result, "combinedSource",
             zym_newString(parentVm, mr->combined_source ? mr->combined_source : ""));
+        // Expose the combined SourceMap to the script so it can be passed
+        // back into `compile(...)`. The combined map is allocated by the
+        // child VM (same allocator as `make_source_map` / `sm_free`
+        // expect), so we transfer ownership: detach it from `mr` to
+        // prevent `freeModuleLoadResult` from also freeing it.
+        if (mr->source_map) {
+            ZymValue smWrap = make_source_map(parentVm, h, mr->source_map);
+            mr->source_map = nullptr;
+            zym_mapSet(parentVm, result, "combinedSourceMap", smWrap);
+        } else {
+            zym_mapSet(parentVm, result, "combinedSourceMap", zym_newNull());
+        }
         ZymValue paths = zym_newList(parentVm);
         zym_pushRoot(parentVm, paths);
         for (int i = 0; i < mr->module_count; i++) {

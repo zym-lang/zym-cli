@@ -48,6 +48,10 @@ bundle.open(arg)           -> Buffer | null    // arg: name string or numeric in
 bundle.info(arg)           -> entryInfo | null // arg: name string or numeric index
 bundle.formatVersion()     -> number | null    // null after close()
 bundle.close()             -> bool
+
+// --- inspecting and splicing native binaries ---
+Pack.inspectBin(path)                            -> { ... } | null
+Pack.splice(stubPath, zpkPath, outputPath)       -> bool
 ```
 
 `Pack.build` describes the whole bundle in one call; the writer it
@@ -92,7 +96,7 @@ print the format level a bundle was written against.
 | `output`     | string   | yes      | —       | Destination path. When it ends in `.zpk` a **headless** bundle is produced and `stub` is ignored.  |
 | `entries`    | list     | yes      | —       | Non-empty list of entry maps (see below).                                                          |
 | `entryIndex` | number   | no       | `0`     | Index into `entries` of the program entry point. Must reference an entry whose `kind` is `entry_bytecode` or `entry_source`. A bundle may contain at most **one** entry-kind entry. |
-| `stub`       | string   | no       | none    | Path to a CLI runtime binary to prepend as the executable stub. Ignored when `output` ends in `.zpk`. |
+| `stub`       | string   | no       | none    | Path to a CLI runtime binary to prepend as the executable stub. Ignored when `output` ends in `.zpk`. **If the stub file already carries a ZPK payload, only its native portion is taken — the existing payload is dropped and replaced with the new one.** This means a stub-wrapped binary can be re-packed in place without ever stacking multiple ZPK regions; `Pack` enforces "exactly one ZPK per executable" by construction. No `mode` flag is needed: append-vs-swap is decided by what the stub file actually contains. |
 | `compression`| bool     | no       | `false` | Bundle-wide compression default (zstd). When `true`, every entry is compressed unless it sets `compression: false`. When `false` (or omitted) entries default to uncompressed and opt in with `compression: true`. |
 | `level`      | number   | no       | `3`     | Default zstd level (`1..22`). Per-entry `level` overrides this. Ignored on entries that resolve to uncompressed. `3` matches zstd's own default; `19+` is the "release-build" sweet spot. |
 
@@ -276,6 +280,86 @@ var ok = Pack.build({
 });
 ```
 
+## Inspecting and splicing native binaries
+
+`Pack` exposes two file-level operations for working with executables
+that already carry — or are about to carry — a ZPK payload. They are
+cross-platform: ELFs, PE/COFF, Mach-O binaries, and raw blobs are all
+treated identically because the operation only looks at the trailing
+ZPK footer.
+
+### `Pack.inspectBin(path)`
+
+Read-only geometry probe. Opens the file, validates the trailing
+footer, and returns the boundary between the native portion and the
+ZPK payload. Cheap; does not iterate entry payloads.
+
+```
+{
+    fileSize:      <number>,   // total size of the file in bytes
+    stubSize:      <number>,   // bytes 0..stubSize are the native stub
+    payloadSize:   <number>,   // bytes stubSize..fileSize are the ZPK payload
+    formatVersion: <number>,   // ZPK format version recorded in the footer
+    entryCount:    <number>,
+    entryIndex:    <number>,
+    isHeadless:    <bool>,     // stubSize == 0 (a plain `.zpk`)
+    hasStub:       <bool>      // !isHeadless
+}
+```
+
+Returns **`null`** when the file does not contain a valid trailing
+ZPK payload (no magic, bad CRC, truncated footer, file unreadable),
+so scripts can branch cheaply on "is this binary already packed?":
+
+```
+var info = Pack.inspectBin("dist/app");
+if (info == null) {
+    print("no payload yet — fresh build needed");
+} else {
+    print("stub: " + str(info.stubSize) + "  payload: " + str(info.payloadSize));
+}
+```
+
+### `Pack.splice(stubPath, zpkPath, outputPath) -> bool`
+
+Combine an already-built standalone `.zpk` with a native stub binary
+and write the result to `outputPath`. The file-level peer of
+`Pack.build`: it doesn't decompose the source `.zpk` back through the
+writer, so a pre-built bundle can be shipped on top of any stub
+without round-tripping the entries through script memory.
+
+- If the stub at `stubPath` already carries a payload, only its
+  native portion is taken — the previous payload is dropped,
+  preserving the "exactly one ZPK per executable" invariant. Like
+  `Pack.build`'s `stub` option, this means `Pack.splice` transparently
+  **replaces** an existing ZPK on the stub rather than appending a
+  second one; no `mode` flag is needed because append-vs-replace is
+  decided by what the stub file actually contains.
+- If the source `.zpk` argument is itself a stub-wrapped binary, only
+  its payload is taken and grafted onto the new stub.
+- After concatenation, the appended payload's absolute offsets
+  (footer's `manifest_offset` / `strtab_offset`, every entry's
+  `data_offset`) are rewritten to account for the new stub prefix
+  and the manifest + footer CRCs are recomputed. Per-entry
+  `dataCrc32` values are preserved unchanged because they hash entry
+  bytes (not their position in the file). The output is therefore a
+  fully valid bundle, indistinguishable from one written by
+  `Pack.build` directly.
+
+Returns `true` on success; `false` (with a stderr line) on I/O
+failure or when `zpkPath` is not a valid bundle. Type/shape mistakes
+(non-string args) raise a runtime error.
+
+```
+// Build a portable .zpk once, ship it on top of platform-specific stubs.
+Pack.build({
+    output: "dist/app.zpk",
+    entries: [...]
+});
+Pack.splice("vendor/zym-runtime-linux-x86_64", "dist/app.zpk", "dist/app");
+Pack.splice("vendor/zym-runtime-windows-x86_64.exe", "dist/app.zpk", "dist/app.exe");
+```
+
 ## Reading bundles
 
 ### `entryInfo` map
@@ -444,6 +528,42 @@ if (b != null) {
     b.close();
 }
 ```
+
+### What the CRCs cover (and what they don't)
+
+All three CRCs hash **bundle content only** — bytes that live inside
+the ZPK region of the file. They are independent of anything the
+operating system tracks about the file:
+
+- **Filename / path** — not covered. Renaming `app` to `myapp`, or
+  moving the file to a different directory, does not invalidate any
+  CRC. The reader locates the footer at `fileSize - footerSize` and
+  validates from there; the path is just how you got to the bytes.
+- **Filesystem mode bits** — not covered. Toggling the executable bit
+  (`chmod +x` / `chmod -x`), changing ownership, or altering ACLs has
+  no effect on the CRCs. (`chmod -x` will of course stop the OS from
+  running a stub-wrapped bundle, but `Pack.openFile` / `Pack.verify`
+  on the same file will still succeed.)
+- **Modification timestamps, extended attributes, etc.** — not
+  covered. Same reason.
+- **The native stub portion of a wrapped executable** — not covered.
+  Replacing or modifying the stub (e.g. via `Pack.splice`, or by
+  building from a newer runtime binary) does not invalidate the
+  payload's CRCs because the stub lives outside the hashed region.
+
+What **is** covered:
+
+- `footer_crc32` — every byte of the footer struct (with the CRC
+  field itself zeroed during the hash).
+- `manifest_crc32` — the manifest entries concatenated with the
+  string table.
+- `dataCrc32` (per entry) — that entry's on-disk bytes (i.e. the
+  zstd frame for compressed entries, the raw bytes for uncompressed).
+
+In practice this means a freshly built bundle can be renamed,
+`chmod`'d, copied between filesystems, or have its stub replaced via
+`Pack.splice`, and `Pack.verify().ok` will still return `true` as
+long as the bundle bytes themselves were not corrupted in transit.
 
 ## See also
 

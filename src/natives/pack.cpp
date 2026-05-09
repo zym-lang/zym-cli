@@ -72,6 +72,57 @@ bool ends_with(const char* s, const char* suffix) {
     return std::strcmp(s + ls - lf, suffix) == 0;
 }
 
+// Geometry of an existing payload inside an executable / bundle file.
+// Populated by `sniff_payload_geometry()`.
+struct PayloadGeometry {
+    uint64_t file_size;
+    uint64_t stub_size;     // bytes 0..stub_size are the native stub (0 for headless)
+    uint64_t payload_size;  // bytes stub_size..file_size are the ZPK payload
+    uint16_t format_version;
+    uint32_t entry_count;
+    uint32_t entry_index;
+};
+
+// Probe a path for a trailing ZPK payload, computing the boundary
+// between the native stub (if any) and the ZPK region. Returns true
+// on success and fills `*out`. Returns false (without printing) when
+// the file is not a valid ZPK or could not be read; this is by design
+// — callers (`Pack.inspectBin`, `Pack.build` in stub-replace mode)
+// want to branch cheaply on the result.
+//
+// Stub end = lowest data_offset across all manifest entries (the data
+// region starts immediately after the stub). When the bundle has no
+// data-bearing entries, the data region is empty and the strtab /
+// manifest follow the stub directly, so `strtab_offset` (or
+// `manifest_offset` if strtab is empty) is the correct boundary.
+bool sniff_payload_geometry(const char* path, PayloadGeometry* out) {
+    ZpkReader r{};
+    if (zpk_reader_open_path(&r, path) != 1) return false;
+
+    uint64_t stub_end = r.footer.strtab_offset;
+    if (r.footer.strtab_size == 0) {
+        // strtab is zero-length; manifest comes right after the data
+        // region in that case (manifest_offset == strtab_offset, but
+        // be defensive in case a future writer reorders).
+        if (r.footer.manifest_offset < stub_end) stub_end = r.footer.manifest_offset;
+    }
+    for (uint32_t i = 0; i < r.footer.entry_count; i++) {
+        const ZpkEntry& e = r.manifest[i];
+        if (e.data_size == 0) continue;
+        if (e.data_offset < stub_end) stub_end = e.data_offset;
+    }
+
+    out->file_size      = r.file_size;
+    out->stub_size      = stub_end;
+    out->payload_size   = r.file_size - stub_end;
+    out->format_version = r.footer.format_version;
+    out->entry_count    = r.footer.entry_count;
+    out->entry_index    = r.footer.entry_index;
+
+    zpk_reader_close(&r);
+    return true;
+}
+
 // Map a script-facing kind string to the on-disk `ZpkKind` byte.
 // Strings are used (rather than numeric constants) per the
 // status-string convention in `docs/cli/conventions.md`.
@@ -348,17 +399,35 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
     }
 
     // ----- stub (optional; ignored when output ends in .zpk) -----
+    //
+    // If the stub file already carries a ZPK payload (i.e. it was
+    // itself produced by an earlier `Pack.build` / `Pack.splice`),
+    // we trim the existing payload off and rebuild on top of just
+    // the native portion. This means a single stub binary can be
+    // re-packed in place without ever stacking multiple ZPK regions
+    // — `Pack` enforces "exactly one ZPK per executable" by
+    // construction. No `mode` flag is needed: append-vs-swap is
+    // decided by what the stub file actually contains.
     char*  stub_data = nullptr;
     size_t stub_size = 0;
     const bool headless = ends_with(output_path, ".zpk");
     if (!headless) {
         const char* stub_path = opt_string(vm, specV, "stub");
         if (stub_path && *stub_path) {
+            PayloadGeometry geom;
+            const bool has_payload = sniff_payload_geometry(stub_path, &geom);
+
             stub_data = slurp_binary(stub_path, &stub_size);
             if (!stub_data) {
                 std::fprintf(stderr,
                     "Pack.build: could not read stub file \"%s\".\n", stub_path);
                 return zym_newBool(false);
+            }
+            if (has_payload && geom.stub_size < stub_size) {
+                // Trim the existing payload; we only keep the native
+                // portion. (Truncate the in-memory buffer; the
+                // underlying allocation stays — `free` still works.)
+                stub_size = static_cast<size_t>(geom.stub_size);
             }
         }
     }
@@ -969,6 +1038,205 @@ ZymValue f_openBuffer(ZymVM* vm, ZymValue, ZymValue bufV) {
     return make_bundle_instance(vm, h);
 }
 
+// Pack.inspectBin(path) -> { fileSize, stubSize, payloadSize,
+//                            formatVersion, entryCount, entryIndex,
+//                            isHeadless, hasStub } | null
+//
+// Cross-platform geometry probe. Returns `null` when the file does
+// not contain a valid trailing ZPK payload (no magic, bad CRC,
+// truncated footer, file unreadable, etc.) so scripts can branch
+// cheaply on "is this binary already packed?". Does **not** raise on
+// I/O failures — those are the expected `null` path.
+//
+// The boundary between the native stub and the ZPK region is
+// computed from the manifest (lowest `data_offset`, falling back to
+// `strtab_offset` when the bundle has no data-bearing entries).
+//
+// Named `inspectBin` rather than `inspectExe` because the operation
+// is platform-agnostic — ELFs, PE/COFF, Mach-O, raw blobs, anything
+// with a ZPK trailer all work the same way.
+ZymValue f_inspectBin(ZymVM* vm, ZymValue, ZymValue pathV) {
+    if (!zym_isString(pathV)) {
+        zym_runtimeError(vm, "Pack.inspectBin(path) expects a string");
+        return ZYM_ERROR;
+    }
+    const char* path = zym_asCString(pathV);
+    PayloadGeometry geom;
+    if (!sniff_payload_geometry(path, &geom)) {
+        return zym_newNull();
+    }
+
+    ZymValue m = zym_newMap(vm);
+    zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "fileSize",      zym_newNumber((double)geom.file_size));
+    zym_mapSet(vm, m, "stubSize",      zym_newNumber((double)geom.stub_size));
+    zym_mapSet(vm, m, "payloadSize",   zym_newNumber((double)geom.payload_size));
+    zym_mapSet(vm, m, "formatVersion", zym_newNumber((double)geom.format_version));
+    zym_mapSet(vm, m, "entryCount",    zym_newNumber((double)geom.entry_count));
+    zym_mapSet(vm, m, "entryIndex",    zym_newNumber((double)geom.entry_index));
+    zym_mapSet(vm, m, "isHeadless",    zym_newBool(geom.stub_size == 0));
+    zym_mapSet(vm, m, "hasStub",       zym_newBool(geom.stub_size != 0));
+    zym_popRoot(vm);
+    return m;
+}
+
+// Pack.splice(stubPath, zpkPath, outputPath) -> bool
+//
+// Combine an already-built standalone `.zpk` with a native stub
+// binary and write the result to `outputPath`. If the stub at
+// `stubPath` already carries a ZPK payload, only its native portion
+// (bytes `0..stub_size`) is taken — the previous payload is dropped,
+// preserving the "exactly one ZPK per executable" invariant. The
+// `.zpk` is then appended after the stub, with all of its absolute
+// offsets (footer's `manifest_offset` / `strtab_offset`, every
+// entry's `data_offset`) rewritten to account for the new stub
+// prefix, and the manifest + footer CRCs recomputed.
+//
+// This is the file-level peer of `Pack.build`: it doesn't decompose
+// the source `.zpk` back through the writer pipeline, so a pre-built
+// bundle can be shipped on top of any stub without round-tripping
+// through script memory. Per-entry `data_crc32` values are computed
+// over each entry's bytes (not its position in the file), so they
+// remain valid after the offset shift.
+ZymValue f_splice(ZymVM* vm, ZymValue, ZymValue stubPathV, ZymValue zpkPathV, ZymValue outPathV) {
+    if (!zym_isString(stubPathV) || !zym_isString(zpkPathV) || !zym_isString(outPathV)) {
+        zym_runtimeError(vm,
+            "Pack.splice(stubPath, zpkPath, outputPath) expects three strings");
+        return ZYM_ERROR;
+    }
+    const char* stub_path = zym_asCString(stubPathV);
+    const char* zpk_path  = zym_asCString(zpkPathV);
+    const char* out_path  = zym_asCString(outPathV);
+
+    // Slurp the stub. If it already has a payload, trim to the
+    // native portion before writing.
+    size_t stub_size = 0;
+    char* stub_data = slurp_binary(stub_path, &stub_size);
+    if (!stub_data) {
+        std::fprintf(stderr,
+            "Pack.splice: could not read stub file \"%s\".\n", stub_path);
+        return zym_newBool(false);
+    }
+    {
+        PayloadGeometry geom;
+        if (sniff_payload_geometry(stub_path, &geom) && geom.stub_size < stub_size) {
+            stub_size = static_cast<size_t>(geom.stub_size);
+        }
+    }
+
+    // Slurp the source `.zpk` and verify it actually is one. We need
+    // both the geometry (for the source's stub_size, to detect a
+    // stub-wrapped input that we'll re-base from its own data
+    // region) and the raw bytes (to rewrite the footer / manifest).
+    PayloadGeometry zpk_geom;
+    if (!sniff_payload_geometry(zpk_path, &zpk_geom)) {
+        std::fprintf(stderr,
+            "Pack.splice: \"%s\" is not a valid .zpk bundle.\n", zpk_path);
+        std::free(stub_data);
+        return zym_newBool(false);
+    }
+    size_t zpk_total = 0;
+    char* zpk_full = slurp_binary(zpk_path, &zpk_total);
+    if (!zpk_full) {
+        std::fprintf(stderr,
+            "Pack.splice: could not read zpk file \"%s\".\n", zpk_path);
+        std::free(stub_data);
+        return zym_newBool(false);
+    }
+
+    // Source ZPK region: bytes `[zpk_geom.stub_size .. zpk_total)`.
+    // (When the source is itself stub-wrapped — i.e. someone passed
+    // an exe-with-payload as the `zpk` argument — we splice only its
+    // payload onto the new stub.)
+    const size_t src_payload_off  = static_cast<size_t>(zpk_geom.stub_size);
+    const size_t src_payload_size = zpk_total - src_payload_off;
+
+    // Allocate the rewritten payload (same size as source payload —
+    // we only mutate offsets, not the byte count).
+    uint8_t* payload = static_cast<uint8_t*>(std::malloc(src_payload_size));
+    if (!payload) {
+        std::fprintf(stderr, "Pack.splice: out of memory.\n");
+        std::free(stub_data);
+        std::free(zpk_full);
+        return zym_newBool(false);
+    }
+    std::memcpy(payload, zpk_full + src_payload_off, src_payload_size);
+    std::free(zpk_full);
+
+    // Compute the per-section delta: every absolute offset in the
+    // source payload assumed `src_payload_off` as the data-region
+    // base; we want it to be `stub_size` instead.
+    const int64_t delta = static_cast<int64_t>(stub_size) - static_cast<int64_t>(src_payload_off);
+
+    // Locate the footer (last ZPK_FOOTER_SIZE bytes of the payload).
+    if (src_payload_size < ZPK_FOOTER_SIZE) {
+        std::fprintf(stderr, "Pack.splice: source payload too small for a footer.\n");
+        std::free(stub_data);
+        std::free(payload);
+        return zym_newBool(false);
+    }
+    ZpkFooter* footer = reinterpret_cast<ZpkFooter*>(payload + src_payload_size - ZPK_FOOTER_SIZE);
+
+    // Rebase footer's absolute offsets.
+    footer->manifest_offset = static_cast<uint64_t>(static_cast<int64_t>(footer->manifest_offset) + delta);
+    footer->strtab_offset   = static_cast<uint64_t>(static_cast<int64_t>(footer->strtab_offset)   + delta);
+
+    // Rebase every manifest entry's data_offset. The manifest sits
+    // at the (rebased) `manifest_offset`, but inside the in-memory
+    // `payload` buffer it's at `manifest_offset - stub_size` (the
+    // payload base inside the final file).
+    const size_t manifest_local = static_cast<size_t>(footer->manifest_offset) - stub_size;
+    if (manifest_local + (size_t)footer->entry_count * ZPK_ENTRY_SIZE > src_payload_size - ZPK_FOOTER_SIZE) {
+        std::fprintf(stderr, "Pack.splice: manifest extends past payload.\n");
+        std::free(stub_data);
+        std::free(payload);
+        return zym_newBool(false);
+    }
+    ZpkEntry* manifest = reinterpret_cast<ZpkEntry*>(payload + manifest_local);
+    for (uint32_t i = 0; i < footer->entry_count; i++) {
+        manifest[i].data_offset = static_cast<uint64_t>(static_cast<int64_t>(manifest[i].data_offset) + delta);
+    }
+
+    // Recompute manifest CRC over (manifest entries || strtab).
+    const size_t manifest_size = (size_t)footer->entry_count * ZPK_ENTRY_SIZE;
+    uint32_t manifest_crc = zpk_crc32(0, manifest, manifest_size);
+    if (footer->strtab_size > 0) {
+        const size_t strtab_local = static_cast<size_t>(footer->strtab_offset) - stub_size;
+        manifest_crc = zpk_crc32(manifest_crc, payload + strtab_local, static_cast<size_t>(footer->strtab_size));
+    }
+    footer->manifest_crc32 = manifest_crc;
+
+    // Recompute footer CRC (with `footer_crc32` zeroed during hash).
+    footer->footer_crc32 = 0;
+    footer->footer_crc32 = zpk_crc32(0, footer, sizeof(ZpkFooter));
+
+    // Write stub + rebased payload to output.
+    FILE* f = std::fopen(out_path, "wb");
+    if (!f) {
+        std::fprintf(stderr,
+            "Pack.splice: could not create output file \"%s\".\n", out_path);
+        std::free(stub_data);
+        std::free(payload);
+        return zym_newBool(false);
+    }
+    bool ok = true;
+    if (stub_size > 0) {
+        if (std::fwrite(stub_data, 1, stub_size, f) != stub_size) ok = false;
+    }
+    if (ok && src_payload_size > 0) {
+        if (std::fwrite(payload, 1, src_payload_size, f) != src_payload_size) ok = false;
+    }
+    std::fclose(f);
+    std::free(stub_data);
+    std::free(payload);
+    if (!ok) {
+        std::fprintf(stderr,
+            "Pack.splice: short write to \"%s\".\n", out_path);
+        return zym_newBool(false);
+    }
+    return zym_newBool(true);
+}
+
 } // namespace
 
 // ---- factory --------------------------------------------------------------
@@ -1000,6 +1268,11 @@ ZymValue nativePack_create(ZymVM* vm) {
     // Arbitrary bundle.
     F("openFile",      "openFile(path)",    f_openFile);
     F("openBuffer",    "openBuffer(buffer)",f_openBuffer);
+
+    // Binary inspection / splice (cross-platform; works on any file
+    // with a trailing ZPK footer, not just ELFs).
+    F("inspectBin",    "inspectBin(path)",                            f_inspectBin);
+    F("splice",        "splice(stubPath, zpkPath, outputPath)",       f_splice);
 
 #undef F
 

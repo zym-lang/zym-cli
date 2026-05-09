@@ -73,7 +73,7 @@ The read API is split into two surfaces:
 | ---          | ---      | ---      | ---     | ---                                                                                                |
 | `output`     | string   | yes      | —       | Destination path. When it ends in `.zpk` a **headless** bundle is produced and `stub` is ignored.  |
 | `entries`    | list     | yes      | —       | Non-empty list of entry maps (see below).                                                          |
-| `entryIndex` | number   | no       | `0`     | Index into `entries` of the program entry point. Must reference an entry whose `kind` is `entry_bytecode`. |
+| `entryIndex` | number   | no       | `0`     | Index into `entries` of the program entry point. Must reference an entry whose `kind` is `entry_bytecode` or `entry_source`. A bundle may contain at most **one** entry-kind entry. |
 | `stub`       | string   | no       | none    | Path to a CLI runtime binary to prepend as the executable stub. Ignored when `output` ends in `.zpk`. |
 | `compression`| bool     | no       | `false` | Bundle-wide compression default (zstd). When `true`, every entry is compressed unless it sets `compression: false`. When `false` (or omitted) entries default to uncompressed and opt in with `compression: true`. |
 | `level`      | number   | no       | `3`     | Default zstd level (`1..22`). Per-entry `level` overrides this. Ignored on entries that resolve to uncompressed. `3` matches zstd's own default; `19+` is the "release-build" sweet spot. |
@@ -131,7 +131,8 @@ The accepted entry kind strings are:
 
 | String              | Meaning                                              |
 | ---                 | ---                                                  |
-| `"entry_bytecode"`  | The program entry point's compiled bytecode.         |
+| `"entry_bytecode"`  | The program entry point's compiled bytecode (`.zbc`). The runtime loader deserializes and runs it directly. |
+| `"entry_source"`    | The program entry point's raw source (`.zym`). The runtime loader compiles it on boot, then runs. Only one of `entry_bytecode` / `entry_source` is permitted per bundle. |
 | `"module_bytecode"` | A non-entry bytecode module.                         |
 | `"source_map"`      | A source map for one of the bytecode entries.        |
 | `"asset"`           | A binary asset blob.                                 |
@@ -162,10 +163,43 @@ to know the on-disk byte values.
   - an entry's `kind` not a recognized string
   - an entry that sets both `data` and `path`, or neither
   - an entry whose `data` is not a `Buffer`
-  - `entryIndex` out of range or referencing a non-`entry_bytecode`
-    entry
+  - `entryIndex` out of range or referencing an entry whose `kind` is
+    not `entry_bytecode` or `entry_source`
+  - more than one entry has an entry-kind (`entry_bytecode` /
+    `entry_source`) in the same bundle
 - **Recoverable failures** (file not openable, short read, short
   write, out-of-memory while assembling) return `false`.
+
+### Source vs. bytecode entries
+
+A bundle's program entry can be either compiled bytecode
+(`entry_bytecode`) or raw `.zym` source (`entry_source`). Pick one:
+
+- **`entry_bytecode`** — the runtime loader deserializes and runs the
+  chunk directly. Use this for shipping production builds and for any
+  app that imports modules from inside the bundle (`module_bytecode`
+  entries are resolved by the bytecode loader).
+- **`entry_source`** — the runtime loader compiles the source on every
+  boot, then runs it. Useful for small single-file tools, tweak-and-run
+  debugging workflows, and "patch the script, re-launch" iteration.
+
+**Module resolution policy.** When the entry is `entry_source`, module
+imports are resolved **from disk only** — the loader's module reader
+opens files relative to the running process's working directory. ZPK
+*does not* resolve `module_bytecode` (or any other) entries from
+inside the bundle when the entry is source. If your app needs
+bundle-internal module resolution, ship it as `entry_bytecode` with
+the modules as `module_bytecode` entries; the bytecode entry was
+compiled with all imports already resolved.
+
+A bundle may contain **at most one** entry-kind entry; mixing
+`entry_bytecode` and `entry_source` in the same bundle is rejected at
+`Pack.build` time.
+
+Syntax errors in an `entry_source` entry surface at **boot time**
+(when the loader compiles), not at pack time. That's the intended
+debug-iteration behavior, but is worth knowing if you're shipping
+source-entry bundles to other users.
 
 ## Examples
 
@@ -202,6 +236,22 @@ var ok = Pack.build({
         { name: "main.zbc", kind: "entry_bytecode", data: bytecode },
         { name: "level1.bin", kind: "asset",  path: "assets/level1.bin" },
         { name: "credits.txt", kind: "asset_text", path: "assets/credits.txt" }
+    ]
+});
+```
+
+### Stub-wrapped executable from raw source
+
+The loader compiles `app.zym` on every boot. Module imports in
+`app.zym`, if any, are resolved from disk relative to the running
+process — **not** from inside the bundle.
+
+```
+var ok = Pack.build({
+    output: "dist/app",                    // not .zpk → wrapped exe
+    stub:   "vendor/zym-runtime",
+    entries: [
+        { name: "app.zym", kind: "entry_source", path: "src/app.zym" }
     ]
 });
 ```

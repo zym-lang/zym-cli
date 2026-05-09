@@ -171,11 +171,20 @@ int zpk_reader_open_path(ZpkReader* out, const char* path) {
     }
 
     // Validate the entry-point entry up front so callers can rely on it.
-    if (footer.entry_count == 0 ||
-        manifest[footer.entry_index].kind != ZPK_KIND_ENTRY_BYTECODE) {
-        fprintf(stderr, "zpk: entry-point entry must have kind ENTRY_BYTECODE.\n");
+    // The runtime loader dispatches on the entry's kind: ENTRY_BYTECODE
+    // is deserialized + run; ENTRY_SOURCE is compiled-on-load + run.
+    if (footer.entry_count == 0) {
+        fprintf(stderr, "zpk: bundle has no entries.\n");
         free(file_data);
         return 0;
+    }
+    {
+        const uint8_t k = manifest[footer.entry_index].kind;
+        if (k != ZPK_KIND_ENTRY_BYTECODE && k != ZPK_KIND_ENTRY_SOURCE) {
+            fprintf(stderr, "zpk: entry-point entry must have kind ENTRY_BYTECODE or ENTRY_SOURCE.\n");
+            free(file_data);
+            return 0;
+        }
     }
 
     out->file_data = file_data;

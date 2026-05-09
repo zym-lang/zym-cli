@@ -78,6 +78,7 @@ bool ends_with(const char* s, const char* suffix) {
 bool kind_from_string(const char* s, uint8_t* out) {
     if (!s || !*s) return false;
     if (std::strcmp(s, "entry_bytecode")  == 0) { *out = ZPK_KIND_ENTRY_BYTECODE;  return true; }
+    if (std::strcmp(s, "entry_source")    == 0) { *out = ZPK_KIND_ENTRY_SOURCE;    return true; }
     if (std::strcmp(s, "module_bytecode") == 0) { *out = ZPK_KIND_MODULE_BYTECODE; return true; }
     if (std::strcmp(s, "source_map")      == 0) { *out = ZPK_KIND_SOURCE_MAP;      return true; }
     if (std::strcmp(s, "asset")           == 0) { *out = ZPK_KIND_ASSET_BLOB;      return true; }
@@ -227,7 +228,7 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         if (!kind_from_string(kind_str, &kind_byte)) {
             zym_runtimeError(vm,
                 "Pack.build(spec): spec.entries[%d].kind '%s' is not a known kind "
-                "(expected 'entry_bytecode', 'module_bytecode', 'source_map', 'asset', or 'asset_text')",
+                "(expected 'entry_bytecode', 'entry_source', 'module_bytecode', 'source_map', 'asset', or 'asset_text')",
                 i, kind_str);
             return ZYM_ERROR;
         }
@@ -319,6 +320,36 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         }
     }
 
+    // ----- enforce single entry-kind entry per bundle -----
+    //
+    // The runtime loader picks the program entry by the footer's
+    // `entry_index` and dispatches on its kind. A bundle with more
+    // than one entry-kind entry would be ambiguous, and `entryIndex`
+    // must point at one of them. Module-bytecode entries are not
+    // counted — they're imported, not "the entry".
+    {
+        int entry_kind_count = 0;
+        for (int i = 0; i < n; i++) {
+            if (infos[i].kind == ZPK_KIND_ENTRY_BYTECODE ||
+                infos[i].kind == ZPK_KIND_ENTRY_SOURCE) {
+                entry_kind_count++;
+            }
+        }
+        if (entry_kind_count > 1) {
+            zym_runtimeError(vm,
+                "Pack.build(spec): bundle has %d entry-kind entries (entry_bytecode/entry_source); "
+                "only one is allowed", entry_kind_count);
+            return ZYM_ERROR;
+        }
+        const uint8_t ek = infos[entry_index].kind;
+        if (ek != ZPK_KIND_ENTRY_BYTECODE && ek != ZPK_KIND_ENTRY_SOURCE) {
+            zym_runtimeError(vm,
+                "Pack.build(spec): spec.entries[entryIndex=%u].kind must be "
+                "'entry_bytecode' or 'entry_source'", (unsigned)entry_index);
+            return ZYM_ERROR;
+        }
+    }
+
     // ----- stub (optional; ignored when output ends in .zpk) -----
     char*  stub_data = nullptr;
     size_t stub_size = 0;
@@ -374,8 +405,9 @@ const char* kind_to_string(uint8_t k, char* user_buf /*>=16 bytes*/) {
         case ZPK_KIND_NATIVE_LIB:      return "native_lib";
         case ZPK_KIND_MANIFEST_EXT:    return "manifest_ext";
         case ZPK_KIND_SIGNATURE:       return "signature";
+        case ZPK_KIND_ENTRY_SOURCE:    return "entry_source";
         default:
-            // 0x09..0x7E reserved; 0x7F..0xFF user range.
+            // 0x0A..0x7E reserved; 0x7F..0xFF user range.
             if (k >= ZPK_KIND_USER_MIN) {
                 std::snprintf(user_buf, 16, "user:0x%02X", (unsigned)k);
                 return user_buf;

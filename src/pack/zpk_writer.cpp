@@ -64,10 +64,30 @@ int zpk_write_bundle(const char* out_path,
                 entry_index, entry_count);
         return 0;
     }
-    if (entries[entry_index].kind != ZPK_KIND_ENTRY_BYTECODE) {
-        fprintf(stderr, "zpk_write_bundle: entry at index %u must have kind ENTRY_BYTECODE.\n",
+    if (entries[entry_index].kind != ZPK_KIND_ENTRY_BYTECODE &&
+        entries[entry_index].kind != ZPK_KIND_ENTRY_SOURCE) {
+        fprintf(stderr, "zpk_write_bundle: entry at index %u must have kind ENTRY_BYTECODE or ENTRY_SOURCE.\n",
                 entry_index);
         return 0;
+    }
+    // Exactly one entry-kind entry is allowed per bundle: the runtime
+    // loader picks the program entry by the footer's `entry_index` and
+    // dispatches on its kind, so a second entry-kind entry would be
+    // ambiguous (which one runs?). Module-bytecode entries don't count
+    // here — they're imported, not "the entry".
+    {
+        size_t entry_kind_count = 0;
+        for (size_t i = 0; i < entry_count; i++) {
+            if (entries[i].kind == ZPK_KIND_ENTRY_BYTECODE ||
+                entries[i].kind == ZPK_KIND_ENTRY_SOURCE) {
+                entry_kind_count++;
+            }
+        }
+        if (entry_kind_count > 1) {
+            fprintf(stderr, "zpk_write_bundle: bundle has %zu entry-kind entries; only one allowed.\n",
+                    entry_kind_count);
+            return 0;
+        }
     }
 
     // ----- Resolve file-backed entries by reading from disk. -------------

@@ -48,7 +48,8 @@ typedef enum {
     ZPK_KIND_NATIVE_LIB      = 0x06, // reserved
     ZPK_KIND_MANIFEST_EXT    = 0x07, // reserved (TOML/JSON sidecar)
     ZPK_KIND_SIGNATURE       = 0x08, // reserved
-    // 0x09..0x7E reserved for future Zym use
+    ZPK_KIND_ENTRY_SOURCE    = 0x09, // .zym source, compiled-on-load entry
+    // 0x0A..0x7E reserved for future Zym use
     ZPK_KIND_USER_MIN        = 0x7F,
     ZPK_KIND_USER_MAX        = 0xFF
 } ZpkKind;

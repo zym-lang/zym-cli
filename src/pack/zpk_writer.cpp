@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Godot's compression facade — already linked into the binary for the
+// `Buffer.compress` native, so adopting it here costs no new dependency.
+#include "core/io/compression.h"
+
 // CRC-32 (IEEE 802.3, polynomial 0xEDB88320). Single shared
 // implementation used by both writer and reader. The table is built
 // lazily once.
@@ -162,6 +166,101 @@ int zpk_write_bundle(const char* out_path,
     }
     entries = effective;
 
+    // ----- Compression pass. ---------------------------------------------
+    //
+    // For every entry whose `compression` byte requests a codec, run
+    // the codec on the (now in-memory) raw bytes. The original raw
+    // size is captured into `uncompressed_sizes[i]` before we touch
+    // `effective[i].data_size`, so the manifest's `uncompressed_size`
+    // field can be filled in unconditionally further down.
+    //
+    // Auto-fallback policy: if the compressed output is not strictly
+    // smaller than the raw input we revert this entry to
+    // `ZPK_COMPRESSION_NONE` and keep the raw bytes. This matches the
+    // documented `Pack.build` contract (the script never gets a bigger
+    // entry just because it asked for compression).
+    //
+    // The compressed buffer (when used) takes over the
+    // `loaded_buffers[i]` slot so it is freed alongside the
+    // file-loaded buffers via the existing cleanup paths. Any prior
+    // `loaded_buffers[i]` from the file-loading pass is freed first.
+    uint64_t* uncompressed_sizes = static_cast<uint64_t*>(malloc(sizeof(uint64_t) * entry_count));
+    if (!uncompressed_sizes) {
+        fprintf(stderr, "zpk_write_bundle: out of memory.\n");
+        for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+        free(loaded_buffers);
+        free(effective);
+        return 0;
+    }
+    for (size_t i = 0; i < entry_count; i++) {
+        uncompressed_sizes[i] = static_cast<uint64_t>(effective[i].data_size);
+
+        if (effective[i].compression == ZPK_COMPRESSION_NONE) continue;
+        if (effective[i].compression != ZPK_COMPRESSION_ZSTD) {
+            fprintf(stderr, "zpk_write_bundle: entry %zu requests unsupported compression %u.\n",
+                    i, (unsigned)effective[i].compression);
+            free(uncompressed_sizes);
+            for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+            free(loaded_buffers);
+            free(effective);
+            return 0;
+        }
+        // Empty entry → nothing to compress; record as `none`.
+        if (effective[i].data_size == 0) {
+            effective[i].compression = ZPK_COMPRESSION_NONE;
+            continue;
+        }
+
+        const int saved_zstd_level = Compression::zstd_level;
+        if (effective[i].level > 0) {
+            Compression::zstd_level = effective[i].level;
+        }
+
+        const int64_t bound = Compression::get_max_compressed_buffer_size(
+            static_cast<int64_t>(effective[i].data_size), Compression::MODE_ZSTD);
+        if (bound <= 0) {
+            Compression::zstd_level = saved_zstd_level;
+            fprintf(stderr, "zpk_write_bundle: entry %zu compression bound failed.\n", i);
+            free(uncompressed_sizes);
+            for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+            free(loaded_buffers);
+            free(effective);
+            return 0;
+        }
+        void* cbuf = malloc(static_cast<size_t>(bound));
+        if (!cbuf) {
+            Compression::zstd_level = saved_zstd_level;
+            fprintf(stderr, "zpk_write_bundle: out of memory compressing entry %zu.\n", i);
+            free(uncompressed_sizes);
+            for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+            free(loaded_buffers);
+            free(effective);
+            return 0;
+        }
+        const int64_t got = Compression::compress(
+            static_cast<uint8_t*>(cbuf),
+            static_cast<const uint8_t*>(effective[i].data),
+            static_cast<int64_t>(effective[i].data_size),
+            Compression::MODE_ZSTD);
+        Compression::zstd_level = saved_zstd_level;
+
+        if (got <= 0 || static_cast<size_t>(got) >= effective[i].data_size) {
+            // Either the codec failed or it didn't actually shrink the
+            // entry. Drop the compressed buffer and store as `none`.
+            free(cbuf);
+            effective[i].compression = ZPK_COMPRESSION_NONE;
+            continue;
+        }
+
+        // Success: swap in the compressed buffer. Free any prior
+        // file-loaded buffer for this slot (compressed bytes
+        // supersede them on disk).
+        if (loaded_buffers[i]) free(loaded_buffers[i]);
+        loaded_buffers[i] = cbuf;
+        effective[i].data = cbuf;
+        effective[i].data_size = static_cast<size_t>(got);
+    }
+
     // ----- Plan the layout in memory before writing anything. ------------
     //
     // [stub][data region][string table][manifest entries][footer]
@@ -179,6 +278,7 @@ int zpk_write_bundle(const char* out_path,
         fprintf(stderr, "zpk_write_bundle: out of memory.\n");
         free(data_offsets);
         free(data_crcs);
+        free(uncompressed_sizes);
         for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
         free(loaded_buffers);
         free(effective);
@@ -209,6 +309,7 @@ int zpk_write_bundle(const char* out_path,
             fprintf(stderr, "zpk_write_bundle: out of memory (strtab).\n");
             free(data_offsets);
             free(data_crcs);
+            free(uncompressed_sizes);
             for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
             free(loaded_buffers);
             free(effective);
@@ -225,6 +326,7 @@ int zpk_write_bundle(const char* out_path,
         free(strtab);
         free(name_offsets);
         free(name_lengths);
+        free(uncompressed_sizes);
         for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
         free(loaded_buffers);
         free(effective);
@@ -262,6 +364,7 @@ int zpk_write_bundle(const char* out_path,
         free(strtab);
         free(name_offsets);
         free(name_lengths);
+        free(uncompressed_sizes);
         for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
         free(loaded_buffers);
         free(effective);
@@ -271,14 +374,14 @@ int zpk_write_bundle(const char* out_path,
     for (size_t i = 0; i < entry_count; i++) {
         ZpkEntry& e = manifest[i];
         e.kind              = entries[i].kind;
-        e.compression       = ZPK_COMPRESSION_NONE;
+        e.compression       = entries[i].compression;
         e.flags             = entries[i].flags;
         e.name_offset       = name_offsets[i];
         e.name_length       = name_lengths[i];
         e.reserved          = 0;
         e.data_offset       = data_offsets[i];
         e.data_size         = static_cast<uint64_t>(entries[i].data_size);
-        e.uncompressed_size = static_cast<uint64_t>(entries[i].data_size);
+        e.uncompressed_size = uncompressed_sizes[i];
         e.data_crc32        = data_crcs[i];
         e.custom            = entries[i].custom;
     }
@@ -319,6 +422,7 @@ int zpk_write_bundle(const char* out_path,
         free(name_offsets);
         free(name_lengths);
         free(manifest);
+        free(uncompressed_sizes);
         for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
         free(loaded_buffers);
         free(effective);
@@ -342,6 +446,7 @@ int zpk_write_bundle(const char* out_path,
     free(name_offsets);
     free(name_lengths);
     free(manifest);
+    free(uncompressed_sizes);
     for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
     free(loaded_buffers);
     free(effective);

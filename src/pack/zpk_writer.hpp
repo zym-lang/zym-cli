@@ -14,8 +14,12 @@
 // string table and patching offsets. `name` may be null for an unnamed
 // entry (length will be set to 0).
 //
-// `data` / `data_size` are the bytes to write into the data region.
-// In v1 they are stored uncompressed (see docs/formats/zpk.md).
+// `data` / `data_size` are the *raw* (uncompressed) bytes to store
+// in the data region. When `compression` is non-zero the writer
+// compresses them in-place before laying out the bundle; the on-disk
+// `data_size` then reflects the compressed size and `uncompressed_size`
+// reflects the original. With `compression == ZPK_COMPRESSION_NONE`
+// (the default) the bytes are written verbatim.
 //
 // Bytes source: exactly one of two paths supplies the entry's bytes:
 //   1. In-memory: set `data` / `data_size`, leave `file_path` null.
@@ -27,10 +31,19 @@
 //
 // Setting both, or neither, is a programmer error and the writer
 // fails the call.
+//
+// Compression: `compression` is a `ZpkCompression` byte (0 = none,
+// 1 = zstd). When zstd is requested, `level` selects the zstd level
+// in 1..22; pass 0 to use the writer's safe default (3). If the
+// compressed output isn't strictly smaller than the raw input the
+// writer auto-falls back to storing the entry uncompressed — scripts
+// never get a "compression made it bigger" surprise.
 typedef struct {
     const char* name;         // optional; UTF-8; not NUL-terminated requirement
     size_t      name_length;  // bytes in `name`; ignored if `name == nullptr`
     uint8_t     kind;         // ZpkKind
+    uint8_t     compression;  // ZpkCompression; 0 = none (default)
+    int         level;        // codec level; 0 = codec default
     uint16_t    flags;        // ZPK_ENTRY_FLAG_*
     uint32_t    custom;       // free per kind
     const void* data;

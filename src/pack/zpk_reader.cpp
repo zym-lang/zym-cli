@@ -5,6 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Same shared decompression facade the writer uses (Godot's
+// `Compression`). Linked in already via `Buffer.compress` /
+// `Buffer.decompress`, so this is a free include.
+#include "core/io/compression.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -223,25 +228,15 @@ char* zpk_reader_read_entry(const ZpkReader* r, uint32_t index, size_t* out_size
 
     const ZpkEntry& e = r->manifest[index];
 
-    if (e.compression != ZPK_COMPRESSION_NONE) {
-        fprintf(stderr, "zpk: entry %u uses compression %u which this build does not support.\n",
-                index, (unsigned)e.compression);
-        return nullptr;
-    }
-
     // Bounds-check the slice.
     const uint64_t payload_end = static_cast<uint64_t>(r->file_size) - ZPK_FOOTER_SIZE;
     if (e.data_offset + e.data_size > payload_end) {
         fprintf(stderr, "zpk: entry %u data extends beyond footer.\n", index);
         return nullptr;
     }
-    if (e.data_size != e.uncompressed_size) {
-        fprintf(stderr, "zpk: entry %u has data_size != uncompressed_size with no compression.\n",
-                index);
-        return nullptr;
-    }
 
-    // CRC verify. Per spec v1 this is warn-only.
+    // CRC verify is over the *on-disk* (post-compression) bytes,
+    // matching the writer. Per spec v1 this is warn-only.
     {
         uint32_t crc = zpk_crc32(0, r->file_data + e.data_offset, static_cast<size_t>(e.data_size));
         if (crc != e.data_crc32) {
@@ -250,13 +245,54 @@ char* zpk_reader_read_entry(const ZpkReader* r, uint32_t index, size_t* out_size
         }
     }
 
-    char* buf = static_cast<char*>(malloc(static_cast<size_t>(e.data_size)));
-    if (!buf) {
-        fprintf(stderr, "zpk: out of memory reading entry %u (%llu bytes).\n",
-                index, (unsigned long long)e.data_size);
-        return nullptr;
+    if (e.compression == ZPK_COMPRESSION_NONE) {
+        if (e.data_size != e.uncompressed_size) {
+            fprintf(stderr, "zpk: entry %u has data_size != uncompressed_size with no compression.\n",
+                    index);
+            return nullptr;
+        }
+        char* buf = static_cast<char*>(malloc(static_cast<size_t>(e.data_size)));
+        if (!buf) {
+            fprintf(stderr, "zpk: out of memory reading entry %u (%llu bytes).\n",
+                    index, (unsigned long long)e.data_size);
+            return nullptr;
+        }
+        memcpy(buf, r->file_data + e.data_offset, static_cast<size_t>(e.data_size));
+        *out_size = static_cast<size_t>(e.data_size);
+        return buf;
     }
-    memcpy(buf, r->file_data + e.data_offset, static_cast<size_t>(e.data_size));
-    *out_size = static_cast<size_t>(e.data_size);
-    return buf;
+
+    if (e.compression == ZPK_COMPRESSION_ZSTD) {
+        // Allocate a buffer of exactly `uncompressed_size`, decompress
+        // into it, and require the codec to fill it precisely. Length
+        // mismatch is treated as a hard failure (corrupt frame /
+        // misdeclared size), not a warn — there's no safe way to
+        // hand back a partial buffer.
+        char* buf = static_cast<char*>(malloc(static_cast<size_t>(e.uncompressed_size)));
+        if (!buf) {
+            fprintf(stderr, "zpk: out of memory decompressing entry %u (%llu bytes).\n",
+                    index, (unsigned long long)e.uncompressed_size);
+            return nullptr;
+        }
+        const int64_t got = Compression::decompress(
+            reinterpret_cast<uint8_t*>(buf),
+            static_cast<int64_t>(e.uncompressed_size),
+            r->file_data + e.data_offset,
+            static_cast<int64_t>(e.data_size),
+            Compression::MODE_ZSTD);
+        if (got != static_cast<int64_t>(e.uncompressed_size)) {
+            fprintf(stderr, "zpk: entry %u zstd decompression failed (expected %llu bytes, got %lld).\n",
+                    index,
+                    (unsigned long long)e.uncompressed_size,
+                    (long long)got);
+            free(buf);
+            return nullptr;
+        }
+        *out_size = static_cast<size_t>(e.uncompressed_size);
+        return buf;
+    }
+
+    fprintf(stderr, "zpk: entry %u uses compression %u which this build does not support.\n",
+            index, (unsigned)e.compression);
+    return nullptr;
 }

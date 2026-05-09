@@ -75,6 +75,8 @@ The read API is split into two surfaces:
 | `entries`    | list     | yes      | —       | Non-empty list of entry maps (see below).                                                          |
 | `entryIndex` | number   | no       | `0`     | Index into `entries` of the program entry point. Must reference an entry whose `kind` is `entry_bytecode`. |
 | `stub`       | string   | no       | none    | Path to a CLI runtime binary to prepend as the executable stub. Ignored when `output` ends in `.zpk`. |
+| `compression`| bool     | no       | `false` | Bundle-wide compression default (zstd). When `true`, every entry is compressed unless it sets `compression: false`. When `false` (or omitted) entries default to uncompressed and opt in with `compression: true`. |
+| `level`      | number   | no       | `3`     | Default zstd level (`1..22`). Per-entry `level` overrides this. Ignored on entries that resolve to uncompressed. `3` matches zstd's own default; `19+` is the "release-build" sweet spot. |
 
 ### Entry map
 
@@ -88,9 +90,40 @@ Each element of `entries` is a map:
 | `custom` | number   | no       | `0`     | Free per-kind 32-bit field, forwarded verbatim.                                      |
 | `data`   | Buffer   | one of   | —       | In-memory bytes. Use this when the data already lives in script memory.              |
 | `path`   | string   | one of   | —       | Absolute or relative file path. The writer streams this file from disk; the bytes never round-trip through a script-side `Buffer`. |
+| `compression` | bool | no       | (inherits) | Per-entry override of the bundle-wide `compression`. Always wins over the bundle default. |
+| `level`  | number   | no       | (inherits) | Per-entry override of the bundle-wide `level` (`1..22`). Ignored when the entry resolves to uncompressed. |
 
 Every entry must set **exactly one** of `data` or `path`. Setting both,
 or neither, raises a runtime error.
+
+### Compression
+
+`Pack` supports **zstd** as the only compression codec. The on-disk
+format records compression per entry, so each entry can be compressed
+or stored verbatim independently — there is no whole-bundle codec.
+
+Resolution rule (bundle default + per-entry override):
+
+- `spec.compression` omitted or `false` → entries default to
+  **uncompressed**; an entry sets `compression: true` to opt in.
+- `spec.compression: true` → entries default to **compressed**; an
+  entry sets `compression: false` to opt out.
+- Per-entry `compression` always wins over the bundle default.
+- `level` follows the same shape: bundle-level default (3 if omitted),
+  overridden by per-entry `level`. Range is `1..22`, matching
+  `Buffer.compress("zstd", level)`.
+
+**Auto-fallback to uncompressed.** If an entry resolved to compressed
+but the zstd output isn't strictly smaller than the raw input, the
+writer stores the raw bytes instead and records `compression: none`
+on disk. Already-compressed assets (PNG, opus, etc.) therefore don't
+get a worse-than-passthrough re-encode just because the bundle's
+default is `true`.
+
+**Reads are transparent.** `open(arg)` always hands back the
+**decompressed** payload as a `Buffer`. Scripts wanting to know what
+the on-disk codec actually was can check `info(arg).compression`
+(`"zstd"` / `"none"`).
 
 ### `kind` vocabulary
 

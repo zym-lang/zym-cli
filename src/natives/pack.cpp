@@ -159,6 +159,44 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         }
     }
 
+    // ----- compression / level (bundle-wide defaults; per-entry wins) -----
+    //
+    // Resolution rule: when `spec.compression == true`, every entry
+    // defaults to compressed; an entry sets `compression: false` to
+    // opt out. When `spec.compression` is omitted or false, every
+    // entry defaults to uncompressed; an entry sets
+    // `compression: true` to opt in. Per-entry `compression` always
+    // wins over the bundle default. `level` mirrors the same
+    // shape — entry's `level` overrides the bundle's, which defaults
+    // to 3 (zstd's own default, also `Buffer.compress("zstd")`'s).
+    bool bundle_compress = false;
+    {
+        ZymValue cv = zym_mapGet(vm, specV, "compression");
+        if (cv != ZYM_ERROR && !zym_isNull(cv)) {
+            if (!zym_isBool(cv)) {
+                zym_runtimeError(vm, "Pack.build(spec): spec.compression must be a bool");
+                return ZYM_ERROR;
+            }
+            bundle_compress = zym_asBool(cv);
+        }
+    }
+    int bundle_level = 3;
+    {
+        ZymValue lv = zym_mapGet(vm, specV, "level");
+        if (lv != ZYM_ERROR && !zym_isNull(lv)) {
+            if (!zym_isNumber(lv)) {
+                zym_runtimeError(vm, "Pack.build(spec): spec.level must be a number");
+                return ZYM_ERROR;
+            }
+            double d = zym_asNumber(lv);
+            if (d < 1 || d > 22) {
+                zym_runtimeError(vm, "Pack.build(spec): spec.level must be in 1..22");
+                return ZYM_ERROR;
+            }
+            bundle_level = (int)d;
+        }
+    }
+
     // ----- materialize ZpkEntryInput[] -----
     //
     // We keep the names alive via a side vector of std::string so the
@@ -206,6 +244,40 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         infos[i].kind   = kind_byte;
         infos[i].flags  = (uint16_t)opt_number(vm, e, "flags",  0.0);
         infos[i].custom = (uint32_t)opt_number(vm, e, "custom", 0.0);
+
+        // compression (optional bool, overrides bundle default).
+        bool entry_compress = bundle_compress;
+        {
+            ZymValue ecv = zym_mapGet(vm, e, "compression");
+            if (ecv != ZYM_ERROR && !zym_isNull(ecv)) {
+                if (!zym_isBool(ecv)) {
+                    zym_runtimeError(vm,
+                        "Pack.build(spec): spec.entries[%d].compression must be a bool", i);
+                    return ZYM_ERROR;
+                }
+                entry_compress = zym_asBool(ecv);
+            }
+        }
+        int entry_level = bundle_level;
+        {
+            ZymValue elv = zym_mapGet(vm, e, "level");
+            if (elv != ZYM_ERROR && !zym_isNull(elv)) {
+                if (!zym_isNumber(elv)) {
+                    zym_runtimeError(vm,
+                        "Pack.build(spec): spec.entries[%d].level must be a number", i);
+                    return ZYM_ERROR;
+                }
+                double d = zym_asNumber(elv);
+                if (d < 1 || d > 22) {
+                    zym_runtimeError(vm,
+                        "Pack.build(spec): spec.entries[%d].level must be in 1..22", i);
+                    return ZYM_ERROR;
+                }
+                entry_level = (int)d;
+            }
+        }
+        infos[i].compression = entry_compress ? ZPK_COMPRESSION_ZSTD : ZPK_COMPRESSION_NONE;
+        infos[i].level       = entry_compress ? entry_level : 0;
 
         // bytes source: exactly one of `data` (Buffer) or `path` (string).
         ZymValue dataV = zym_mapGet(vm, e, "data");

@@ -66,6 +66,102 @@ int zpk_write_bundle(const char* out_path,
         return 0;
     }
 
+    // ----- Resolve file-backed entries by reading from disk. -------------
+    //
+    // Entries whose bytes live on disk (`file_path` set) are slurped
+    // here, once, into per-entry buffers owned by `loaded_buffers`.
+    // From that point on the rest of the writer works against the
+    // in-memory pointer/size pair just like for `data`-supplied entries
+    // — the on-disk format and CRC pass do not need to know whether a
+    // given entry came from a script-side `Buffer` or from a file.
+    //
+    // Mutually exclusive: exactly one of `data` / `file_path` must be
+    // set per entry. Both-set or neither-set is a hard error.
+    ZpkEntryInput* effective = static_cast<ZpkEntryInput*>(malloc(sizeof(ZpkEntryInput) * entry_count));
+    void** loaded_buffers = static_cast<void**>(calloc(entry_count, sizeof(void*)));
+    if (!effective || !loaded_buffers) {
+        fprintf(stderr, "zpk_write_bundle: out of memory.\n");
+        free(effective);
+        free(loaded_buffers);
+        return 0;
+    }
+    for (size_t i = 0; i < entry_count; i++) {
+        effective[i] = entries[i];
+        const bool has_data = entries[i].data != nullptr || entries[i].data_size > 0;
+        const bool has_path = entries[i].file_path != nullptr;
+        if (has_data && has_path) {
+            fprintf(stderr, "zpk_write_bundle: entry %zu has both `data` and `file_path` set.\n", i);
+            for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+            free(loaded_buffers);
+            free(effective);
+            return 0;
+        }
+        if (!has_data && !has_path) {
+            // Treat as a legitimate empty in-memory entry: data=null,
+            // data_size=0. No file to load.
+            effective[i].data = nullptr;
+            effective[i].data_size = 0;
+            continue;
+        }
+        if (has_path) {
+            FILE* f = fopen(entries[i].file_path, "rb");
+            if (!f) {
+                fprintf(stderr, "zpk_write_bundle: could not open entry source \"%s\".\n",
+                        entries[i].file_path);
+                for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+                free(loaded_buffers);
+                free(effective);
+                return 0;
+            }
+            if (fseek(f, 0, SEEK_END) != 0) {
+                fprintf(stderr, "zpk_write_bundle: seek failed on \"%s\".\n", entries[i].file_path);
+                fclose(f);
+                for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+                free(loaded_buffers);
+                free(effective);
+                return 0;
+            }
+            long sz = ftell(f);
+            if (sz < 0) {
+                fprintf(stderr, "zpk_write_bundle: tell failed on \"%s\".\n", entries[i].file_path);
+                fclose(f);
+                for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+                free(loaded_buffers);
+                free(effective);
+                return 0;
+            }
+            rewind(f);
+            void* buf = nullptr;
+            if (sz > 0) {
+                buf = malloc(static_cast<size_t>(sz));
+                if (!buf) {
+                    fprintf(stderr, "zpk_write_bundle: out of memory loading \"%s\".\n", entries[i].file_path);
+                    fclose(f);
+                    for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+                    free(loaded_buffers);
+                    free(effective);
+                    return 0;
+                }
+                size_t got = fread(buf, 1, static_cast<size_t>(sz), f);
+                if (got != static_cast<size_t>(sz)) {
+                    fprintf(stderr, "zpk_write_bundle: short read from \"%s\".\n", entries[i].file_path);
+                    free(buf);
+                    fclose(f);
+                    for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+                    free(loaded_buffers);
+                    free(effective);
+                    return 0;
+                }
+            }
+            fclose(f);
+            loaded_buffers[i] = buf;
+            effective[i].data = buf;
+            effective[i].data_size = static_cast<size_t>(sz);
+            effective[i].file_path = nullptr;
+        }
+    }
+    entries = effective;
+
     // ----- Plan the layout in memory before writing anything. ------------
     //
     // [stub][data region][string table][manifest entries][footer]
@@ -83,6 +179,9 @@ int zpk_write_bundle(const char* out_path,
         fprintf(stderr, "zpk_write_bundle: out of memory.\n");
         free(data_offsets);
         free(data_crcs);
+        for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+        free(loaded_buffers);
+        free(effective);
         return 0;
     }
 
@@ -110,6 +209,9 @@ int zpk_write_bundle(const char* out_path,
             fprintf(stderr, "zpk_write_bundle: out of memory (strtab).\n");
             free(data_offsets);
             free(data_crcs);
+            for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+            free(loaded_buffers);
+            free(effective);
             return 0;
         }
     }
@@ -123,6 +225,9 @@ int zpk_write_bundle(const char* out_path,
         free(strtab);
         free(name_offsets);
         free(name_lengths);
+        for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+        free(loaded_buffers);
+        free(effective);
         return 0;
     }
 
@@ -157,6 +262,9 @@ int zpk_write_bundle(const char* out_path,
         free(strtab);
         free(name_offsets);
         free(name_lengths);
+        for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+        free(loaded_buffers);
+        free(effective);
         return 0;
     }
 
@@ -211,6 +319,9 @@ int zpk_write_bundle(const char* out_path,
         free(name_offsets);
         free(name_lengths);
         free(manifest);
+        for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+        free(loaded_buffers);
+        free(effective);
         return 0;
     }
 
@@ -231,6 +342,9 @@ int zpk_write_bundle(const char* out_path,
     free(name_offsets);
     free(name_lengths);
     free(manifest);
+    for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+    free(loaded_buffers);
+    free(effective);
 
     FILE* f = fopen(out_path, "wb");
     if (!f) {

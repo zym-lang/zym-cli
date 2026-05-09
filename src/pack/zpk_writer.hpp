@@ -16,6 +16,17 @@
 //
 // `data` / `data_size` are the bytes to write into the data region.
 // In v1 they are stored uncompressed (see docs/formats/zpk.md).
+//
+// Bytes source: exactly one of two paths supplies the entry's bytes:
+//   1. In-memory: set `data` / `data_size`, leave `file_path` null.
+//   2. Streamed from disk: set `file_path` (NUL-terminated), leave
+//      `data` null and `data_size` 0. The writer opens the file, reads
+//      it, and inserts its contents at this entry's slot. This avoids
+//      requiring callers (e.g. the `Pack` script-facing native) to
+//      first materialize large assets as in-memory `Buffer`s.
+//
+// Setting both, or neither, is a programmer error and the writer
+// fails the call.
 typedef struct {
     const char* name;         // optional; UTF-8; not NUL-terminated requirement
     size_t      name_length;  // bytes in `name`; ignored if `name == nullptr`
@@ -24,6 +35,7 @@ typedef struct {
     uint32_t    custom;       // free per kind
     const void* data;
     size_t      data_size;
+    const char* file_path;    // optional; when non-null, writer streams from this path
 } ZpkEntryInput;
 
 // Write a bundle to `out_path`.

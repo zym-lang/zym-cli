@@ -47,6 +47,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(zym_core)
 
+set(ZYM_FRAMES_MAX 1024 CACHE STRING "Max VM call frames (overrides FRAMES_MAX in zym_core/src/vm.h)")
+target_compile_definitions(zym_core PUBLIC FRAMES_MAX=${ZYM_FRAMES_MAX})
+
 set(APP_SOURCES
         src/main.cpp
         src/runtime_loader.hpp
@@ -102,6 +105,7 @@ set(ZYM_NATIVE_SOURCES
         src/natives/sockets.cpp
         src/natives/enet.cpp
         src/natives/aes.cpp
+        src/natives/pack.cpp
 )
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and

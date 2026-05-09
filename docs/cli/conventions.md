@@ -17,7 +17,7 @@ in its own page.
 - All natives are registered as **uppercase global identifiers** at VM
   startup: `File`, `Dir`, `Process`, `Buffer`, `RegEx`, `JSON`,
   `Crypto`, `Random`, `Hash`, `System`, `Path`, `Time`, `Console`,
-  plus the standalone `print(...)` function.
+  `Pack`, plus the standalone `print(...)` function.
 - Static (singleton) methods are reached as `Module.method(...)`.
 - Instance methods (where the module has a `create(...)`) are reached
   as `inst.method(...)` after `var inst = Module.create(...)`.

@@ -37,28 +37,27 @@ extern "C" {
 //
 // `kind` is descriptive: it tells consumers what an entry *is*. The
 // program entry point is whichever entry the footer's `entry_index`
-// points at, regardless of kind (though it must be ENTRY_BYTECODE).
+// points at; that entry must be ENTRY_BYTECODE or ENTRY_SOURCE.
 typedef enum {
     ZPK_KIND_RESERVED        = 0x00, // invalid; rejected
-    ZPK_KIND_ENTRY_BYTECODE  = 0x01, // .zbc, used as program entry
-    ZPK_KIND_BYTECODE        = 0x02, // .zbc; not auto-resolved by the module system (modules are compile-time resolved)
+    ZPK_KIND_ENTRY_SOURCE    = 0x01, // .zym source, compiled-on-load entry
+    ZPK_KIND_ENTRY_BYTECODE  = 0x02, // .zbc, used as program entry
     ZPK_KIND_SOURCE_MAP      = 0x03, // optional debug pairing
     ZPK_KIND_ASSET           = 0x04, // arbitrary bytes by name (no text/blob distinction)
-    // 0x05 reserved for future Zym use (formerly ASSET_TEXT)
-    ZPK_KIND_NATIVE_LIB      = 0x06, // reserved
-    ZPK_KIND_MANIFEST_EXT    = 0x07, // reserved (TOML/JSON sidecar)
-    ZPK_KIND_SIGNATURE       = 0x08, // reserved
-    ZPK_KIND_ENTRY_SOURCE    = 0x09, // .zym source, compiled-on-load entry
-    // 0x05, 0x0A..0x7E reserved for future Zym use
+    // 0x05..0x7E reserved for future Zym use. Custom encoding/sub-kind
+    // information for an entry is carried in the per-entry `custom`
+    // u32 (4 bytes of bitflags / tag space) and `flags` u16, which the
+    // writer forwards verbatim. New first-class kinds will only be
+    // added here when they need their own on-disk semantics.
     ZPK_KIND_USER_MIN        = 0x7F,
     ZPK_KIND_USER_MAX        = 0xFF
 } ZpkKind;
 
-// Compression algorithm byte. Only `none` is implemented in v1.
+// Compression algorithm byte. `none` and `zstd` are supported; other
+// values are reserved.
 typedef enum {
     ZPK_COMPRESSION_NONE    = 0,
-    ZPK_COMPRESSION_ZSTD    = 1, // reserved
-    ZPK_COMPRESSION_DEFLATE = 2  // reserved
+    ZPK_COMPRESSION_ZSTD    = 1
 } ZpkCompression;
 
 // Per-entry flag bits.

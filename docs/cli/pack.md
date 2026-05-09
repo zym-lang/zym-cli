@@ -149,11 +149,10 @@ The accepted entry kind strings are:
 
 | String              | Meaning                                              |
 | ---                 | ---                                                  |
+| `"entry_source"`    | The program entry point's raw source (`.zym`). The runtime loader compiles it on boot, then runs. Only one of `entry_source` / `entry_bytecode` is permitted per bundle. |
 | `"entry_bytecode"`  | The program entry point's compiled bytecode (`.zbc`). The runtime loader deserializes and runs it directly. |
-| `"entry_source"`    | The program entry point's raw source (`.zym`). The runtime loader compiles it on boot, then runs. Only one of `entry_bytecode` / `entry_source` is permitted per bundle. |
-| `"bytecode"`        | A non-entry compiled bytecode (`.zbc`) blob. Stored by name; **not** auto-resolved by the module system (modules are a compile-time concept — they're already baked into an `entry_bytecode` chunk). Use this kind when you want a script to read a `.zbc` payload out of the bundle by name and do something with it explicitly. |
-| `"source_map"`      | A source map for one of the bytecode entries.        |
-| `"asset"`           | Arbitrary bytes addressable by name. The single asset kind: text, binary, audio, images, etc. all use this kind. Scripts that need to distinguish kinds of assets among themselves can do so via the per-entry `flags` / `custom` fields, which are forwarded verbatim. |
+| `"source_map"`      | A source map for the entry's bytecode (or any other consumer). The pairing is by name; the runtime loader does not consume source maps itself. |
+| `"asset"`           | Arbitrary bytes addressable by name. The single asset kind: text, binary, audio, images, additional `.zbc` blobs read by name, etc. all use this kind. Scripts that need to distinguish sub-kinds of assets among themselves do so via the per-entry `flags` / `custom` fields (the `custom` u32 alone gives 32 bitflag slots / tags), which are forwarded verbatim. |
 
 Strings are used (rather than numeric constants) so scripts don't have
 to know the on-disk byte values.
@@ -180,9 +179,9 @@ to know the on-disk byte values.
   - an entry that sets both `data` and `path`, or neither
   - an entry whose `data` is not a `Buffer`
   - `entryIndex` out of range or referencing an entry whose `kind` is
-    not `entry_bytecode` or `entry_source`
-  - more than one entry has an entry-kind (`entry_bytecode` /
-    `entry_source`) in the same bundle
+    not `entry_source` or `entry_bytecode`
+  - more than one entry has an entry-kind (`entry_source` /
+    `entry_bytecode`) in the same bundle
 - **Recoverable failures** (file not openable, short read, short
   write, out-of-memory while assembling) return `false`.
 
@@ -208,9 +207,10 @@ only** (relative to the running process's working directory). When
 the entry is `entry_bytecode`, the chunk was compiled ahead of time
 with all of its imports already inlined, so no runtime resolution
 happens at all. If you need a self-contained, no-disk-required
-bundle, compile to `entry_bytecode`. The `bytecode` kind exists for
-storing additional `.zbc` blobs by name (read explicitly via
-`open(arg)`); it is **not** consulted by any import statement.
+bundle, compile to `entry_bytecode`. Additional `.zbc` blobs you
+want to read by name from the bundle should be stored as `asset`
+entries (read explicitly via `open(arg)`); they are **not**
+consulted by any import statement.
 
 A bundle may contain **at most one** entry-kind entry; mixing
 `entry_bytecode` and `entry_source` in the same bundle is rejected at
@@ -223,7 +223,7 @@ source-entry bundles to other users.
 
 ## Examples
 
-### Headless `.zpk` with an entry and a named bytecode blob
+### Headless `.zpk` with an entry and a named asset blob
 
 ```
 var bytecodeMain = File.readAllBytes("build/main.zbc");
@@ -232,8 +232,8 @@ var bytecodeUtil = File.readAllBytes("build/util.zbc");
 var ok = Pack.build({
     output: "dist/app.zpk",
     entries: [
-        { name: "main.zbc", kind: "entry_bytecode",  data: bytecodeMain },
-        { name: "util.zbc", kind: "bytecode",       data: bytecodeUtil }
+        { name: "main.zbc", kind: "entry_bytecode", data: bytecodeMain },
+        { name: "util.zbc", kind: "asset",          data: bytecodeUtil }
     ]
 });
 if (!ok) {
@@ -292,7 +292,7 @@ by future writers without an API churn.
 | `name`             | string   | Logical name; empty string when the entry was unnamed.                                 |
 | `kind`             | string   | One of the [kind strings](#kind-vocabulary), or `"reserved:0xNN"` / `"user:0xNN"` for bytes outside the documented set. |
 | `kindByte`         | number   | Raw kind byte (0–255).                                                                 |
-| `compression`      | string   | `"none"` (v1), or `"zstd"` / `"deflate"` / `"unknown"` for future formats.             |
+| `compression`      | string   | `"none"` or `"zstd"`. (`"unknown"` is reported for any other on-disk byte read from a forward-compatible bundle.)        |
 | `compressionByte`  | number   | Raw compression byte.                                                                  |
 | `flags`            | number   | Raw 16-bit flag bits.                                                                  |
 | `required`         | bool     | Convenience: the "required" flag bit is set.                                           |

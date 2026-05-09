@@ -77,9 +77,8 @@ bool ends_with(const char* s, const char* suffix) {
 // status-string convention in `docs/cli/conventions.md`.
 bool kind_from_string(const char* s, uint8_t* out) {
     if (!s || !*s) return false;
-    if (std::strcmp(s, "entry_bytecode")  == 0) { *out = ZPK_KIND_ENTRY_BYTECODE;  return true; }
     if (std::strcmp(s, "entry_source")    == 0) { *out = ZPK_KIND_ENTRY_SOURCE;    return true; }
-    if (std::strcmp(s, "bytecode") == 0) { *out = ZPK_KIND_BYTECODE; return true; }
+    if (std::strcmp(s, "entry_bytecode")  == 0) { *out = ZPK_KIND_ENTRY_BYTECODE;  return true; }
     if (std::strcmp(s, "source_map")      == 0) { *out = ZPK_KIND_SOURCE_MAP;      return true; }
     if (std::strcmp(s, "asset")           == 0) { *out = ZPK_KIND_ASSET;           return true; }
     return false;
@@ -226,7 +225,7 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         if (!kind_from_string(kind_str, &kind_byte)) {
             zym_runtimeError(vm,
                 "Pack.build(spec): spec.entries[%d].kind '%s' is not a known kind "
-                "(expected 'entry_bytecode', 'entry_source', 'bytecode', 'source_map', or 'asset')",
+                "(expected 'entry_source', 'entry_bytecode', 'source_map', or 'asset')",
                 i, kind_str);
             return ZYM_ERROR;
         }
@@ -395,16 +394,12 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
 const char* kind_to_string(uint8_t k, char* user_buf /*>=16 bytes*/) {
     switch (k) {
         case ZPK_KIND_RESERVED:        return "reserved";
+        case ZPK_KIND_ENTRY_SOURCE:    return "entry_source";
         case ZPK_KIND_ENTRY_BYTECODE:  return "entry_bytecode";
-        case ZPK_KIND_BYTECODE: return "bytecode";
         case ZPK_KIND_SOURCE_MAP:      return "source_map";
         case ZPK_KIND_ASSET:           return "asset";
-        case ZPK_KIND_NATIVE_LIB:      return "native_lib";
-        case ZPK_KIND_MANIFEST_EXT:    return "manifest_ext";
-        case ZPK_KIND_SIGNATURE:       return "signature";
-        case ZPK_KIND_ENTRY_SOURCE:    return "entry_source";
         default:
-            // 0x0A..0x7E reserved; 0x7F..0xFF user range.
+            // 0x05..0x7E reserved; 0x7F..0xFF user range.
             if (k >= ZPK_KIND_USER_MIN) {
                 std::snprintf(user_buf, 16, "user:0x%02X", (unsigned)k);
                 return user_buf;
@@ -418,7 +413,6 @@ const char* compression_to_string(uint8_t c) {
     switch (c) {
         case ZPK_COMPRESSION_NONE:    return "none";
         case ZPK_COMPRESSION_ZSTD:    return "zstd";
-        case ZPK_COMPRESSION_DEFLATE: return "deflate";
         default:                      return "unknown";
     }
 }

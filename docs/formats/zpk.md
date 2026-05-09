@@ -38,10 +38,9 @@ whether byte 0 is your payload or the stub's ELF/PE/Mach‑O header.
 | (optional) CLI stub — untouched native executable       |
 +---------------------------------------------------------+
 | Data region                                             |
-|   - entry bytecode                                      |
-|   - additional bytecode modules                         |
-|   - assets (text, blobs, ...)                           |
-|   - (reserved) signature blob                           |
+|   - program entry (entry_source or entry_bytecode)      |
+|   - assets (arbitrary bytes by name)                    |
+|   - source maps (optional, paired by name)              |
 +---------------------------------------------------------+
 | String table (UTF-8, no NUL terminators required)       |
 +---------------------------------------------------------+
@@ -91,7 +90,7 @@ point for every reader.
 | 12 | 4 | `flags`               | Bit field. See *Footer flags* below. Unknown bits must be ignored unless documented as `MUST_UNDERSTAND`. |
 | 16 | 8 | `manifest_offset`     | Absolute offset of the first `ZpkEntry`. |
 | 24 | 4 | `entry_count`         | Number of `ZpkEntry` records in the manifest. |
-| 28 | 4 | `entry_index`         | Index of the manifest entry that the runtime should execute as the program entry point. Must be `< entry_count` and must point to an entry of kind `ENTRY_BYTECODE`. |
+| 28 | 4 | `entry_index`         | Index of the manifest entry that the runtime should execute as the program entry point. Must be `< entry_count` and must point to an entry of kind `ENTRY_SOURCE` or `ENTRY_BYTECODE`. |
 | 32 | 8 | `strtab_offset`       | Absolute offset of the string table. |
 | 40 | 8 | `strtab_size`         | Size of the string table in bytes. |
 | 48 | 4 | `manifest_crc32`      | CRC‑32 (IEEE 802.3 polynomial) computed over the manifest entries followed by the string table. |
@@ -104,7 +103,7 @@ Total: **64 bytes**.
 
 | Bit | Name                  | Meaning |
 | --- | --- | --- |
-| 0   | `SIGNED`              | (Reserved.) A `SIGNATURE` entry exists and covers the rest of the file. Not validated in v1. |
+| 0   | `SIGNED`              | (Reserved.) A signature entry of some future kind exists and covers the rest of the file. Not validated in v1. |
 | 1   | `MANIFEST_COMPRESSED` | (Reserved.) The manifest entries and/or string table are compressed. Not used in v1; manifests are always stored raw. |
 | 2…31 | _reserved_           | Must be written as zero. |
 
@@ -122,7 +121,7 @@ A reader must, in order:
 7. Verify `strtab_offset + strtab_size <= file_size - footer_size`.
 8. Recompute and verify `manifest_crc32`.
 9. Verify `entry_index < entry_count` and that the indexed entry has
-   `kind == ENTRY_BYTECODE`.
+   `kind == ENTRY_SOURCE` or `kind == ENTRY_BYTECODE`.
 
 CRC mismatches in v1 may be reported as a warning by the loader (so a
 half‑broken bundle still attempts to run) but will be promoted to a hard
@@ -162,16 +161,11 @@ points at. `kind` and `entry_index` are orthogonal.
 | Value | Name              | Meaning |
 | --- | --- | --- |
 | `0x00` | `RESERVED`       | Invalid. Catches all‑zero corruption. Readers must reject. |
-| `0x01` | `ENTRY_BYTECODE` | A `.zbc` bytecode module suitable for use as the program entry point. Must be the kind of the entry indexed by `entry_index`. |
-| `0x02` | `BYTECODE`       | A `.zbc` bytecode blob stored by name. **Not** auto‑resolved by the module system — modules are a compile‑time concept and are baked into an `ENTRY_BYTECODE` chunk at compile time. Consumers may read these blobs explicitly by name (e.g. via `pack.open`). |
-| `0x03` | `SOURCE_MAP`     | Optional debug information paired with a bytecode module. The pairing is by name (e.g. module `"foo"` → source map `"foo.map"`); the loader is free to ignore source maps it does not consume. |
+| `0x01` | `ENTRY_SOURCE`   | Raw `.zym` source suitable for use as the program entry point. The runtime loader compiles it on boot and runs the resulting chunk. Module imports are resolved from disk only (not from inside the bundle). Mutually exclusive with `ENTRY_BYTECODE` as the program entry. |
+| `0x02` | `ENTRY_BYTECODE` | A `.zbc` bytecode module suitable for use as the program entry point. Must be the kind of the entry indexed by `entry_index` when the program entry is bytecode. |
+| `0x03` | `SOURCE_MAP`     | Optional debug information paired with a bytecode entry. The pairing is by name (e.g. entry `"foo"` → source map `"foo.map"`); the loader is free to ignore source maps it does not consume. |
 | `0x04` | `ASSET`          | Arbitrary bytes addressable by name. The single asset kind — there is no separate text/blob distinction. Consumers that need to discriminate sub-kinds of assets do so via the per-entry `flags` / `custom` fields, which the writer forwards verbatim. |
-| `0x05` | _reserved_       | Reserved for future Zym use. (Formerly `ASSET_TEXT` in earlier drafts.) |
-| `0x06` | `NATIVE_LIB`     | (Reserved.) Bundled native shared library. Not loaded by v1. |
-| `0x07` | `MANIFEST_EXT`   | (Reserved.) Structured metadata (e.g. TOML/JSON) consumed by the loader for build info, target ABI, copyright, etc. Not consumed by v1. |
-| `0x08` | `SIGNATURE`      | (Reserved.) Detached signature blob covering the file outside this entry's data range. Not validated by v1. |
-| `0x09` | `ENTRY_SOURCE`   | Raw `.zym` source suitable for use as the program entry point. The runtime loader compiles it on boot and runs the resulting chunk. Module imports are resolved from disk only (not from inside the bundle). Mutually exclusive with `ENTRY_BYTECODE` as the program entry. |
-| `0x0A .. 0x7E` | _reserved_ | Reserved for future Zym use. |
+| `0x05 .. 0x7E` | _reserved_ | Reserved for future Zym use. New first-class kinds will only be added here when they need their own on-disk semantics; encoding hints / sub-kind tags for existing kinds belong in the per-entry `custom` u32 (4 bytes of bitflag / tag space) or `flags` u16. |
 | `0x7F .. 0xFF` | `USER_*`   | Free for user/plugin use. The runtime ignores entries with user kinds; scripts may consume them via the `pack.*` API. |
 
 A reader **must not** treat unknown `kind` values as errors — it must
@@ -349,4 +343,4 @@ versions may give them meaning; readers must not interpret them.
 - Manifest entry: bytes `12..15` (`reserved`), `flags` bits `2..15`.
 - Compression values other than `0` and `1` (until activated by a
   later version of this document).
-- Entry kinds `0x0A..0x7E`.
+- Entry kinds `0x05..0x7E`.

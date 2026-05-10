@@ -28,6 +28,9 @@ endif()
 
 set(CMAKE_BUILD_TYPE Release)
 set(USE_COMPRESSION ON)
+# RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
+# linking `full_executor` and only takes the `runtime_loader` path in main.
+set(RUNTIME_ONLY OFF)
 # USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
 # on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
 # binary so engine-level error and warning output is suppressed at startup
@@ -54,8 +57,6 @@ set(APP_SOURCES
         src/main.cpp
         src/runtime_loader.hpp
         src/runtime_loader.cpp
-        src/full_executor.hpp
-        src/full_executor.cpp
         src/godot_host.hpp
         src/godot_host.cpp
         src/boot/register_core.hpp
@@ -77,6 +78,13 @@ set(APP_SOURCES
         src/pack/zpk_reader.hpp
         src/pack/zpk_reader.cpp
 )
+
+if(NOT RUNTIME_ONLY)
+    list(APPEND APP_SOURCES
+            src/full_executor.hpp
+            src/full_executor.cpp
+    )
+endif()
 
 set(ZYM_NATIVE_SOURCES
         src/natives/natives.hpp
@@ -125,6 +133,13 @@ if(ZYM_LTO_OK)
 endif()
 
 target_link_libraries(zym PRIVATE zym_core)
+
+if(RUNTIME_ONLY)
+    message(STATUS ">> RUNTIME_ONLY: ON - excluding full_executor; runtime_loader path only")
+    target_compile_definitions(zym PRIVATE ZYM_RUNTIME_ONLY=1)
+else()
+    target_compile_definitions(zym PRIVATE ZYM_RUNTIME_ONLY=0)
+endif()
 
 if(USE_ENGINE_ERRORS)
     target_compile_definitions(zym PRIVATE ZYM_ENGINE_ERRORS=1)

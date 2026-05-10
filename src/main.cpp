@@ -3,7 +3,9 @@
 #include <cstring>
 
 #include "runtime_loader.hpp"
+#if !ZYM_RUNTIME_ONLY
 #include "full_executor.hpp"
+#endif
 #include "godot_host.hpp"
 #include "zym/zym.h"
 
@@ -50,8 +52,12 @@ int main(int argc, char** argv)
         nullptr
     };
 
+#if ZYM_RUNTIME_ONLY
+    return runtime_main(argc, argv, &allocator);
+#else
     if (has_embedded_bytecode()) {
         return runtime_main(argc, argv, &allocator);
     }
     return full_main(argc, argv, &allocator);
+#endif
 }

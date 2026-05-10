@@ -1094,29 +1094,52 @@ static ModuleReadResult zym_loadModules_trampoline(const char* path, void* user_
     // Call parent closure with the path string. Parent sees a parent-VM
     // string; we marshal nothing back here — the script callback's job is
     // to return either a map { source, sourceMap, fileId } or null.
+    //
+    // CRITICAL: every parent-VM ZymValue allocated in this trampoline must
+    // be rooted for its full lifetime. The script callback re-enters the
+    // parent VM, runs arbitrary code (which allocates and may trigger GC),
+    // and we then iterate again — anything we hold across that boundary
+    // without a root can be swept, including the returned map and any of
+    // its fields, and (worse) values still live on the parent's locals.
     ZymValue pathV = zym_newString(ctx->parentVm, path ? path : "");
+    zym_pushRoot(ctx->parentVm, pathV);
     ZymValue argv[1] = { pathV };
     ZymStatus st = zym_callClosurev(ctx->parentVm, ctx->parentCallback, 1, argv);
-    if (st != ZYM_STATUS_OK) return result;
+    if (st != ZYM_STATUS_OK) { zym_popRoot(ctx->parentVm); return result; }
 
     ZymValue ret = zym_getCallResult(ctx->parentVm);
-    if (zym_isNull(ret)) return result;
-    if (!zym_isMap(ret)) return result;
+    if (zym_isNull(ret) || !zym_isMap(ret)) { zym_popRoot(ctx->parentVm); return result; }
+    zym_pushRoot(ctx->parentVm, ret);
 
     // Pull `source` (string), `sourceMap` (parent-side wrapper), `fileId`
-    // (number) from the returned map.
+    // (number) from the returned map. Root the string while we copy it.
     ZymValue srcV = zym_mapGet(ctx->parentVm, ret, "source");
-    if (srcV == ZYM_ERROR || zym_isNull(srcV) || !zym_isString(srcV)) return result;
+    if (srcV == ZYM_ERROR || zym_isNull(srcV) || !zym_isString(srcV)) {
+        zym_popRoot(ctx->parentVm); // ret
+        zym_popRoot(ctx->parentVm); // pathV
+        return result;
+    }
+    zym_pushRoot(ctx->parentVm, srcV);
     ZymValue smV  = zym_mapGet(ctx->parentVm, ret, "sourceMap");
     ZymValue fidV = zym_mapGet(ctx->parentVm, ret, "fileId");
 
     const char* src = zym_asCString(srcV);
-    if (!src) return result;
+    if (!src) {
+        zym_popRoot(ctx->parentVm); // srcV
+        zym_popRoot(ctx->parentVm); // ret
+        zym_popRoot(ctx->parentVm); // pathV
+        return result;
+    }
     // loadModules takes ownership of `source` (free'd in freeModuleLoadResult);
     // duplicate into the heap so we don't hand out a VM-managed pointer.
     size_t n = strlen(src);
     char* heap_src = (char*)std::malloc(n + 1);
-    if (!heap_src) return result;
+    if (!heap_src) {
+        zym_popRoot(ctx->parentVm); // srcV
+        zym_popRoot(ctx->parentVm); // ret
+        zym_popRoot(ctx->parentVm); // pathV
+        return result;
+    }
     std::memcpy(heap_src, src, n + 1);
 
     // The script-provided `sourceMap` is owned by the *parent* VM's
@@ -1152,6 +1175,11 @@ static ModuleReadResult zym_loadModules_trampoline(const char* path, void* user_
     result.source     = heap_src;
     result.source_map = smClone;
     result.file_id    = fid;
+
+    // Pop in reverse push order: srcV, ret, pathV.
+    zym_popRoot(ctx->parentVm);
+    zym_popRoot(ctx->parentVm);
+    zym_popRoot(ctx->parentVm);
     return result;
 }
 
@@ -1185,11 +1213,17 @@ ZymValue cv_loadModules(ZymVM* parentVm, ZymValue context,
 
     LoadModulesCtx ctx { parentVm, h->child, cbV };
     zym_pushRoot(parentVm, cbV);
+    zym_pushRoot(parentVm, srcV);
+    zym_pushRoot(parentVm, entryV);
+    zym_pushRoot(parentVm, smV);
     ModuleLoadResult* mr = loadModules(
         h->child, zym_asCString(srcV), smr->sm, zym_asCString(entryV),
         zym_loadModules_trampoline, &ctx,
         debug_names, write_debug, nullptr);
-    zym_popRoot(parentVm);
+    zym_popRoot(parentVm); // smV
+    zym_popRoot(parentVm); // entryV
+    zym_popRoot(parentVm); // srcV
+    zym_popRoot(parentVm); // cbV
 
     ZymValue result = zym_newMap(parentVm);
     zym_pushRoot(parentVm, result);

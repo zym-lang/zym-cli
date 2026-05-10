@@ -552,18 +552,17 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
 // READ API
 // ===========================================================================
 //
-// Two surfaces share the same shape:
+// Bundles are accessed exclusively via handles returned by
+// `Pack.openFile(path)` / `Pack.openBuffer(buffer)`. Each handle owns
+// its own `ZpkReader`, cached for the handle's lifetime and freed by
+// `bundle.close()` (or by the GC finalizer as a safety net). After
+// close, every method on the handle returns `null` / `false`.
 //
-//   * Self-bundle: `Pack.hasSelf/entryName/list/has/open/openIndex/info/
-//     closeSelf`. Backed by a process-wide lazily-initialised `ZpkReader`.
-//     `Pack.closeSelf()` releases the reader; subsequent self-method calls
-//     simply re-open it on demand if the running exe still has a payload.
-//
-//   * Arbitrary bundles: `Pack.openFile(path) -> bundle | null`. Each
-//     handle owns its own `ZpkReader`, cached for the handle's lifetime
-//     and freed by `bundle.close()` (or by the GC finalizer as a safety
-//     net). After close, every method on the handle returns `null` /
-//     `false`.
+// `openFile` works uniformly on headless `.zpk` files and on
+// stub-wrapped executables (the footer-from-EOF probe is
+// stub-agnostic), so a single API covers "open a loose bundle",
+// "introspect another exe", and "open the running exe" (via
+// whatever path the host hands the script).
 
 // ---- kind / compression vocabularies --------------------------------------
 
@@ -798,148 +797,6 @@ ZymValue read_entry_as_buffer(ZymVM* vm, const ZpkReader* r, uint32_t index) {
     ZymValue buf = makeBufferFromBytes(vm, bytes, sz);
     std::free(bytes);
     return buf;
-}
-
-// ---- self-bundle reader (lazy, process-wide) ------------------------------
-
-ZpkReader g_self_reader{};
-bool      g_self_open = false;
-bool      g_self_tried = false;
-bool      g_self_has_payload = false;
-
-// Returns a pointer to the cached self reader, or nullptr if the running
-// executable has no payload. Opens lazily on first call and after any
-// `Pack.closeSelf()`.
-const ZpkReader* self_reader_get() {
-    if (g_self_open) return &g_self_reader;
-    // Cheap probe first; avoids re-opening when we already know there's
-    // nothing to read. The probe is re-evaluated after closeSelf, which
-    // resets `g_self_tried` so a script that closes-then-reopens still
-    // works (the running exe doesn't change underneath us, but the
-    // contract is "lazy reopen").
-    if (!g_self_tried) {
-        g_self_has_payload = (zpk_reader_self_exe_has_payload() != 0);
-        g_self_tried = true;
-    }
-    if (!g_self_has_payload) return nullptr;
-    if (zpk_reader_open_self_exe(&g_self_reader) != 1) {
-        // Probe lied or open failed; mark as unavailable for this run
-        // until closeSelf() resets the cache.
-        g_self_has_payload = false;
-        return nullptr;
-    }
-    g_self_open = true;
-    return &g_self_reader;
-}
-
-void self_reader_close() {
-    if (g_self_open) {
-        zpk_reader_close(&g_self_reader);
-        g_self_open = false;
-    }
-    g_self_tried = false;        // allow re-probe
-    g_self_has_payload = false;
-}
-
-// ---- self-bundle method implementations -----------------------------------
-
-ZymValue f_hasSelf(ZymVM* /*vm*/, ZymValue) {
-    // Don't open the reader for a yes/no question.
-    return zym_newBool(zpk_reader_self_exe_has_payload() != 0);
-}
-
-ZymValue f_self_entryName(ZymVM* vm, ZymValue) {
-    const ZpkReader* r = self_reader_get();
-    if (!r) return zym_newNull();
-    const ZpkEntry& e = r->manifest[r->footer.entry_index];
-    if (e.name_length == 0 || !r->strtab) return zym_newString(vm, "");
-    return zym_newStringN(vm, (const char*)(r->strtab + e.name_offset), (int)e.name_length);
-}
-
-ZymValue f_self_list(ZymVM* vm, ZymValue) {
-    const ZpkReader* r = self_reader_get();
-    if (!r) return zym_newNull();
-    ZymValue list = zym_newList(vm);
-    zym_pushRoot(vm, list);
-    for (uint32_t i = 0; i < r->footer.entry_count; i++) {
-        zym_listAppend(vm, list, make_entry_info(vm, r, i));
-    }
-    zym_popRoot(vm);
-    return list;
-}
-
-ZymValue f_self_has(ZymVM* vm, ZymValue, ZymValue nameV) {
-    if (!zym_isString(nameV)) {
-        zym_runtimeError(vm, "Pack.has(name) expects a string");
-        return ZYM_ERROR;
-    }
-    const ZpkReader* r = self_reader_get();
-    if (!r) return zym_newBool(false);
-    return zym_newBool(find_entry_by_name(r, zym_asCString(nameV)) >= 0);
-}
-
-// Pack.open(arg) — string entry name or numeric manifest index.
-// Names with multiple matching entries resolve to the first hit
-// (use the numeric form to disambiguate). Returns null when there's
-// no self bundle, or the name/index doesn't resolve.
-ZymValue f_self_open(ZymVM* vm, ZymValue, ZymValue arg) {
-    const ZpkReader* r = self_reader_get();
-    if (!r) return zym_newNull();
-    int idx = resolve_entry_arg(vm, r, arg, "Pack.open(arg)");
-    if (idx == -2) return ZYM_ERROR;
-    if (idx < 0)   return zym_newNull();
-    return read_entry_as_buffer(vm, r, (uint32_t)idx);
-}
-
-// Pack.info(arg) — `arg` is a string entry name or a numeric index.
-// Names with multiple matching entries resolve to the first hit (use
-// the numeric form to disambiguate). Returns null when there's no
-// self bundle, or the name/index doesn't resolve.
-ZymValue f_self_info(ZymVM* vm, ZymValue, ZymValue arg) {
-    const ZpkReader* r = self_reader_get();
-    if (!r) return zym_newNull();
-    int idx = resolve_entry_arg(vm, r, arg, "Pack.info(arg)");
-    if (idx == -2) return ZYM_ERROR;
-    if (idx < 0)   return zym_newNull();
-    return make_entry_info(vm, r, (uint32_t)idx);
-}
-
-// Pack.verify() — full structured CRC report for the self bundle, or
-// null when there's no self bundle.
-ZymValue f_self_verify0(ZymVM* vm, ZymValue) {
-    const ZpkReader* r = self_reader_get();
-    if (!r) return zym_newNull();
-    return build_verify_report(vm, r);
-}
-
-// Pack.verify(arg) — quick per-entry bool check for the self bundle.
-// `arg` may be a string entry name or a numeric index. Returns false
-// for "no self bundle", "no such entry", or "CRC mismatch"; raises a
-// runtime error only on a wrong-type argument.
-ZymValue f_self_verify1(ZymVM* vm, ZymValue, ZymValue arg) {
-    const ZpkReader* r = self_reader_get();
-    if (!r) return zym_newBool(false);
-    int idx = resolve_entry_arg(vm, r, arg, "Pack.verify(arg)");
-    if (idx == -2) return ZYM_ERROR;
-    if (idx < 0)   return zym_newBool(false);
-    return zym_newBool(entry_crc_ok(r, (uint32_t)idx));
-}
-
-ZymValue f_closeSelf(ZymVM* /*vm*/, ZymValue) {
-    bool was_open = g_self_open;
-    self_reader_close();
-    return zym_newBool(was_open);
-}
-
-// Pack.formatVersion() -> number | null
-//   The on-disk `format_version` recorded in the self bundle's footer,
-//   or `null` when the running executable has no self bundle. Useful
-//   for tooling that wants to report the bundle format level (e.g.
-//   `zym pack info`).
-ZymValue f_self_formatVersion(ZymVM* /*vm*/, ZymValue) {
-    const ZpkReader* r = self_reader_get();
-    if (!r) return zym_newNull();
-    return zym_newNumber((double)r->footer.format_version);
 }
 
 // ---- arbitrary-bundle handle ----------------------------------------------
@@ -1370,17 +1227,9 @@ ZymValue nativePack_create(ZymVM* vm) {
 
     F("build",         "build(spec)",       f_build);
 
-    // Self-bundle introspection.
-    F("hasSelf",       "hasSelf()",         f_hasSelf);
-    F("entryName",     "entryName()",       f_self_entryName);
-    F("list",          "list()",            f_self_list);
-    F("has",           "has(name)",         f_self_has);
-    F("open",          "open(arg)",         f_self_open);
-    F("info",          "info(arg)",         f_self_info);
-    F("closeSelf",     "closeSelf()",       f_closeSelf);
-    F("formatVersion", "formatVersion()",   f_self_formatVersion);
-
-    // Arbitrary bundle.
+    // Bundle handles. `openFile` works uniformly on headless `.zpk`
+    // files and on stub-wrapped executables; the host (CLI launcher
+    // or stub) is responsible for passing the desired path in.
     F("openFile",      "openFile(path)",    f_openFile);
     F("openBuffer",    "openBuffer(buffer)",f_openBuffer);
 
@@ -1390,24 +1239,6 @@ ZymValue nativePack_create(ZymVM* vm) {
     F("splice",        "splice(stubPath, zpkPath, outputPath)",       f_splice);
 
 #undef F
-
-    // `Pack.verify` overloaded by arity (same shape as the bundle handle):
-    //   Pack.verify()    -> full report for the self bundle, or null when none
-    //   Pack.verify(arg) -> bool quick per-entry check; arg is a name or index
-    {
-        ZymValue v0 = zym_createNativeClosure(vm, "verify()",    (void*)f_self_verify0, ctxv);
-        zym_pushRoot(vm, v0);
-        ZymValue v1 = zym_createNativeClosure(vm, "verify(arg)", (void*)f_self_verify1, ctxv);
-        zym_pushRoot(vm, v1);
-        ZymValue dispatcher = zym_createDispatcher(vm);
-        zym_pushRoot(vm, dispatcher);
-        zym_addOverload(vm, dispatcher, v0);
-        zym_addOverload(vm, dispatcher, v1);
-        zym_mapSet(vm, obj, "verify", dispatcher);
-        zym_popRoot(vm);
-        zym_popRoot(vm);
-        zym_popRoot(vm);
-    }
 
     zym_popRoot(vm);
     zym_popRoot(vm);

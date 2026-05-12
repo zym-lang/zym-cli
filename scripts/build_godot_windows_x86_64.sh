@@ -86,8 +86,18 @@ ZYM_SHIM_DIR="${SCRIPT_DIR}/zym_shim"
 # sets to the godot/ tree root); we pass an absolute path so it
 # resolves regardless of where SCons recurses.
 ZYM_VARIANT_STRIP_SHIM="${ZYM_SHIM_DIR}/zym_variant_strip.h"
-ZYM_CCFLAGS="-fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
-ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR} -include ${ZYM_VARIANT_STRIP_SHIM} -fno-asynchronous-unwind-tables -fno-unwind-tables"
+# zym: -DWINDOWS_SUBSYSTEM_CONSOLE tells `OS_Windows::OS_Windows()` to
+# skip `RedirectIOToConsole()` (`AttachConsole(ATTACH_PARENT_PROCESS)` +
+# three `freopen_s(CONIN$/CONOUT$, ...)` calls). The CLI is linked with
+# `-mconsole`, so the loader has already attached a console before the
+# binary's entry point runs; the redirect path exists for windowed
+# (subsystem:windows) builds that need to lazily attach to the parent
+# console at runtime, and is a measurable boot cost on Wine where each
+# of those calls round-trips through wineserver. Defined for both C and
+# C++ TUs so the platform compilation unit picks it up regardless of
+# language.
+ZYM_CCFLAGS="-fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -DWINDOWS_SUBSYSTEM_CONSOLE"
+ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR} -include ${ZYM_VARIANT_STRIP_SHIM} -fno-asynchronous-unwind-tables -fno-unwind-tables -DWINDOWS_SUBSYSTEM_CONSOLE"
 
 exec scons \
     platform=windows \

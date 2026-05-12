@@ -288,6 +288,18 @@ if(WIN32)
             _WIN64
             MINGW_ENABLED
             MINGW_HAS_SECURE_API=1
+            # zym: tell `OS_Windows::OS_Windows()` to skip `RedirectIOToConsole()`.
+            # Without this, the ctor calls `AttachConsole(ATTACH_PARENT_PROCESS)`
+            # + three `freopen_s(...)` redirections (CONIN$/CONOUT$ for
+            # stdin/stdout/stderr) on every boot. That path exists for windowed
+            # (subsystem:windows) builds that need to attach to the parent
+            # console at runtime. We link with `-mconsole` (PE subsystem 3 =
+            # console), so the loader already attaches a console for us before
+            # the binary starts; `AttachConsole(ATTACH_PARENT_PROCESS)` then
+            # returns `ERROR_ACCESS_DENIED` (already attached) and the redirections
+            # are pure wasted Win32/Wine syscalls -- noticeable on Wine where
+            # AttachConsole + freopen_s round-trip through wineserver.
+            WINDOWS_SUBSYSTEM_CONSOLE
     )
 else()
     # From godot/platform/linuxbsd/detect.py (unconditional for linuxbsd):
@@ -428,7 +440,6 @@ if(WIN32)
             shell32 shlwapi shcore
             bcrypt crypt32
             dwmapi imm32
-            hid
             uuid
             ntdll
             winmm

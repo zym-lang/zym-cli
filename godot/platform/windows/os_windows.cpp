@@ -2755,8 +2755,29 @@ LPVOID install_iat_hook(const String &p_target, const String &p_module, const St
 OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 	hInstance = _hInstance;
 
-	Original_GetProcAddress = (GetProcAddressType)install_iat_hook("dinput8.dll", "kernel32.dll", "GetProcAddress", (LPVOID)Hook_GetProcAddress);
-	Original_HidD_GetProductString = (HidD_GetProductStringType)install_iat_hook("dinput8.dll", "hid.dll", "HidD_GetProductString", (LPVOID)Hook_HidD_GetProductString);
+	// zym: DirectInput IAT hooks removed. The original code calls
+	// `install_iat_hook("dinput8.dll", ...)` twice, each of which does a
+	// `LoadLibraryA("dinput8.dll")` to patch DirectInput's import table so
+	// that `HidD_GetProductString` short-circuits for non-controller HIDs
+	// (avoids DAC / non-joystick stalls during `IDirectInput8::EnumDevices`).
+	// The headless CLI has no `DisplayServer`, no `Input` singleton, and never
+	// calls into DirectInput / joystick / HID enumeration -- so the hooks
+	// guard nothing. The unconditional `LoadLibraryA("dinput8.dll")` on every
+	// boot is itself a significant startup cost on Wine and on real Windows
+	// (it pulls in dxgi/ole/hid/setupapi dependencies and triggers
+	// DllMain initialization for each), measurable on the order of
+	// hundreds of milliseconds. With the hooks removed, both
+	// `Original_GetProcAddress` and `Original_HidD_GetProductString`
+	// remain null; nothing in the zym link graph ever reaches the call
+	// sites that would dereference them.
+	// (Original block:
+	//   Original_GetProcAddress = (GetProcAddressType)install_iat_hook(
+	//       "dinput8.dll", "kernel32.dll", "GetProcAddress",
+	//       (LPVOID)Hook_GetProcAddress);
+	//   Original_HidD_GetProductString = (HidD_GetProductStringType)install_iat_hook(
+	//       "dinput8.dll", "hid.dll", "HidD_GetProductString",
+	//       (LPVOID)Hook_HidD_GetProductString);
+	// )
 
 	_init_encodings();
 

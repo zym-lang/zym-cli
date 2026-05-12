@@ -24,4 +24,12 @@ namespace zym::boot {
 void register_core_types();
 void unregister_core_types();
 
+// Lazily load the system CA chain (system trust store) on first use. Safe
+// to call repeatedly and from any thread; the underlying
+// `Crypto::load_default_certificates(String())` is invoked exactly once
+// via `std::call_once`. See register_core.cpp for the rationale (the
+// Windows `OS::get_system_ca_certificates()` walk costs ~0.5-2s and was
+// previously running unconditionally at boot from `register_core_types`).
+void ensure_default_certificates_loaded();
+
 } // namespace zym::boot

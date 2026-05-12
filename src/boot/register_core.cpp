@@ -39,6 +39,8 @@
 
 #include "register_core.hpp"
 
+#include <mutex>
+
 // Access widening. The three foundational entrypoints we need
 // (`ObjectDB::setup` / `ObjectDB::cleanup` and `StringName::setup` /
 // `StringName::cleanup`) are declared `private` on their owning classes
@@ -172,18 +174,19 @@ void register_core_types() {
 	PacketPeerMbedDTLS::initialize_dtls();
 	DTLSServerMbedTLS::initialize();
 
-	// Load default CA chain (system trust store) so `TLS.connect(...)`
-	// against real-world hosts (https://example.com etc.) can verify the
-	// server cert without the script needing to pass `trustedRoots`.
-	// `Crypto::load_default_certificates("")` falls back to
-	// `OS::get_system_ca_certificates()` (or the builtin bundle if the
-	// engine was compiled with `BUILTIN_CERTS_ENABLED`). Calls into
-	// `mbedtls_x509_crt_parse` and is safe to invoke at startup; passing
-	// an empty path tells it "use system roots, not a project-defined
-	// path". Skipping this leaves `default_certs` null, which in turn
-	// makes `TLSContextMbedTLS::init_client` return `ERR_UNCONFIGURED`
-	// for any non-`unsafe` client.
-	Crypto::load_default_certificates(String());
+	// Default CA chain (system trust store) is loaded lazily on first
+	// crypto/TLS use via `ensure_default_certificates_loaded()` (see
+	// below). Calling `Crypto::load_default_certificates(String())`
+	// eagerly here costs ~0.5-2s on Windows / Wine because
+	// `OS_Windows::get_system_ca_certificates()` walks the root store
+	// synchronously (CertOpenSystemStoreA("ROOT") +
+	// CertEnumCertificatesInStore + per-cert CryptBinaryToStringA), and
+	// the vast majority of `zym` invocations never open a TLS socket.
+	// Deferring the call to the first crypto/TLS entry point drops the
+	// startup stall to zero for the no-TLS case while preserving
+	// identical behaviour for TLS-using scripts (the lazy load happens
+	// before `TLSContextMbedTLS::init_client` would otherwise see a
+	// null `default_certs` and return `ERR_UNCONFIGURED`).
 
 	// --- Additive batch #2b: WebSocket peer factory ---------------------
 	// Wires `WebSocketPeer::_create` to the `WSLPeer` (mbedtls-backed)
@@ -228,6 +231,20 @@ void unregister_core_types() {
 	CoreStringNames::free();
 	StringName::cleanup();
 	ObjectDB::cleanup();
+}
+
+void ensure_default_certificates_loaded() {
+	// One-shot, thread-safe lazy initialization. `Crypto::load_default_certificates("")`
+	// falls back to `OS::get_system_ca_certificates()` -- on Windows /
+	// Wine this synchronously walks the system root store and is the
+	// single largest startup cost of the engine boot when invoked
+	// eagerly. Gating it behind `std::call_once` here means scripts that
+	// never touch TLS pay nothing, and scripts that do trigger the load
+	// at most once (on the first Crypto/TLS entry point).
+	static std::once_flag s_default_certs_once;
+	std::call_once(s_default_certs_once, []() {
+		Crypto::load_default_certificates(String());
+	});
 }
 
 } // namespace zym::boot

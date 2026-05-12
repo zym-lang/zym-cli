@@ -1,0 +1,147 @@
+// wss_self_signed_server.zym
+//
+// What this does:    Stands up a `wss://` (TLS-encrypted WebSocket)
+//                    echo server with a freshly-minted RSA keypair +
+//                    self-signed certificate. Accepts encrypted
+//                    clients forever and echoes every frame back.
+//                    Demonstrates the layered handshake path:
+//                      TCP.listen + TCP.accept -> TLS.accept(tcp,{key,cert})
+//                      -> WebSocket.accept(tls).
+// How to run it:     zym examples/networking/websocket/wss_self_signed_server.zym -- 9201
+//                      argv[1] = port (default 9201; 0 = OS-assigned)
+//                    Then in another terminal:
+//                      zym examples/networking/websocket/wss_client.zym -- 127.0.0.1 9201 hello
+// What you'll see:   Per connection: TCP accept, TLS handshake complete,
+//                    WebSocket handshake complete, then incoming frames
+//                    being echoed back.
+//
+// Concepts introduced (over echo_server.zym):
+//   * Crypto.create() + generateRsa(2048) + generateSelfSignedCertificate
+//     to mint key+cert in-process. Handy for tests/demos/internal mTLS.
+//   * The TLS handshake runs BEFORE WebSocket.accept sees the stream:
+//     give TLS.accept a non-blocking timeout (0) and poll it to
+//     completion, THEN hand the TLS sock to WebSocket.accept.
+//   * For real deployments, use a CA-issued cert and let the client
+//     verify normally - { verify: false } is for demos only.
+//
+// Note: a self-signed cert means the matching client must use
+//       { tls: { verify: false } } (or pin this cert via trustedRoots).
+func main(argv) {
+    var port = 9201
+    if (length(argv) > 1) { port = num(argv[1]) }
+
+    print("minting self-signed RSA-2048 key + cert (CN=localhost)...\n")
+    var crypto = Crypto.create()
+    var key  = crypto.generateRsa(2048)
+    var cert = crypto.generateSelfSignedCertificate(key, "CN=localhost",
+                                                    "20240101000000",
+                                                    "20440101000000")
+    if (key == null || cert == null) {
+        print("failed to mint key+cert\n")
+        return 1
+    }
+
+    var srv = TCP.listen("0.0.0.0", port)
+    if (srv == null) {
+        print("could not listen on port %n (port already in use?)\n", port)
+        return 1
+    }
+    print("wss server listening on 0.0.0.0:%n (Ctrl-C to stop)\n",
+          srv.localPort())
+
+    while (true) {
+        var tcp = srv.accept(500)
+        if (tcp == null) { continue }
+        var pa = tcp.peerAddress()
+        print("[%s:%n] tcp accepted, upgrading to TLS...\n",
+              pa["host"], pa["port"])
+
+        var tls = TLS.accept(tcp, { key: key, cert: cert }, 0)
+        if (tls == null) {
+            print("[%s:%n] TLS.accept failed\n", pa["host"], pa["port"])
+            tcp.close()
+            continue
+        }
+        // Drive the TLS handshake up to ~5s.
+        var deadline = Time.ticksMsec() + 5000
+        while (Time.ticksMsec() < deadline && tls.status() == "handshaking") {
+            tls.poll()
+            System.sleep(25)
+        }
+        // Some builds use "connecting" rather than "handshaking" -
+        // accept both as "still in handshake" by waiting on connected.
+        deadline = Time.ticksMsec() + 5000
+        while (Time.ticksMsec() < deadline && tls.status() != "connected") {
+            if (tls.status() == "error" || tls.status() == "closed") { break }
+            tls.poll()
+            System.sleep(25)
+        }
+        if (tls.status() != "connected") {
+            print("[%s:%n]   TLS handshake failed (%s)\n",
+                  pa["host"], pa["port"], tls.status())
+            tls.close()
+            tcp.close()
+            continue
+        }
+        print("[%s:%n]   TLS handshake complete\n", pa["host"], pa["port"])
+
+        // Layer WebSocket on top of the now-encrypted stream.
+        var ws = WebSocket.accept(tls)
+        if (ws == null) {
+            print("[%s:%n]   WebSocket.accept failed\n",
+                  pa["host"], pa["port"])
+            tls.close()
+            tcp.close()
+            continue
+        }
+        deadline = Time.ticksMsec() + 5000
+        while (Time.ticksMsec() < deadline && ws.status() == "connecting") {
+            tls.poll()
+            ws.poll()
+            System.sleep(25)
+        }
+        if (ws.status() != "connected") {
+            print("[%s:%n]   WebSocket handshake failed (%s)\n",
+                  pa["host"], pa["port"], ws.status())
+            ws.close()
+            tls.close()
+            tcp.close()
+            continue
+        }
+        print("[%s:%n]   WebSocket handshake complete\n",
+              pa["host"], pa["port"])
+
+        // Echo loop: one client at a time keeps the example small.
+        // For a multi-client wss server, fold this into the
+        // Sockets.waitAny loop from echo_server.zym.
+        while (true) {
+            ws.poll()
+            var s = ws.status()
+            if (s != "connected" && ws.available() == 0) {
+                print("[%s:%n]   client done (%s)\n",
+                      pa["host"], pa["port"], s)
+                break
+            }
+            if (ws.available() == 0) {
+                System.sleep(20)
+                continue
+            }
+            var frame = ws.recv(0)
+            if (typeof(frame) == "string") { continue }
+            var isText = ws.wasStringPacket()
+            print("[%s:%n]   <- (%s) %s\n",
+                  pa["host"], pa["port"],
+                  isText ? "text" : "binary",
+                  frame.toUtf8())
+            if (isText) {
+                ws.sendText(frame.toUtf8())
+            } else {
+                ws.send(frame)
+            }
+        }
+        ws.close()
+        tls.close()
+        tcp.close()
+    }
+    return 0
+}

@@ -1,0 +1,88 @@
+// echo_client.zym
+//
+// What this does:    Connects to a WebSocket echo server, sends each
+//                    argv[3..] as one text frame, and prints the echoed
+//                    reply for each.
+// How to run it:     Start examples/networking/websocket/echo_server.zym
+//                    first. Then in another terminal:
+//                      zym examples/networking/websocket/echo_client.zym -- 127.0.0.1 9200 alpha bravo charlie
+//                    Defaults: host = 127.0.0.1, port = 9200,
+//                    payload = ["ping"].
+// What you'll see:   "connected" once the handshake finishes, then a
+//                    "-> <msg>" / "<- <reply>" pair per message.
+//
+// Concepts introduced:
+//   * WebSocket.connect("ws://host:port/") for the client side. The
+//     URL path ("/", "/chat", ...) is opaque to this example - the
+//     server ignores it.
+//   * Driving the handshake non-blocking: poll() until connected.
+//   * sendText vs send: text frames travel as zym strings (UTF-8 on
+//     the wire); binary frames travel as Buffer.
+//   * recv(timeoutMs) returns either a Buffer (one decoded frame) or
+//     a status string ("busy" / "timeout" / "eof" / "closed" / "error").
+func main(argv) {
+    var host = "127.0.0.1"
+    var port = 9200
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    var payload = []
+    if (length(argv) > 3) {
+        var i = 3
+        while (i < length(argv)) {
+            push(payload, argv[i])
+            i = i + 1
+        }
+    } else {
+        push(payload, "ping")
+    }
+
+    var url = "ws://" + host + ":" + str(port) + "/"
+    print("connecting to %s\n", url)
+    var s = WebSocket.connect(url)
+    if (s == null) {
+        print("WebSocket.connect failed (bad url / no WebSocket support)\n")
+        return 1
+    }
+
+    // Drive the handshake (5s ceiling).
+    var deadline = Time.ticksMsec() + 5000
+    while (Time.ticksMsec() < deadline && s.status() == "connecting") {
+        s.poll()
+        System.sleep(20)
+    }
+    if (s.status() != "connected") {
+        print("handshake failed: %s\n", s.status())
+        s.close()
+        return 1
+    }
+    print("connected (selectedProtocol=%s)\n", s.selectedProtocol())
+
+    var i = 0
+    while (i < length(payload)) {
+        var msg = payload[i]
+        print("-> %s\n", msg)
+        var w = s.sendText(msg)
+        if (w != "ok") {
+            print("sendText failed: %s\n", w)
+            break
+        }
+        // Drive the socket; recv(timeout) will poll() internally too,
+        // but explicit poll keeps the model obvious.
+        s.poll()
+        var reply = s.recv(2000)
+        if (typeof(reply) == "string") {
+            print("recv failed: %s\n", reply)
+            break
+        }
+        if (s.wasStringPacket()) {
+            print("<- (text) %s\n", reply.toUtf8())
+        } else {
+            print("<- (binary, %n bytes)\n", reply.size())
+        }
+        i = i + 1
+    }
+
+    s.close()
+    print("done.\n")
+    return 0
+}

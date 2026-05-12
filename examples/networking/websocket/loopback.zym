@@ -1,0 +1,112 @@
+// loopback.zym
+//
+// What this does:    Single-process WebSocket demo. Stands up a TCP
+//                    listener on 127.0.0.1, accepts one inbound
+//                    connection, upgrades both ends with
+//                    WebSocket.connect / WebSocket.accept, drives the
+//                    handshake to "connected", and round-trips one text
+//                    frame and one binary frame in each direction.
+// How to run it:     zym examples/networking/websocket/loopback.zym
+//                    No arguments. Picks an ephemeral port.
+// What you'll see:   Listening port, handshake completing on both
+//                    sides, text and binary frames being received and
+//                    "done." at the end.
+//
+// Concepts introduced:
+//   * WebSocket.accept(tcp) upgrades an already-accepted TCP sock as
+//     the SERVER side of a WebSocket. The TCP sock must outlive the
+//     WebSocket handle.
+//   * WebSocket.connect("ws://...") opens the CLIENT side.
+//   * Both factories return immediately in "connecting"; the caller
+//     drives the handshake with sock.poll() until status() == "connected".
+//   * One frame per call: send / sendText produce one frame; recv
+//     returns one frame. wasStringPacket() reports whether the last
+//     successful recv was text or binary.
+func main(argv) {
+    var srv = TCP.listen("127.0.0.1", 0)
+    if (srv == null) {
+        print("could not listen\n")
+        return 1
+    }
+    var port = srv.localPort()
+    print("listening on 127.0.0.1:%n\n", port)
+
+    // Client side (non-blocking handshake).
+    var cli = WebSocket.connect("ws://127.0.0.1:" + str(port) + "/")
+    if (cli == null) {
+        print("WebSocket.connect failed (build without WebSocket support?)\n")
+        srv.close()
+        return 1
+    }
+
+    // Server side: take the underlying TCP and upgrade it.
+    var raw = srv.accept(2000)
+    if (raw == null) {
+        print("TCP.accept timed out\n")
+        cli.close()
+        srv.close()
+        return 1
+    }
+    var ws = WebSocket.accept(raw)
+    if (ws == null) {
+        print("WebSocket.accept failed\n")
+        raw.close()
+        cli.close()
+        srv.close()
+        return 1
+    }
+
+    // Drive both handshakes to completion. waitAny would work too;
+    // a tiny sleep loop is easier to read for a first example.
+    var deadline = Time.ticksMsec() + 5000
+    while (Time.ticksMsec() < deadline &&
+           (cli.status() == "connecting" || ws.status() == "connecting")) {
+        cli.poll()
+        ws.poll()
+        System.sleep(20)
+    }
+    if (cli.status() != "connected" || ws.status() != "connected") {
+        print("handshake timed out (cli=%s, srv=%s)\n",
+              cli.status(), ws.status())
+        cli.close()
+        ws.close()
+        raw.close()
+        srv.close()
+        return 1
+    }
+    print("handshake complete (cli=%s, srv=%s)\n", cli.status(), ws.status())
+
+    // Client -> server: one text frame.
+    cli.sendText("hello websocket")
+    ws.poll()
+    var frame = ws.recv(2000)
+    if (typeof(frame) == "string") {
+        print("server recv failed: %s\n", frame)
+    } else {
+        print("server got %s frame: %s\n",
+              ws.wasStringPacket() ? "text" : "binary",
+              frame.toUtf8())
+    }
+
+    // Server -> client: one binary frame.
+    ws.send(Buffer.fromString("hi back"))
+    cli.poll()
+    var frame2 = cli.recv(2000)
+    if (typeof(frame2) == "string") {
+        print("client recv failed: %s\n", frame2)
+    } else {
+        print("client got %s frame: %s\n",
+              cli.wasStringPacket() ? "text" : "binary",
+              frame2.toUtf8())
+    }
+
+    // Polite shutdown: send a close, give it a tick to flush.
+    cli.close()
+    ws.poll()
+    cli.poll()
+    ws.close()
+    raw.close()
+    srv.close()
+    print("done.\n")
+    return 0
+}

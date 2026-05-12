@@ -98,15 +98,6 @@ exec scons \
     optimize=size_extra \
     production=yes \
     \
-    x11=no \
-    wayland=no \
-    libdecor=no \
-    touch=no \
-    dbus=no \
-    speechd=no \
-    fontconfig=no \
-    udev=no \
-    \
     debug_symbols=no \
     dev_build=no \
     tests=no \

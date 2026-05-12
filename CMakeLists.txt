@@ -314,6 +314,20 @@ if(NOT WIN32)
     target_link_options(zym PRIVATE -no-pie)
 endif()
 if(WIN32)
+    # Companion to the `-fuse-linker-plugin` override in
+    # scripts/build_godot_windows_x86_64.sh: with that flag,
+    # libgodot.windows.a is now built without fat LTO objects and ships
+    # pure GCC LTO IR for most TUs (matching the Linux behaviour). The
+    # final mingw `ld.bfd` link MUST then load `liblto_plugin.so` itself,
+    # otherwise it will see the IR-only `.o`s as empty and emit
+    # "undefined reference" errors for every Godot symbol. Forcing
+    # `-fuse-linker-plugin` on the compile *and* link line guarantees the
+    # plugin is invoked. (`-flto` alone is not enough -- detect.py's
+    # `-fno-use-linker-plugin` would otherwise still win on the compile
+    # side; on the link side mingw-gcc's driver passes the plugin only
+    # when this flag is present.)
+    target_compile_options(zym PRIVATE -fuse-linker-plugin)
+    target_link_options(zym PRIVATE -fuse-linker-plugin)
     # CLI binary: force the console subsystem so stdio works when launched
     # from cmd.exe / PowerShell / a pipe. Without this, mingw defaults to
     # whatever the spec file picks (usually console for non-GUI, but be
@@ -355,7 +369,37 @@ endif()
 # default BFD ld (which on mingw-w64 does understand the GCC LTO plugin) and
 # accept losing --icf=safe. The Linux rationale below still applies.
 if(WIN32)
-    message(STATUS ">> ICF: WIN32 build, ld.gold is ELF-only; using default mingw ld (no --icf=safe)")
+    # ICF on mingw: ld.gold is ELF-only and BFD ld doesn't implement ICF,
+    # so the only candidate is lld (PE/COFF backend). With the
+    # `-fuse-linker-plugin` override now in effect (see the WIN32 block
+    # above and scripts/build_godot_windows_x86_64.sh), libgodot.windows.a
+    # ships pure GCC LTO IR; in the past lld couldn't consume GCC bitcode
+    # and we documented that here as the reason ICF was skipped on
+    # Windows. The plugin path changes the picture: with
+    # `-fuse-linker-plugin`, the GCC *driver* invokes `liblto_plugin.so`
+    # to lower IR -> native objects *before* handing them to whichever
+    # linker `-fuse-ld=` selects, so lld sees ordinary native COFF and
+    # the bitcode-incompatibility argument no longer applies.
+    #
+    # We probe for an lld variant that the mingw-gcc driver will accept
+    # via `-fuse-ld=lld`: a cross-prefixed `x86_64-w64-mingw32-ld.lld`,
+    # the generic `ld.lld`, or `lld` on PATH. If none is found, we stay
+    # on BFD ld and accept the loss of ICF (BFD has no equivalent flag).
+    # `--icf=safe` is GNU-style and is accepted by lld on both ELF and
+    # PE/COFF; lld translates it internally to the `/opt:icf` semantic
+    # on COFF. Only address-not-taken functions are folded, so vtable
+    # dispatch and function-pointer identity are preserved.
+    find_program(ZYM_LLD_EXECUTABLE
+            NAMES x86_64-w64-mingw32-ld.lld ld.lld lld)
+    if(ZYM_LLD_EXECUTABLE)
+        message(STATUS ">> ICF: using ${ZYM_LLD_EXECUTABLE} (-fuse-ld=lld -Wl,--icf=safe)")
+        target_link_options(zym PRIVATE
+                -fuse-ld=lld
+                "-Wl,--icf=safe"
+        )
+    else()
+        message(STATUS ">> ICF: no ld.lld found; staying on mingw BFD ld (no --icf=safe; BFD has no ICF, gold is ELF-only)")
+    endif()
 else()
     find_program(ZYM_GOLD_EXECUTABLE NAMES ld.gold gold)
     if(ZYM_GOLD_EXECUTABLE)

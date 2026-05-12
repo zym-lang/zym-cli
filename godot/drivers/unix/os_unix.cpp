@@ -33,8 +33,7 @@
 #ifdef UNIX_ENABLED
 
 #include "core/config/project_settings.h"
-#include "core/debugger/engine_debugger.h"
-#include "core/debugger/script_debugger.h"
+#include "core/object/script_backtrace.h"
 #include "drivers/unix/dir_access_unix.h"
 #include "drivers/unix/file_access_unix.h"
 #include "drivers/unix/file_access_unix_pipe.h"
@@ -132,29 +131,7 @@ static void _setup_clock() {
 }
 #endif
 
-struct sigaction old_action;
-
-static void handle_interrupt(int sig) {
-	if (!EngineDebugger::is_active()) {
-		return;
-	}
-
-	EngineDebugger::get_script_debugger()->set_depth(-1);
-	EngineDebugger::get_script_debugger()->set_lines_left(1);
-
-	// Ensure we call the old action if it was configured.
-	if (old_action.sa_handler && old_action.sa_handler != SIG_IGN && old_action.sa_handler != SIG_DFL) {
-		old_action.sa_handler(sig);
-	}
-}
-
 void OS_Unix::initialize_debugging() {
-	if (EngineDebugger::is_active()) {
-		struct sigaction action;
-		memset(&action, 0, sizeof(action));
-		action.sa_handler = handle_interrupt;
-		sigaction(SIGINT, &action, &old_action);
-	}
 }
 
 int OS_Unix::unix_initialize_audio(int p_audio_driver) {

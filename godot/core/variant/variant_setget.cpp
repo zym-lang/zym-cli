@@ -1372,10 +1372,6 @@ bool Variant::iter_init(Variant &r_iter, bool &valid) const {
 
 #ifdef DEBUG_ENABLED
 
-			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && ObjectDB::get_instance(_get_obj().id) == nullptr) {
-				valid = false;
-				return false;
-			}
 
 #endif
 			Callable::CallError ce;
@@ -1606,10 +1602,6 @@ bool Variant::iter_next(Variant &r_iter, bool &valid) const {
 
 #ifdef DEBUG_ENABLED
 
-			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && ObjectDB::get_instance(_get_obj().id) == nullptr) {
-				valid = false;
-				return false;
-			}
 
 #endif
 			Callable::CallError ce;
@@ -1800,10 +1792,6 @@ Variant Variant::iter_get(const Variant &r_iter, bool &r_valid) const {
 				return Variant();
 			}
 #ifdef DEBUG_ENABLED
-			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && ObjectDB::get_instance(_get_obj().id) == nullptr) {
-				r_valid = false;
-				return Variant();
-			}
 
 #endif
 			Callable::CallError ce;

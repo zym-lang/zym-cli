@@ -31,7 +31,6 @@
 #include "variant.h"
 
 #include "core/crypto/crypto_core.h"
-#include "core/debugger/engine_debugger.h"
 #include "core/io/compression.h"
 #include "core/io/marshalls.h"
 #include "core/object/class_db.h"
@@ -1422,10 +1421,6 @@ void Variant::callp(const StringName &p_method, const Variant **p_args, int p_ar
 			return;
 		}
 #ifdef DEBUG_ENABLED
-		if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && ObjectDB::get_instance(_get_obj().id) == nullptr) {
-			r_error.error = Callable::CallError::CALL_ERROR_INSTANCE_IS_NULL;
-			return;
-		}
 
 #endif // DEBUG_ENABLED
 		r_ret = _get_obj().obj->callp(p_method, p_args, p_argcount, r_error);
@@ -1453,10 +1448,6 @@ void Variant::call_const(const StringName &p_method, const Variant **p_args, int
 			return;
 		}
 #ifdef DEBUG_ENABLED
-		if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && ObjectDB::get_instance(_get_obj().id) == nullptr) {
-			r_error.error = Callable::CallError::CALL_ERROR_INSTANCE_IS_NULL;
-			return;
-		}
 
 #endif // DEBUG_ENABLED
 		r_ret = _get_obj().obj->call_const(p_method, p_args, p_argcount, r_error);

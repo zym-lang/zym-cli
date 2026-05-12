@@ -30,7 +30,6 @@
 
 #include "variant.h"
 
-#include "core/debugger/engine_debugger.h"
 #include "core/io/json.h"
 #include "core/io/resource.h"
 #include "core/math/math_funcs.h"
@@ -2011,11 +2010,6 @@ Variant::operator ::RID() const {
 	} else if (type == OBJECT && _get_obj().obj == nullptr) {
 		return ::RID();
 	} else if (type == OBJECT && _get_obj().obj) {
-#ifdef DEBUG_ENABLED
-		if (EngineDebugger::is_active()) {
-			ERR_FAIL_NULL_V_MSG(ObjectDB::get_instance(_get_obj().id), ::RID(), "Invalid pointer (object was freed).");
-		}
-#endif
 		Callable::CallError ce;
 		const Variant ret = _get_obj().obj->callp(CoreStringName(get_rid), nullptr, 0, ce);
 		if (ce.error == Callable::CallError::CALL_OK && ret.get_type() == Variant::RID) {

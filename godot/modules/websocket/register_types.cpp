@@ -30,7 +30,6 @@
 
 #include "register_types.h"
 
-#include "remote_debugger_peer_websocket.h"
 #include "websocket_peer.h"
 // zym: WebSocketMultiplayerPeer was scene-bound (extended MultiplayerPeer
 // from scene/main/) and has been removed; its header is now empty.
@@ -45,7 +44,6 @@
 #include "editor/editor_debugger_server_websocket.h"
 #endif
 
-#include "core/debugger/engine_debugger.h"
 #include "core/error/error_macros.h"
 
 #ifdef TOOLS_ENABLED
@@ -69,9 +67,7 @@ void initialize_websocket_module(ModuleInitializationLevel p_level) {
 
 		// zym: WebSocketMultiplayerPeer removed alongside scene/*.
 		ClassDB::register_custom_instance_class<WebSocketPeer>();
-
-		EngineDebugger::register_uri_handler("ws://", RemoteDebuggerPeerWebSocket::create);
-		EngineDebugger::register_uri_handler("wss://", RemoteDebuggerPeerWebSocket::create);
+		// zym: RemoteDebuggerPeerWebSocket removed alongside core/debugger/.
 	}
 
 #ifdef TOOLS_ENABLED

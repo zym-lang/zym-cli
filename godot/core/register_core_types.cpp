@@ -36,7 +36,6 @@
 #include "core/crypto/aes_context.h"
 #include "core/crypto/crypto.h"
 #include "core/crypto/hashing_context.h"
-#include "core/debugger/engine_profiler.h"
 #include "core/extension/gdextension.h"
 #include "core/extension/gdextension_manager.h"
 #include "core/extension/godot_instance.h"
@@ -103,7 +102,6 @@ static CoreBind::OS *_os = nullptr;
 static CoreBind::Engine *_engine = nullptr;
 static CoreBind::Special::ClassDB *_classdb = nullptr;
 static CoreBind::Marshalls *_marshalls = nullptr;
-static CoreBind::EngineDebugger *_engine_debugger = nullptr;
 
 static IP *ip = nullptr;
 static Time *_time = nullptr;
@@ -293,7 +291,6 @@ void register_core_types() {
 
 	GDREGISTER_ABSTRACT_CLASS(ResourceUID);
 
-	GDREGISTER_CLASS(EngineProfiler);
 
 	resource_uid = memnew(ResourceUID);
 
@@ -313,7 +310,6 @@ void register_core_types() {
 	GDREGISTER_CLASS(CoreBind::Engine);
 	GDREGISTER_CLASS(CoreBind::Special::ClassDB);
 	GDREGISTER_CLASS(CoreBind::Marshalls);
-	GDREGISTER_CLASS(CoreBind::EngineDebugger);
 
 	GDREGISTER_CLASS(TranslationServer);
 	GDREGISTER_ABSTRACT_CLASS(Input);
@@ -332,7 +328,6 @@ void register_core_types() {
 	_engine = memnew(CoreBind::Engine);
 	_classdb = memnew(CoreBind::Special::ClassDB);
 	_marshalls = memnew(CoreBind::Marshalls);
-	_engine_debugger = memnew(CoreBind::EngineDebugger);
 
 	GDREGISTER_NATIVE_STRUCT(ObjectID, "uint64_t id = 0");
 	GDREGISTER_NATIVE_STRUCT(AudioFrame, "float left;float right");
@@ -374,7 +369,6 @@ void register_core_singletons() {
 	Engine::get_singleton()->add_singleton(Engine::Singleton("TranslationServer", TranslationServer::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("Input", Input::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("InputMap", InputMap::get_singleton()));
-	Engine::get_singleton()->add_singleton(Engine::Singleton("EngineDebugger", CoreBind::EngineDebugger::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("GDExtensionManager", GDExtensionManager::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("ResourceUID", ResourceUID::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("WorkerThreadPool", worker_thread_pool));
@@ -412,7 +406,6 @@ void unregister_core_types() {
 
 	memdelete(worker_thread_pool);
 
-	memdelete(_engine_debugger);
 	memdelete(_marshalls);
 	memdelete(_classdb);
 	memdelete(_engine);

@@ -42,14 +42,6 @@ def get_opts():
         BoolVariable("use_sowrap", "Dynamically load system libraries", True),
         BoolVariable("alsa", "Use ALSA", True),
         BoolVariable("pulseaudio", "Use PulseAudio", True),
-        BoolVariable("dbus", "Use D-Bus to handle screensaver and portal desktop settings", True),
-        BoolVariable("speechd", "Use Speech Dispatcher for Text-to-Speech support", True),
-        BoolVariable("fontconfig", "Use fontconfig for system fonts support", True),
-        BoolVariable("udev", "Use udev for gamepad connection callbacks", True),
-        BoolVariable("x11", "Enable X11 display", True),
-        BoolVariable("wayland", "Enable Wayland display", True),
-        BoolVariable("libdecor", "Enable libdecor support", True),
-        BoolVariable("touch", "Enable touch events", True),
         BoolVariable("execinfo", "Use libexecinfo on systems where glibc is not available", False),
     ]
 
@@ -215,13 +207,9 @@ def configure(env: "SConsEnvironment"):
     if env["use_sowrap"]:
         env.Append(CPPDEFINES=["SOWRAP_ENABLED"])
 
-    if env["wayland"]:
-        if os.system("wayland-scanner -v 2>/dev/null") != 0:
-            print_warning("wayland-scanner not found. Disabling Wayland support.")
-            env["wayland"] = False
-
-    if env["touch"]:
-        env.Append(CPPDEFINES=["TOUCH_ENABLED"])
+    # zym: wayland / touch / x11 / libdecor / dbus / speechd / fontconfig /
+    # udev display-server + input + system-integration options removed.
+    # The CLI is headless and never opens a DisplayServer.
 
     # FIXME: Check for existence of the libs before parsing their flags with pkg-config
 
@@ -316,71 +304,11 @@ def configure(env: "SConsEnvironment"):
     if not env["builtin_openxr"]:
         env.ParseConfig("pkg-config openxr --cflags --libs")
 
-    if env["fontconfig"]:
-        if not env["use_sowrap"]:
-            if os.system("pkg-config --exists fontconfig") == 0:  # 0 means found
-                env.ParseConfig("pkg-config fontconfig --cflags --libs")
-                env.Append(CPPDEFINES=["FONTCONFIG_ENABLED"])
-            else:
-                print_warning("fontconfig development libraries not found. Disabling the system fonts support.")
-                env["fontconfig"] = False
-        else:
-            env.Append(CPPDEFINES=["FONTCONFIG_ENABLED"])
-
     # zym: ALSA/PulseAudio audio drivers removed.
-
-    if env["dbus"] and env["threads"]:  # D-Bus functionality expects threads.
-        if not env["use_sowrap"]:
-            if os.system("pkg-config --exists dbus-1") == 0:  # 0 means found
-                env.ParseConfig("pkg-config dbus-1 --cflags --libs")
-                env.Append(CPPDEFINES=["DBUS_ENABLED"])
-            else:
-                print_warning("D-Bus development libraries not found. Disabling screensaver prevention.")
-                env["dbus"] = False
-        else:
-            env.Append(CPPDEFINES=["DBUS_ENABLED"])
-
-    if env["speechd"]:
-        if not env["use_sowrap"]:
-            if os.system("pkg-config --exists speech-dispatcher") == 0:  # 0 means found
-                env.ParseConfig("pkg-config speech-dispatcher --cflags --libs")
-                env.Append(CPPDEFINES=["SPEECHD_ENABLED"])
-            else:
-                print_warning("speech-dispatcher development libraries not found. Disabling text to speech support.")
-                env["speechd"] = False
-        else:
-            env.Append(CPPDEFINES=["SPEECHD_ENABLED"])
-
-    if not env["use_sowrap"]:
-        if os.system("pkg-config --exists xkbcommon") == 0:  # 0 means found
-            env.ParseConfig("pkg-config xkbcommon --cflags --libs")
-            env.Append(CPPDEFINES=["XKB_ENABLED"])
-        else:
-            if env["wayland"]:
-                print_error("libxkbcommon development libraries required by Wayland not found. Aborting.")
-                sys.exit(255)
-            else:
-                print_warning(
-                    "libxkbcommon development libraries not found. Disabling dead key composition and key label support."
-                )
-    else:
-        env.Append(CPPDEFINES=["XKB_ENABLED"])
-
-    if platform.system() == "Linux":
-        if env["udev"]:
-            if not env["use_sowrap"]:
-                if os.system("pkg-config --exists libudev") == 0:  # 0 means found
-                    env.ParseConfig("pkg-config libudev --cflags --libs")
-                    env.Append(CPPDEFINES=["UDEV_ENABLED"])
-                else:
-                    print_warning("libudev development libraries not found. Disabling controller hotplugging support.")
-                    env["udev"] = False
-            else:
-                env.Append(CPPDEFINES=["UDEV_ENABLED"])
-    else:
-        env["udev"] = False  # Linux specific
-
-    # zym: SDL input driver removed.
+    # zym: fontconfig / D-Bus / speech-dispatcher / xkbcommon / libudev
+    # / SDL input integrations removed (headless, no DisplayServer).
+    # The `xkbcommon-so_wrap.c` stub still compiles unconditionally for the
+    # benefit of vendored linuxbsd_headers (see SCsub).
 
     # Linkflags below this line should typically stay the last ones
     if not env["builtin_zlib"]:
@@ -398,68 +326,7 @@ def configure(env: "SConsEnvironment"):
         ]
     )
 
-    if env["x11"]:
-        if not env["use_sowrap"]:
-            if os.system("pkg-config --exists x11"):
-                print_error("X11 libraries not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config x11 --cflags --libs")
-            if os.system("pkg-config --exists xcursor"):
-                print_error("Xcursor library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config xcursor --cflags --libs")
-            if os.system("pkg-config --exists xinerama"):
-                print_error("Xinerama library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config xinerama --cflags --libs")
-            if os.system("pkg-config --exists xext"):
-                print_error("Xext library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config xext --cflags --libs")
-            if os.system("pkg-config --exists xrandr"):
-                print_error("XrandR library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config xrandr --cflags --libs")
-            if os.system("pkg-config --exists xrender"):
-                print_error("XRender library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config xrender --cflags --libs")
-            if os.system("pkg-config --exists xi"):
-                print_error("Xi library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config xi --cflags --libs")
-        env.Append(CPPDEFINES=["X11_ENABLED"])
-
-    if env["wayland"]:
-        if not env["use_sowrap"]:
-            if os.system("pkg-config --exists libdecor-0"):
-                print_warning("libdecor development libraries not found. Disabling client-side decorations.")
-                env["libdecor"] = False
-            else:
-                env.ParseConfig("pkg-config libdecor-0 --cflags --libs")
-            if os.system("pkg-config --exists wayland-client"):
-                print_error("Wayland client library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config wayland-client --cflags --libs")
-            if os.system("pkg-config --exists wayland-cursor"):
-                print_error("Wayland cursor library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config wayland-cursor --cflags --libs")
-            if os.system("pkg-config --exists wayland-egl"):
-                print_error("Wayland EGL library not found. Aborting.")
-                sys.exit(255)
-            env.ParseConfig("pkg-config wayland-egl --cflags --libs")
-        else:
-            env.Prepend(CPPPATH=["#thirdparty/linuxbsd_headers/wayland/"])
-            if env["libdecor"]:
-                env.Prepend(CPPPATH=["#thirdparty/linuxbsd_headers/libdecor-0/"])
-
-        if env["libdecor"]:
-            env.Append(CPPDEFINES=["LIBDECOR_ENABLED"])
-
-        env.Append(CPPDEFINES=["WAYLAND_ENABLED"])
-        env.Append(LIBS=["rt"])  # Needed by glibc, used by _allocate_shm_file
-
+    # zym: X11 / Wayland / libdecor display servers removed (headless CLI).
     # zym: AccessKit / Vulkan / OpenGL3 rendering drivers removed.
 
     env.Append(LIBS=["pthread"])

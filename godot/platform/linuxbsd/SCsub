@@ -21,24 +21,9 @@ else:
 if env["use_sowrap"]:
     common_linuxbsd.append("xkbcommon-so_wrap.c")
 
-if env["x11"]:
-    common_linuxbsd += SConscript("x11/SCsub")
-
-if env["wayland"]:
-    common_linuxbsd += SConscript("wayland/SCsub")
-
-if env["speechd"]:
-    common_linuxbsd.append("tts_linux.cpp")
-    if env["use_sowrap"]:
-        common_linuxbsd.append("speechd-so_wrap.c")
-
-if env["fontconfig"]:
-    if env["use_sowrap"]:
-        common_linuxbsd.append("fontconfig-so_wrap.c")
-
-if env["dbus"]:
-    if env["use_sowrap"]:
-        common_linuxbsd.append("dbus-so_wrap.c")
+# zym: x11/, wayland/, speechd, fontconfig, dbus subdirs and optional
+# UI/input/font/TTS dependencies were removed. The CLI is headless: no
+# DisplayServer, no system fonts, no TTS, no D-Bus glue.
 
 if env["library_type"] == "static_library":
     prog = env.add_library("#bin/godot", common_linuxbsd)

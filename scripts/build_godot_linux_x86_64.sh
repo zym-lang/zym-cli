@@ -107,14 +107,6 @@ exec scons \
     fontconfig=no \
     udev=no \
     \
-    disable_3d=yes \
-    disable_advanced_gui=yes \
-    disable_xr=yes \
-    disable_physics_2d=yes \
-    disable_physics_3d=yes \
-    disable_navigation_2d=yes \
-    disable_navigation_3d=yes \
-    \
     debug_symbols=no \
     dev_build=no \
     tests=no \

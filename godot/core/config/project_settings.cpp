@@ -1767,12 +1767,6 @@ ProjectSettings::ProjectSettings() {
 	custom_prop_info["rendering/driver/threads/thread_model"] = PropertyInfo(Variant::INT, "rendering/driver/threads/thread_model", PROPERTY_HINT_ENUM, "Unsafe (deprecated),Safe,Separate");
 #endif
 
-#ifndef PHYSICS_2D_DISABLED
-	GLOBAL_DEF("physics/2d/run_on_separate_thread", false);
-#endif // PHYSICS_2D_DISABLED
-#ifndef PHYSICS_3D_DISABLED
-	GLOBAL_DEF("physics/3d/run_on_separate_thread", false);
-#endif // PHYSICS_3D_DISABLED
 
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::STRING, "display/window/stretch/mode", PROPERTY_HINT_ENUM, "disabled,canvas_items,viewport"), "disabled");
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::STRING, "display/window/stretch/aspect", PROPERTY_HINT_ENUM, "ignore,keep,keep_width,keep_height,expand"), "keep");
@@ -1850,27 +1844,6 @@ ProjectSettings::ProjectSettings() {
 	GLOBAL_DEF_INTERNAL("internationalization/locale/translations_pot_files", PackedStringArray());
 	GLOBAL_DEF_INTERNAL("internationalization/locale/translation_add_builtin_strings_to_pot", false);
 
-#if !defined(NAVIGATION_2D_DISABLED) || !defined(NAVIGATION_3D_DISABLED)
-	GLOBAL_DEF("navigation/world/map_use_async_iterations", true);
-	GLOBAL_DEF("navigation/world/region_use_async_iterations", true);
-
-	GLOBAL_DEF("navigation/avoidance/thread_model/avoidance_use_multiple_threads", true);
-	GLOBAL_DEF("navigation/avoidance/thread_model/avoidance_use_high_priority_threads", true);
-
-	GLOBAL_DEF("navigation/pathfinding/max_threads", 4);
-
-	GLOBAL_DEF("navigation/baking/use_crash_prevention_checks", true);
-	GLOBAL_DEF("navigation/baking/thread_model/baking_use_multiple_threads", true);
-	GLOBAL_DEF("navigation/baking/thread_model/baking_use_high_priority_threads", true);
-#endif // !defined(NAVIGATION_2D_DISABLED) || !defined(NAVIGATION_3D_DISABLED)
-#ifndef NAVIGATION_2D_DISABLED
-	GLOBAL_DEF("navigation/2d/warnings/navmesh_edge_merge_errors", true);
-	GLOBAL_DEF("navigation/2d/warnings/navmesh_cell_size_mismatch", true);
-#endif // NAVIGATION_2D_DISABLED
-#ifndef NAVIGATION_3D_DISABLED
-	GLOBAL_DEF("navigation/3d/warnings/navmesh_edge_merge_errors", true);
-	GLOBAL_DEF("navigation/3d/warnings/navmesh_cell_size_mismatch", true);
-#endif // NAVIGATION_3D_DISABLED
 
 	ProjectSettings::get_singleton()->add_hidden_prefix("input/");
 }

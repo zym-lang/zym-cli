@@ -240,13 +240,6 @@ opts.Add(BoolVariable("vsproj", "Generate a Visual Studio solution", False))
 opts.Add("vsproj_name", "Name of the Visual Studio solution", "godot")
 opts.Add("import_env_vars", "A comma-separated list of environment variables to copy from the outer environment.", "")
 opts.Add(BoolVariable("disable_exceptions", "Force disabling exception handling code", True))
-opts.Add(BoolVariable("disable_3d", "Disable 3D nodes for a smaller executable", False))
-opts.Add(BoolVariable("disable_advanced_gui", "Disable advanced GUI nodes and behaviors", False))
-opts.Add(BoolVariable("disable_physics_2d", "Disable 2D physics nodes and server", False))
-opts.Add(BoolVariable("disable_physics_3d", "Disable 3D physics nodes and server", False))
-opts.Add(BoolVariable("disable_navigation_2d", "Disable 2D navigation features", False))
-opts.Add(BoolVariable("disable_navigation_3d", "Disable 3D navigation features", False))
-opts.Add(BoolVariable("disable_xr", "Disable XR nodes and server", False))
 opts.Add(BoolVariable("disable_overrides", "Disable project settings overrides (override.cfg)", False))
 opts.Add(
     BoolVariable(
@@ -1004,23 +997,6 @@ sys.path.remove(tmppath)
 sys.modules.pop("detect")
 
 
-if env["disable_3d"]:
-    env.Append(CPPDEFINES=["_3D_DISABLED"])
-    env["disable_navigation_3d"] = True
-    env["disable_physics_3d"] = True
-    env["disable_xr"] = True
-if env["disable_advanced_gui"]:
-    env.Append(CPPDEFINES=["ADVANCED_GUI_DISABLED"])
-if env["disable_physics_2d"]:
-    env.Append(CPPDEFINES=["PHYSICS_2D_DISABLED"])
-if env["disable_physics_3d"]:
-    env.Append(CPPDEFINES=["PHYSICS_3D_DISABLED"])
-if env["disable_navigation_2d"]:
-    env.Append(CPPDEFINES=["NAVIGATION_2D_DISABLED"])
-if env["disable_navigation_3d"]:
-    env.Append(CPPDEFINES=["NAVIGATION_3D_DISABLED"])
-if env["disable_xr"]:
-    env.Append(CPPDEFINES=["XR_DISABLED"])
 if env["minizip"]:
     env.Append(CPPDEFINES=["MINIZIP_ENABLED"])
 if env["brotli"]:

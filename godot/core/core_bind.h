@@ -346,38 +346,6 @@ public:
 	Vector<Point2> convex_hull(const Vector<Point2> &p_points);
 	TypedArray<PackedVector2Array> decompose_polygon_in_convex(const Vector<Vector2> &p_polygon);
 
-	enum PolyBooleanOperation {
-		OPERATION_UNION,
-		OPERATION_DIFFERENCE,
-		OPERATION_INTERSECTION,
-		OPERATION_XOR
-	};
-	// 2D polygon boolean operations.
-	TypedArray<PackedVector2Array> merge_polygons(const Vector<Vector2> &p_polygon_a, const Vector<Vector2> &p_polygon_b); // Union (add).
-	TypedArray<PackedVector2Array> clip_polygons(const Vector<Vector2> &p_polygon_a, const Vector<Vector2> &p_polygon_b); // Difference (subtract).
-	TypedArray<PackedVector2Array> intersect_polygons(const Vector<Vector2> &p_polygon_a, const Vector<Vector2> &p_polygon_b); // Common area (multiply).
-	TypedArray<PackedVector2Array> exclude_polygons(const Vector<Vector2> &p_polygon_a, const Vector<Vector2> &p_polygon_b); // All but common area (xor).
-
-	// 2D polyline vs polygon operations.
-	TypedArray<PackedVector2Array> clip_polyline_with_polygon(const Vector<Vector2> &p_polyline, const Vector<Vector2> &p_polygon); // Cut.
-	TypedArray<PackedVector2Array> intersect_polyline_with_polygon(const Vector<Vector2> &p_polyline, const Vector<Vector2> &p_polygon); // Chop.
-
-	// 2D offset polygons/polylines.
-	enum PolyJoinType {
-		JOIN_SQUARE,
-		JOIN_ROUND,
-		JOIN_MITER
-	};
-	enum PolyEndType {
-		END_POLYGON,
-		END_JOINED,
-		END_BUTT,
-		END_SQUARE,
-		END_ROUND
-	};
-	TypedArray<PackedVector2Array> offset_polygon(const Vector<Vector2> &p_polygon, real_t p_delta, PolyJoinType p_join_type = JOIN_SQUARE);
-	TypedArray<PackedVector2Array> offset_polyline(const Vector<Vector2> &p_polygon, real_t p_delta, PolyJoinType p_join_type = JOIN_SQUARE, PolyEndType p_end_type = END_SQUARE);
-
 	Dictionary make_atlas(const Vector<Size2> &p_rects);
 
 	TypedArray<Point2i> bresenham_line(const Point2i &p_from, const Point2i &p_to);
@@ -702,9 +670,6 @@ VARIANT_ENUM_CAST(CoreBind::OS::RenderingDriver);
 VARIANT_ENUM_CAST(CoreBind::OS::SystemDir);
 VARIANT_ENUM_CAST(CoreBind::OS::StdHandleType);
 
-VARIANT_ENUM_CAST(CoreBind::Geometry2D::PolyBooleanOperation);
-VARIANT_ENUM_CAST(CoreBind::Geometry2D::PolyJoinType);
-VARIANT_ENUM_CAST(CoreBind::Geometry2D::PolyEndType);
 
 VARIANT_ENUM_CAST(CoreBind::Thread::Priority);
 

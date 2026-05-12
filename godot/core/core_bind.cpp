@@ -977,93 +977,6 @@ TypedArray<PackedVector2Array> Geometry2D::decompose_polygon_in_convex(const Vec
 	return ret;
 }
 
-TypedArray<PackedVector2Array> Geometry2D::merge_polygons(const Vector<Vector2> &p_polygon_a, const Vector<Vector2> &p_polygon_b) {
-	Vector<Vector<Point2>> polys = ::Geometry2D::merge_polygons(p_polygon_a, p_polygon_b);
-
-	TypedArray<PackedVector2Array> ret;
-
-	for (int i = 0; i < polys.size(); ++i) {
-		ret.push_back(polys[i]);
-	}
-	return ret;
-}
-
-TypedArray<PackedVector2Array> Geometry2D::clip_polygons(const Vector<Vector2> &p_polygon_a, const Vector<Vector2> &p_polygon_b) {
-	Vector<Vector<Point2>> polys = ::Geometry2D::clip_polygons(p_polygon_a, p_polygon_b);
-
-	TypedArray<PackedVector2Array> ret;
-
-	for (int i = 0; i < polys.size(); ++i) {
-		ret.push_back(polys[i]);
-	}
-	return ret;
-}
-
-TypedArray<PackedVector2Array> Geometry2D::intersect_polygons(const Vector<Vector2> &p_polygon_a, const Vector<Vector2> &p_polygon_b) {
-	Vector<Vector<Point2>> polys = ::Geometry2D::intersect_polygons(p_polygon_a, p_polygon_b);
-
-	TypedArray<PackedVector2Array> ret;
-
-	for (int i = 0; i < polys.size(); ++i) {
-		ret.push_back(polys[i]);
-	}
-	return ret;
-}
-
-TypedArray<PackedVector2Array> Geometry2D::exclude_polygons(const Vector<Vector2> &p_polygon_a, const Vector<Vector2> &p_polygon_b) {
-	Vector<Vector<Point2>> polys = ::Geometry2D::exclude_polygons(p_polygon_a, p_polygon_b);
-
-	TypedArray<PackedVector2Array> ret;
-
-	for (int i = 0; i < polys.size(); ++i) {
-		ret.push_back(polys[i]);
-	}
-	return ret;
-}
-
-TypedArray<PackedVector2Array> Geometry2D::clip_polyline_with_polygon(const Vector<Vector2> &p_polyline, const Vector<Vector2> &p_polygon) {
-	Vector<Vector<Point2>> polys = ::Geometry2D::clip_polyline_with_polygon(p_polyline, p_polygon);
-
-	TypedArray<PackedVector2Array> ret;
-
-	for (int i = 0; i < polys.size(); ++i) {
-		ret.push_back(polys[i]);
-	}
-	return ret;
-}
-
-TypedArray<PackedVector2Array> Geometry2D::intersect_polyline_with_polygon(const Vector<Vector2> &p_polyline, const Vector<Vector2> &p_polygon) {
-	Vector<Vector<Point2>> polys = ::Geometry2D::intersect_polyline_with_polygon(p_polyline, p_polygon);
-
-	TypedArray<PackedVector2Array> ret;
-
-	for (int i = 0; i < polys.size(); ++i) {
-		ret.push_back(polys[i]);
-	}
-	return ret;
-}
-
-TypedArray<PackedVector2Array> Geometry2D::offset_polygon(const Vector<Vector2> &p_polygon, real_t p_delta, PolyJoinType p_join_type) {
-	Vector<Vector<Point2>> polys = ::Geometry2D::offset_polygon(p_polygon, p_delta, ::Geometry2D::PolyJoinType(p_join_type));
-
-	TypedArray<PackedVector2Array> ret;
-
-	for (int i = 0; i < polys.size(); ++i) {
-		ret.push_back(polys[i]);
-	}
-	return ret;
-}
-
-TypedArray<PackedVector2Array> Geometry2D::offset_polyline(const Vector<Vector2> &p_polygon, real_t p_delta, PolyJoinType p_join_type, PolyEndType p_end_type) {
-	Vector<Vector<Point2>> polys = ::Geometry2D::offset_polyline(p_polygon, p_delta, ::Geometry2D::PolyJoinType(p_join_type), ::Geometry2D::PolyEndType(p_end_type));
-
-	TypedArray<PackedVector2Array> ret;
-
-	for (int i = 0; i < polys.size(); ++i) {
-		ret.push_back(polys[i]);
-	}
-	return ret;
-}
 
 Dictionary Geometry2D::make_atlas(const Vector<Size2> &p_rects) {
 	Dictionary ret;
@@ -1123,35 +1036,9 @@ void Geometry2D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("convex_hull", "points"), &Geometry2D::convex_hull);
 	ClassDB::bind_method(D_METHOD("decompose_polygon_in_convex", "polygon"), &Geometry2D::decompose_polygon_in_convex);
 
-	ClassDB::bind_method(D_METHOD("merge_polygons", "polygon_a", "polygon_b"), &Geometry2D::merge_polygons);
-	ClassDB::bind_method(D_METHOD("clip_polygons", "polygon_a", "polygon_b"), &Geometry2D::clip_polygons);
-	ClassDB::bind_method(D_METHOD("intersect_polygons", "polygon_a", "polygon_b"), &Geometry2D::intersect_polygons);
-	ClassDB::bind_method(D_METHOD("exclude_polygons", "polygon_a", "polygon_b"), &Geometry2D::exclude_polygons);
-
-	ClassDB::bind_method(D_METHOD("clip_polyline_with_polygon", "polyline", "polygon"), &Geometry2D::clip_polyline_with_polygon);
-	ClassDB::bind_method(D_METHOD("intersect_polyline_with_polygon", "polyline", "polygon"), &Geometry2D::intersect_polyline_with_polygon);
-
-	ClassDB::bind_method(D_METHOD("offset_polygon", "polygon", "delta", "join_type"), &Geometry2D::offset_polygon, DEFVAL(JOIN_SQUARE));
-	ClassDB::bind_method(D_METHOD("offset_polyline", "polyline", "delta", "join_type", "end_type"), &Geometry2D::offset_polyline, DEFVAL(JOIN_SQUARE), DEFVAL(END_SQUARE));
-
 	ClassDB::bind_method(D_METHOD("make_atlas", "sizes"), &Geometry2D::make_atlas);
 
 	ClassDB::bind_method(D_METHOD("bresenham_line", "from", "to"), &Geometry2D::bresenham_line);
-
-	BIND_ENUM_CONSTANT(OPERATION_UNION);
-	BIND_ENUM_CONSTANT(OPERATION_DIFFERENCE);
-	BIND_ENUM_CONSTANT(OPERATION_INTERSECTION);
-	BIND_ENUM_CONSTANT(OPERATION_XOR);
-
-	BIND_ENUM_CONSTANT(JOIN_SQUARE);
-	BIND_ENUM_CONSTANT(JOIN_ROUND);
-	BIND_ENUM_CONSTANT(JOIN_MITER);
-
-	BIND_ENUM_CONSTANT(END_POLYGON);
-	BIND_ENUM_CONSTANT(END_JOINED);
-	BIND_ENUM_CONSTANT(END_BUTT);
-	BIND_ENUM_CONSTANT(END_SQUARE);
-	BIND_ENUM_CONSTANT(END_ROUND);
 }
 
 ////// Geometry3D //////

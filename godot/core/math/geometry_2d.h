@@ -285,59 +285,6 @@ public:
 		return false;
 	}
 
-	enum PolyBooleanOperation {
-		OPERATION_UNION,
-		OPERATION_DIFFERENCE,
-		OPERATION_INTERSECTION,
-		OPERATION_XOR
-	};
-	enum PolyJoinType {
-		JOIN_SQUARE,
-		JOIN_ROUND,
-		JOIN_MITER
-	};
-	enum PolyEndType {
-		END_POLYGON,
-		END_JOINED,
-		END_BUTT,
-		END_SQUARE,
-		END_ROUND
-	};
-
-	static Vector<Vector<Point2>> merge_polygons(const Vector<Point2> &p_polygon_a, const Vector<Point2> &p_polygon_b) {
-		return _polypaths_do_operation(OPERATION_UNION, p_polygon_a, p_polygon_b);
-	}
-
-	static Vector<Vector<Point2>> clip_polygons(const Vector<Point2> &p_polygon_a, const Vector<Point2> &p_polygon_b) {
-		return _polypaths_do_operation(OPERATION_DIFFERENCE, p_polygon_a, p_polygon_b);
-	}
-
-	static Vector<Vector<Point2>> intersect_polygons(const Vector<Point2> &p_polygon_a, const Vector<Point2> &p_polygon_b) {
-		return _polypaths_do_operation(OPERATION_INTERSECTION, p_polygon_a, p_polygon_b);
-	}
-
-	static Vector<Vector<Point2>> exclude_polygons(const Vector<Point2> &p_polygon_a, const Vector<Point2> &p_polygon_b) {
-		return _polypaths_do_operation(OPERATION_XOR, p_polygon_a, p_polygon_b);
-	}
-
-	static Vector<Vector<Point2>> clip_polyline_with_polygon(const Vector<Vector2> &p_polyline, const Vector<Vector2> &p_polygon) {
-		return _polypaths_do_operation(OPERATION_DIFFERENCE, p_polyline, p_polygon, true);
-	}
-
-	static Vector<Vector<Point2>> intersect_polyline_with_polygon(const Vector<Vector2> &p_polyline, const Vector<Vector2> &p_polygon) {
-		return _polypaths_do_operation(OPERATION_INTERSECTION, p_polyline, p_polygon, true);
-	}
-
-	static Vector<Vector<Point2>> offset_polygon(const Vector<Vector2> &p_polygon, real_t p_delta, PolyJoinType p_join_type) {
-		return _polypath_offset(p_polygon, p_delta, p_join_type, END_POLYGON);
-	}
-
-	static Vector<Vector<Point2>> offset_polyline(const Vector<Vector2> &p_polygon, real_t p_delta, PolyJoinType p_join_type, PolyEndType p_end_type) {
-		ERR_FAIL_COND_V_MSG(p_end_type == END_POLYGON, Vector<Vector<Point2>>(), "Attempt to offset a polyline like a polygon (use offset_polygon instead).");
-
-		return _polypath_offset(p_polygon, p_delta, p_join_type, p_end_type);
-	}
-
 	static Vector<int> triangulate_delaunay(const Vector<Vector2> &p_points) {
 		Vector<Delaunay2D::Triangle> tr = Delaunay2D::triangulate(p_points);
 		Vector<int> triangles;
@@ -499,15 +446,10 @@ public:
 		return points;
 	}
 
-	static void merge_many_polygons(const Vector<Vector<Point2>> &p_polygons, Vector<Vector<Vector2>> &r_out_polygons, Vector<Vector<Vector2>> &r_out_holes);
 	static Vector<Vector<Vector2>> decompose_many_polygons_in_convex(const Vector<Vector<Point2>> &p_polygons, const Vector<Vector<Point2>> &p_holes);
 
 	static Vector<Vector<Vector2>> decompose_polygon_in_convex(const Vector<Point2> &p_polygon);
 
 	static void make_atlas(const Vector<Size2i> &p_rects, Vector<Point2i> &r_result, Size2i &r_size);
 	static Vector<Vector3i> partial_pack_rects(const Vector<Vector2i> &p_sizes, const Size2i &p_atlas_size);
-
-private:
-	static Vector<Vector<Point2>> _polypaths_do_operation(PolyBooleanOperation p_op, const Vector<Point2> &p_polypath_a, const Vector<Point2> &p_polypath_b, bool is_a_open = false);
-	static Vector<Vector<Point2>> _polypath_offset(const Vector<Point2> &p_polypath, real_t p_delta, PolyJoinType p_join_type, PolyEndType p_end_type);
 };

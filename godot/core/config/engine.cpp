@@ -36,7 +36,7 @@
 #include "core/license.gen.h"
 #include "core/variant/typed_array.h"
 #include "core/version.h"
-#include "servers/rendering/rendering_device.h"
+// zym: servers/* removed.
 
 void Engine::_update_time_scale() {
 	_time_scale = _user_time_scale * _game_time_scale;
@@ -85,11 +85,8 @@ double Engine::get_physics_jitter_fix() const {
 
 void Engine::set_max_fps(int p_fps) {
 	_max_fps = p_fps > 0 ? p_fps : 0;
-
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (rd) {
-		rd->_set_max_fps(_max_fps);
-	}
+	// zym: RenderingDevice lived under servers/rendering/ and has been
+	// removed alongside the rest of servers/*; nothing to forward to.
 }
 
 int Engine::get_max_fps() const {

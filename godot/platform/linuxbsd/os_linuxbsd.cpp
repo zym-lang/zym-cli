@@ -39,8 +39,7 @@
 #endif
 #include "core/profiling/profiling.h"
 #include "main/main.h"
-#include "servers/display/display_server.h"
-#include "servers/rendering/rendering_server.h"
+// zym: servers/* removed.
 
 #ifdef X11_ENABLED
 #include "x11/detect_prime_x11.h"
@@ -330,10 +329,13 @@ String OS_LinuxBSD::get_version() const {
 }
 
 Vector<String> OS_LinuxBSD::get_video_adapter_driver_info() const {
-	if (RenderingServer::get_singleton() == nullptr) {
-		return Vector<String>();
-	}
+	// zym: this used to query RenderingServer for adapter name/vendor and then
+	// filter lspci output for the matching card; servers/rendering/ has been
+	// removed, so we can no longer identify the active card and the lspci
+	// walk would be ambiguous on multi-GPU systems.
+	return Vector<String>();
 
+#if 0  // zym: original RenderingServer-driven implementation kept for reference.
 	static Vector<String> info;
 	if (!info.is_empty()) {
 		return info;
@@ -427,6 +429,8 @@ Vector<String> OS_LinuxBSD::get_video_adapter_driver_info() const {
 
 	info.push_back(driver_name);
 
+	/* zym: original body continued below; closing #if 0 follows the
+	   modinfo / version-extraction tail before the function's real `}`. */
 	String modinfo;
 	List<String> modinfo_args;
 	modinfo_args.push_back(driver_name);
@@ -450,6 +454,7 @@ Vector<String> OS_LinuxBSD::get_video_adapter_driver_info() const {
 	info.push_back(driver_version);
 
 	return info;
+#endif // zym: end #if 0 wrapping the original RenderingServer-driven body.
 }
 
 Vector<String> OS_LinuxBSD::lspci_device_filter(Vector<String> vendor_device_id_mapping, String class_suffix, String check_column, String whitelist) const {
@@ -986,7 +991,7 @@ void OS_LinuxBSD::run() {
 	while (true) {
 		GodotProfileFrameMark;
 		GodotProfileZone("OS_LinuxBSD::run");
-		DisplayServer::get_singleton()->process_events(); // get rid of pending events
+		// zym: DisplayServer removed; no display events to process.
 #ifdef SDL_ENABLED
 		if (joypad_sdl) {
 			joypad_sdl->process_events();

@@ -43,7 +43,7 @@
 #include "core/string/translation_server.h"
 #include "core/templates/rb_set.h"
 #include "core/variant/variant_parser.h"
-#include "servers/rendering/rendering_server.h"
+// zym: servers/* removed.
 
 #ifdef DEBUG_LOAD_THREADED
 #define print_lt(m_text) print_line(m_text)
@@ -951,14 +951,8 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 }
 
 bool ResourceLoader::_ensure_load_progress() {
-	// Some servers may need a new engine iteration to allow the load to progress.
-	// Since the only known one is the rendering server (in single thread mode), let's keep it simple and just sync it.
-	// This may be refactored in the future to support other servers and have less coupling.
-	if (OS::get_singleton()->is_separate_thread_rendering_enabled()) {
-		return false; // Not needed.
-	}
-	RenderingServer::get_singleton()->sync();
-	return true;
+	// zym: RenderingServer removed; nothing to sync.
+	return false;
 }
 
 void ResourceLoader::resource_changed_connect(Resource *p_source, const Callable &p_callable, uint32_t p_flags) {

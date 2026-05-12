@@ -43,7 +43,7 @@
 #include "core/variant/typed_array.h"
 #include "core/variant/variant_parser.h"
 #include "core/version.h"
-#include "servers/rendering/rendering_server.h"
+// zym: servers/* removed.
 
 #ifdef TOOLS_ENABLED
 #include "modules/modules_enabled.gen.h" // For mono.
@@ -633,9 +633,10 @@ void ProjectSettings::_convert_to_last_version(int p_from_version) {
 			}
 		}
 	} else if (p_from_version <= 6) {
-		// Check if we still have legacy boot splash (removed in 4.6), map it to new project setting, then remove legacy setting.
+		// zym: legacy boot-splash fullsize -> stretch_mode conversion relied
+		// on RenderingServer (servers/rendering/), which has been removed.
+		// The legacy setting is simply cleared if present.
 		if (has_setting("application/boot_splash/fullsize")) {
-			set_setting("application/boot_splash/stretch_mode", RenderingServer::map_scaling_option_to_stretch_mode(get_setting("application/boot_splash/fullsize")));
 			set_setting("application/boot_splash/fullsize", Variant());
 		}
 	}

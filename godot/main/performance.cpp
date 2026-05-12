@@ -31,26 +31,14 @@
 #include "performance.h"
 #include "performance.compat.inc"
 
+#include "core/io/resource.h"
 #include "core/os/os.h"
 #include "core/variant/typed_array.h"
-#include "servers/audio/audio_server.h"
-#include "servers/rendering/rendering_server.h"
 
-#ifndef NAVIGATION_2D_DISABLED
-#include "servers/navigation_2d/navigation_server_2d.h"
-#endif // NAVIGATION_2D_DISABLED
-
-#ifndef NAVIGATION_3D_DISABLED
-#include "servers/navigation_3d/navigation_server_3d.h"
-#endif // NAVIGATION_3D_DISABLED
-
-#ifndef PHYSICS_2D_DISABLED
-#include "servers/physics_2d/physics_server_2d.h"
-#endif // PHYSICS_2D_DISABLED
-
-#ifndef PHYSICS_3D_DISABLED
-#include "servers/physics_3d/physics_server_3d.h"
-#endif // PHYSICS_3D_DISABLED
+// zym: servers/* removed. All RENDER_*, PIPELINE_*, PHYSICS_*, NAVIGATION_*,
+// AUDIO_OUTPUT_LATENCY monitors used to forward to AudioServer /
+// RenderingServer / PhysicsServer{2D,3D} / NavigationServer{2D,3D}; they
+// now return 0.
 
 Performance *Performance::singleton = nullptr;
 
@@ -222,8 +210,11 @@ String Performance::get_monitor_name(Monitor p_monitor) const {
 }
 
 double Performance::get_monitor(Monitor p_monitor) const {
-	int info = 0;
-
+	// zym: with servers/* removed, only the engine-time / memory / object
+	// counters are still meaningful here. All RENDER_*, PIPELINE_*,
+	// PHYSICS_*, NAVIGATION_*, AUDIO_OUTPUT_LATENCY cases used to forward
+	// to servers (AudioServer, RenderingServer, PhysicsServer{2D,3D},
+	// NavigationServer{2D,3D}) and now fall through to 0 via the default.
 	switch (p_monitor) {
 		case TIME_FPS:
 			return Engine::get_singleton()->get_frames_per_second();
@@ -247,6 +238,11 @@ double Performance::get_monitor(Monitor p_monitor) const {
 			return _get_node_count();
 		case OBJECT_ORPHAN_NODE_COUNT:
 			return _get_orphan_node_count();
+		default:
+			return 0;
+	}
+}
+#if 0  // zym: dead server-querying tail of the original switch, kept for ref.
 		case RENDER_TOTAL_OBJECTS_IN_FRAME:
 			return RS::get_singleton()->get_rendering_info(RS::RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME);
 		case RENDER_TOTAL_PRIMITIVES_IN_FRAME:
@@ -446,6 +442,7 @@ double Performance::get_monitor(Monitor p_monitor) const {
 
 	return 0;
 }
+#endif // zym: end dead server-querying tail.
 
 Performance::MonitorType Performance::get_monitor_type(Monitor p_monitor) const {
 	ERR_FAIL_INDEX_V(p_monitor, MONITOR_MAX, MONITOR_TYPE_QUANTITY);

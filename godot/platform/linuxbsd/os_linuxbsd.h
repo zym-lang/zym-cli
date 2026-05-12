@@ -37,7 +37,8 @@
 #include "drivers/alsamidi/midi_driver_alsamidi.h"
 #include "drivers/pulseaudio/audio_driver_pulseaudio.h"
 #include "drivers/unix/os_unix.h"
-#include "servers/audio/audio_server.h"
+// zym: servers/* removed; `audio_server.h` was unreferenced from this header
+// (its presence was vestigial).
 
 #ifdef FONTCONFIG_ENABLED
 #ifdef SOWRAP_ENABLED

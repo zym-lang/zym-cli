@@ -31,7 +31,7 @@
 #include "main_timer_sync.h"
 
 #include "core/os/os.h"
-#include "servers/display/display_server.h"
+// zym: servers/* removed.
 
 void MainFrameTime::clamp_process_step(double min_process_step, double max_process_step) {
 	if (process_step < min_process_step) {
@@ -242,11 +242,10 @@ int64_t MainTimerSync::DeltaSmoother::smooth_delta(int64_t p_delta) {
 		return p_delta;
 	}
 
-	// only attempt smoothing if vsync is selected
-	DisplayServer::VSyncMode vsync_mode = DisplayServer::get_singleton()->window_get_vsync_mode(DisplayServer::MAIN_WINDOW_ID);
-	if (vsync_mode != DisplayServer::VSYNC_ENABLED) {
-		return p_delta;
-	}
+	// zym: servers/display/ has been removed; without a DisplayServer we
+	// cannot probe vsync mode, so we conservatively disable smoothing and
+	// pass the delta through unmodified.
+	return p_delta;
 
 	// Very important, ignore long deltas and pass them back unmodified.
 	// This is to deal with resuming after suspend for long periods.

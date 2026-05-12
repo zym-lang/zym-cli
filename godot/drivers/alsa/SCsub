@@ -3,8 +3,10 @@ from misc.utility.scons_hints import *
 
 Import("env")
 
+# zym: when alsa is disabled, audio_driver_alsa.cpp's `servers/audio/audio_server.h`
+# include can no longer be resolved (servers/* has been removed). Skip the .cpp
+# (and the so_wrap shim) entirely when the feature is off.
 if "alsa" in env and env["alsa"]:
     if env["use_sowrap"]:
         env.add_source_files(env.drivers_sources, "asound-so_wrap.c")
-
-env.add_source_files(env.drivers_sources, "*.cpp")
+    env.add_source_files(env.drivers_sources, "*.cpp")

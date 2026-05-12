@@ -40,7 +40,7 @@
 #include "core/math/expression.h"
 #include "core/object/script_language.h"
 #include "core/os/os.h"
-#include "servers/display/display_server.h"
+// zym: servers/* removed.
 
 class RemoteDebugger::PerformanceProfiler : public EngineProfiler {
 	Object *performance = nullptr;
@@ -624,7 +624,8 @@ void RemoteDebugger::debug(bool p_can_continue, bool p_is_error_breakpoint) {
 			OS::get_singleton()->delay_usec(10000);
 			if (Thread::is_main_thread()) {
 				// If this is a busy loop on the main thread, events still need to be processed.
-				DisplayServer::get_singleton()->force_process_and_drop_events();
+				// zym: DisplayServer lived under servers/display/ which has been
+				// removed; no events pump to drive while paused.
 			}
 		}
 	}

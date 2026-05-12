@@ -355,11 +355,10 @@ def configure_msvc(env: "SConsEnvironment"):
     env.AppendUnique(CCFLAGS=["/utf-8"])  # Force to use Unicode encoding.
     env.AppendUnique(CCFLAGS=["/bigobj"])  # Support big objects.
 
+    # zym: WASAPI / WINMIDI audio drivers removed (headless CLI, no audio).
     env.AppendUnique(
         CPPDEFINES=[
             "WINDOWS_ENABLED",
-            "WASAPI_ENABLED",
-            "WINMIDI_ENABLED",
             "TYPED_METHOD_BIND",
             "WIN32",
             ("WINVER", "0x0A00"),
@@ -745,7 +744,8 @@ def configure_mingw(env: "SConsEnvironment"):
     if get_is_ar_thin_supported(env):
         env.Append(ARFLAGS=["--thin"])
 
-    env.Append(CPPDEFINES=["WINDOWS_ENABLED", "WASAPI_ENABLED", "WINMIDI_ENABLED"])
+    # zym: WASAPI / WINMIDI audio drivers removed (headless CLI, no audio).
+    env.Append(CPPDEFINES=["WINDOWS_ENABLED"])
     env.Append(
         CPPDEFINES=[
             ("WINVER", "0x0A00"),

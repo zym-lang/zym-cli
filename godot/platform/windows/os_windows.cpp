@@ -30,13 +30,11 @@
 
 #include "os_windows.h"
 
-#include "display_server_windows.h"
 #include "lang_table.h"
 #include "windows_terminal_logger.h"
 #include "windows_utils.h"
 
-#include "core/debugger/engine_debugger.h"
-#include "core/debugger/script_debugger.h"
+// zym: core/debugger/* removed (no script/engine debugger in headless CLI).
 #include "core/io/marshalls.h"
 #include "core/os/main_loop.h"
 #include "core/profiling/profiling.h"
@@ -48,9 +46,8 @@
 #include "drivers/windows/net_socket_winsock.h"
 #include "drivers/windows/thread_windows.h"
 #include "main/main.h"
-#include "servers/audio/audio_server.h"
-#include "servers/rendering/rendering_server_default.h"
-#include "servers/text/text_server.h"
+// zym: DisplayServerWindows / AudioServer / RenderingServer / TextServer
+// removed (headless CLI). Mirrors the linuxbsd pruning in os_linuxbsd.cpp.
 
 #include <avrt.h>
 #include <bcrypt.h>

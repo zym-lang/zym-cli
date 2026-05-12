@@ -36,13 +36,10 @@
 #include "core/config/project_settings.h"
 #include "core/input/input.h"
 #include "core/os/os.h"
-#include "drivers/wasapi/audio_driver_wasapi.h"
-#include "drivers/winmidi/midi_driver_winmidi.h"
-#include "servers/audio/audio_server.h"
-
-#ifdef XAUDIO2_ENABLED
-#include "drivers/xaudio2/audio_driver_xaudio2.h"
-#endif
+// zym: audio drivers (wasapi/winmidi/xaudio2) and AudioServer removed
+// (headless CLI). WASAPI_ENABLED / WINMIDI_ENABLED / XAUDIO2_ENABLED are
+// never defined; corresponding field members and code paths below compile
+// out via their #ifdef guards.
 
 #if defined(RD_ENABLED)
 #include "servers/rendering/rendering_device.h"

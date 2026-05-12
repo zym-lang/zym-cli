@@ -17,9 +17,7 @@ from SCons import __version__ as scons_raw_version
 from SCons.Builder import ListEmitter
 
 # Explicitly resolve the helper modules, this is done to avoid clash with
-# modules of the same name that might be randomly added (e.g. someone adding
-# an `editor.py` file at the root of the module creates a clash with the editor
-# folder when doing `import editor.template_builder`)
+# modules of the same name that might be randomly added.
 
 
 def _helper_module(name, path):
@@ -60,10 +58,6 @@ import methods
 import scu_builders
 from misc.utility.color import is_stderr_color, print_error, print_info, print_warning
 from platform_methods import architecture_aliases, architectures, compatibility_platform_aliases
-
-if ARGUMENTS.get("target", "editor") == "editor":
-    _helper_module("editor.editor_builders", "editor/editor_builders.py")
-    _helper_module("editor.template_builders", "editor/template_builders.py")
 
 # Scan possible build platforms
 
@@ -151,7 +145,7 @@ opts = Variables(customs, ARGUMENTS)
 opts.Add((["platform", "p"], "Target platform (%s)" % "|".join(platform_list), ""))
 opts.Add(
     EnumVariable(
-        "target", "Compilation target", "editor", ["editor", "template_release", "template_debug"], ignorecase=2
+        "target", "Compilation target", "template_release", ["template_release", "template_debug"], ignorecase=2
     )
 )
 opts.Add(EnumVariable("arch", "CPU architecture", "auto", ["auto"] + architectures, architecture_aliases, ignorecase=2))
@@ -506,15 +500,15 @@ env.platform_exporters = platform_exporters
 env.platform_apis = platform_apis
 
 # Configuration of build targets:
-# - Editor or template
+# - Template (release or debug)
 # - Debug features (DEBUG_ENABLED code)
 # - Dev only code (DEV_ENABLED code)
 # - Optimization level
 # - Debug symbols for crash traces / debuggers
 
-env.editor_build = env["target"] == "editor"
+env.editor_build = False
 env.dev_build = env["dev_build"]
-env.debug_features = env["target"] in ["editor", "template_debug"]
+env.debug_features = env["target"] == "template_debug"
 
 if env["optimize"] == "auto":
     if env.dev_build:
@@ -527,8 +521,6 @@ if env["optimize"] == "auto":
 
 env["debug_symbols"] = methods.get_cmdline_bool("debug_symbols", env.dev_build)
 
-if env.editor_build:
-    env.Append(CPPDEFINES=["TOOLS_ENABLED"])
 
 if env.debug_features:
     # DEBUG_ENABLED enables debugging *features* and debug-only code, which is intended
@@ -562,15 +554,6 @@ if env["fast_unsafe"]:
 if env["use_precise_math_checks"]:
     env.Append(CPPDEFINES=["PRECISE_MATH_CHECKS"])
 
-if env.editor_build:
-    if env["engine_update_check"]:
-        env.Append(CPPDEFINES=["ENGINE_UPDATE_CHECK_ENABLED"])
-
-    if not env.File("#main/splash_editor.png").exists():
-        # Force disabling editor splash if missing.
-        env["no_editor_splash"] = True
-    if env["no_editor_splash"]:
-        env.Append(CPPDEFINES=["NO_EDITOR_SPLASH"])
 
 if not env["deprecated"]:
     env.Append(CPPDEFINES=["DISABLE_DEPRECATED"])
@@ -1018,25 +1001,6 @@ suffix += env.extra_suffix
 sys.path.remove(tmppath)
 sys.modules.pop("detect")
 
-if env.editor_build:
-    unsupported_opts = []
-    for disable_opt in [
-        "disable_3d",
-        "disable_advanced_gui",
-        "disable_physics_2d",
-        "disable_physics_3d",
-        "disable_navigation_2d",
-        "disable_navigation_3d",
-    ]:
-        if env[disable_opt]:
-            unsupported_opts.append(disable_opt)
-    if unsupported_opts != []:
-        print_error(
-            "The following build option(s) cannot be used for editor builds, but only for export template builds: {}.".format(
-                ", ".join(unsupported_opts)
-            )
-        )
-        Exit(255)
 
 if env["disable_3d"]:
     env.Append(CPPDEFINES=["_3D_DISABLED"])
@@ -1063,7 +1027,7 @@ if env["brotli"]:
 if not env["disable_overrides"]:
     env.Append(CPPDEFINES=["OVERRIDE_ENABLED"])
 
-if env.editor_build or not env["disable_path_overrides"]:
+if not env["disable_path_overrides"]:
     env.Append(CPPDEFINES=["OVERRIDE_PATH_ENABLED"])
 
 if not env["verbose"]:
@@ -1101,14 +1065,6 @@ for name, path in modules_detected.items():
 env.module_list = modules_enabled
 methods.sort_module_list(env)
 
-if env.editor_build:
-    # Add editor-specific dependencies to the dependency graph.
-    env.module_add_dependencies("editor", ["freetype", "regex", "svg"])
-
-    # And check if they are met.
-    if not env.module_check_dependencies("editor"):
-        print_error("Not all modules required by editor builds are enabled.")
-        Exit(255)
 
 env["PROGSUFFIX_WRAP"] = suffix + env.module_version_string + ".console" + env["PROGSUFFIX"]
 env["PROGSUFFIX"] = suffix + env.module_version_string + env["PROGSUFFIX"]
@@ -1190,8 +1146,6 @@ Export("env")
 SConscript("core/SCsub")
 SConscript("servers/SCsub")
 SConscript("scene/SCsub")
-if env.editor_build:
-    SConscript("editor/SCsub")
 SConscript("drivers/SCsub")
 
 SConscript("platform/SCsub")

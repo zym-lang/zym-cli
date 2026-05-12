@@ -14,8 +14,6 @@ env_main.add_source_files(env.main_sources, "*.cpp")
 if env["steamapi"] and env.editor_build:
     env_main.Append(CPPDEFINES=["STEAMAPI_ENABLED"])
 
-if env["tests"]:
-    env_main.Append(CPPDEFINES=["TESTS_ENABLED"])
 
 env_main.CommandNoCache(
     "#main/splash.gen.h",

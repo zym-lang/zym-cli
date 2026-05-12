@@ -8,9 +8,21 @@
 // libgodot.a (built -fno-rtti) can't satisfy; modifying Godot headers is
 // off-limits; Main::setup() pulls in stripped subsystems.
 #define protected public
+#ifdef _WIN32
+#include "platform/windows/os_windows.h"
+#else
 #include "drivers/unix/os_unix.h"
 #include "platform/linuxbsd/os_linuxbsd.h"
+#endif
 #undef protected
+
+#ifdef _WIN32
+// Match the platform OS class so the OS_Unix `finalize_core()` cast below
+// can be selected per-platform too.
+using ZymPlatformOS = OS_Windows;
+#else
+using ZymPlatformOS = OS_LinuxBSD;
+#endif
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
@@ -42,7 +54,7 @@ namespace zym::godot_host {
 namespace {
 
 // Owned singletons. OS base ctor installs itself as OS::get_singleton().
-OS_LinuxBSD*     g_os               = nullptr;
+ZymPlatformOS*   g_os               = nullptr;
 Engine*          g_engine           = nullptr;
 PackedData*      g_packed_data      = nullptr;
 ProjectSettings* g_project_settings = nullptr;
@@ -57,7 +69,13 @@ bool init() {
     }
 
     set_current_thread_safe_for_nodes(true);
-    g_os = new OS_LinuxBSD();
+#ifdef _WIN32
+    // OS_Windows requires the process HINSTANCE. There's no WinMain in a CLI
+    // build, so fetch it from the loaded image directly.
+    g_os = new ZymPlatformOS(GetModuleHandleW(nullptr));
+#else
+    g_os = new ZymPlatformOS();
+#endif
     g_os->initialize();
     CoreGlobals::print_ready = true;
     g_engine = memnew(Engine);
@@ -136,8 +154,13 @@ void shutdown() {
     zym::boot::unregister_core_types();
 
     if (g_os) {
+#ifdef _WIN32
+        // OS_Windows inherits finalize_core() directly (no OS_Unix layer).
+        g_os->finalize_core();
+#else
         // finalize_core() lives on OS_Unix.
         static_cast<OS_Unix*>(g_os)->finalize_core();
+#endif
         delete g_os;
         g_os = nullptr;
     }

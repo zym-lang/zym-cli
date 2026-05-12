@@ -1,8 +1,17 @@
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Tiny")
 
-set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-exceptions")
-set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer")
-set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
+if(WIN32)
+    # MinGW-w64 GCC doesn't ship the asan/ubsan runtimes, so Debug drops the
+    # sanitizer flags on Windows. Everything else (-g -O0, -fno-exceptions,
+    # frame pointers) stays the same.
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fno-omit-frame-pointer -fno-exceptions")
+    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "")
+else()
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-exceptions")
+    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
+endif()
 
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
 set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
@@ -153,7 +162,15 @@ endif()
 # ZYM_GODOT_PLATFORM: selects script/artifact. Supported: linux_x86_64.
 # Plain (non-cache) vars - this file is the source of truth.
 set(ZYM_PRECOMPILE_GODOT OFF)
-set(ZYM_GODOT_PLATFORM   "linux_x86_64")
+# Auto-select platform from the CMake toolchain. Override by setting
+# ZYM_GODOT_PLATFORM before this point if cross-targeting something else.
+if(NOT DEFINED ZYM_GODOT_PLATFORM)
+    if(WIN32)
+        set(ZYM_GODOT_PLATFORM "windows_x86_64")
+    else()
+        set(ZYM_GODOT_PLATFORM "linux_x86_64")
+    endif()
+endif()
 
 set(ZYM_GODOT_DIR     "${CMAKE_SOURCE_DIR}/godot")
 set(ZYM_GODOT_BIN_DIR "${ZYM_GODOT_DIR}/bin")
@@ -161,6 +178,9 @@ set(ZYM_GODOT_BIN_DIR "${ZYM_GODOT_DIR}/bin")
 if(ZYM_GODOT_PLATFORM STREQUAL "linux_x86_64")
     set(ZYM_GODOT_LIB_FILE   "libgodot.linuxbsd.template_release.x86_64.a")
     set(ZYM_GODOT_BUILD_SH   "${CMAKE_SOURCE_DIR}/scripts/build_godot_linux_x86_64.sh")
+elseif(ZYM_GODOT_PLATFORM STREQUAL "windows_x86_64")
+    set(ZYM_GODOT_LIB_FILE   "libgodot.windows.template_release.x86_64.a")
+    set(ZYM_GODOT_BUILD_SH   "${CMAKE_SOURCE_DIR}/scripts/build_godot_windows_x86_64.sh")
 else()
     message(FATAL_ERROR "ZYM_GODOT_PLATFORM='${ZYM_GODOT_PLATFORM}' is not supported yet.")
 endif()
@@ -172,6 +192,8 @@ set(ZYM_GODOT_LIB_PATH "${ZYM_GODOT_BIN_DIR}/${ZYM_GODOT_LIB_FILE}")
 # (core last so forward-refs resolve).
 if(ZYM_GODOT_PLATFORM STREQUAL "linux_x86_64")
     set(ZYM_GODOT_LIB_SUFFIX "linuxbsd.template_release.x86_64")
+elseif(ZYM_GODOT_PLATFORM STREQUAL "windows_x86_64")
+    set(ZYM_GODOT_LIB_SUFFIX "windows.template_release.x86_64")
 endif()
 set(ZYM_GODOT_SUBLIBS
         "${ZYM_GODOT_BIN_DIR}/obj/platform/libplatform.${ZYM_GODOT_LIB_SUFFIX}.a"
@@ -206,9 +228,14 @@ endif()
 # --whole-archive is required so ClassDB static self-registrations survive
 # dead-code elimination.
 add_dependencies(zym godot_static_lib)
+if(WIN32)
+    set(ZYM_GODOT_PLATFORM_INCLUDE "${ZYM_GODOT_DIR}/platform/windows")
+else()
+    set(ZYM_GODOT_PLATFORM_INCLUDE "${ZYM_GODOT_DIR}/platform/linuxbsd")
+endif()
 target_include_directories(zym PRIVATE
         "${ZYM_GODOT_DIR}"
-        "${ZYM_GODOT_DIR}/platform/linuxbsd"
+        "${ZYM_GODOT_PLATFORM_INCLUDE}"
         # mbedtls thirdparty headers (`mbedtls/*.h`, `psa/*.h`) are needed by
         # `src/boot/register_core.cpp` to bring up the mbedtls-backed crypto
         # factories without going through the engine's `GLOBAL_DEF`-using
@@ -219,6 +246,15 @@ target_include_directories(zym PRIVATE
         # which are themselves transitively included by `src/natives/enet.cpp`.
         "${ZYM_GODOT_DIR}/thirdparty/enet"
 )
+if(WIN32)
+    # On Linux we'd just use the system zlib via /usr/include, but the
+    # mingw-w64 sysroot has no zlib.h, so point at godot's bundled copy.
+    # `core/io/compression.h` (transitively included by `core/io/file_access.h`)
+    # does `#include <zlib.h>` unconditionally.
+    target_include_directories(zym PRIVATE
+            "${ZYM_GODOT_DIR}/thirdparty/zlib"
+    )
+endif()
 # Must mirror the SCons CPPDEFINES that built libgodot.a or the header
 # virtual surface drifts and overrides fail to match. See godot/SConstruct.
 target_compile_definitions(zym PRIVATE
@@ -241,22 +277,60 @@ target_compile_definitions(zym PRIVATE
         NAVIGATION_3D_DISABLED
         XR_DISABLED
         THREADS_ENABLED
-        # From godot/platform/linuxbsd/detect.py (unconditional for linuxbsd):
-        LINUXBSD_ENABLED
-        UNIX_ENABLED
-        _FILE_OFFSET_BITS=64
 )
+if(WIN32)
+    # From godot/platform/windows/detect.py (mingw path).
+    target_compile_definitions(zym PRIVATE
+            WINDOWS_ENABLED
+            WINVER=0x0A00
+            _WIN32_WINNT=0x0A00
+            NOMINMAX
+            _WIN64
+            MINGW_ENABLED
+            MINGW_HAS_SECURE_API=1
+    )
+else()
+    # From godot/platform/linuxbsd/detect.py (unconditional for linuxbsd):
+    target_compile_definitions(zym PRIVATE
+            LINUXBSD_ENABLED
+            UNIX_ENABLED
+            _FILE_OFFSET_BITS=64
+    )
+endif()
 # -flto: required because libgodot.a was built with `lto=full` (stores GCC
 # LTO IR, not native objects). Full (single-partition) in Release for max
 # cross-module inlining/DCE; auto (parallel) elsewhere for faster links.
 # -fno-pie/-no-pie: libgodot.a is non-PIC (static_library omits -fPIC); match
-# it to avoid DT_TEXTREL in a PIE. Remove if Godot is rebuilt with -fPIC.
+# it to avoid DT_TEXTREL in a PIE. PE/COFF (mingw) has no PIE/TEXTREL concept,
+# so the flags are linux-only -- including them on mingw triggers
+# `-fno-pie ignored for target (all code is position independent)` chatter
+# at best, or link errors against missing crt objects at worst.
 target_compile_options(zym PRIVATE
-        $<IF:$<CONFIG:Release>,-flto,-flto=auto>
-        -fno-pie)
+        $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
 target_link_options(zym PRIVATE
-        $<IF:$<CONFIG:Release>,-flto,-flto=auto>
-        -no-pie)
+        $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+if(NOT WIN32)
+    target_compile_options(zym PRIVATE -fno-pie)
+    target_link_options(zym PRIVATE -no-pie)
+endif()
+if(WIN32)
+    # CLI binary: force the console subsystem so stdio works when launched
+    # from cmd.exe / PowerShell / a pipe. Without this, mingw defaults to
+    # whatever the spec file picks (usually console for non-GUI, but be
+    # explicit).
+    target_link_options(zym PRIVATE -mconsole)
+    # MinGW-w64's posix threading model makes libstdc++ depend on
+    # libwinpthread-1.dll at runtime. -static-libstdc++/-static-libgcc do
+    # NOT cover winpthread, so without this the produced zym.exe fails to
+    # start under wine / on bare Windows with:
+    #   err:module:import_dll Library libwinpthread-1.dll ... not found
+    # `-static` forces every remaining MinGW runtime (winpthread, and any
+    # other implicit libs) to be linked statically, producing a fully
+    # self-contained PE. Safe because we have no intentional DLL deps
+    # other than the Win32 system libs (ws2_32, kernel32, ...), which are
+    # import libraries and unaffected by -static.
+    target_link_options(zym PRIVATE -static)
+endif()
 
 # Identical Code Folding via gold. Folds bytewise-identical functions emitted
 # as separate symbols -- in this build that's the long tail of vtable-pinned
@@ -277,23 +351,110 @@ target_link_options(zym PRIVATE
 # crt1.o referencing a `main` that lives only in IR). Plain BFD ld would
 # work but doesn't implement ICF, so gold is the only linker that gives us
 # both the GCC LTO pipeline and `--icf=safe`.
-find_program(ZYM_GOLD_EXECUTABLE NAMES ld.gold gold)
-if(ZYM_GOLD_EXECUTABLE)
-    message(STATUS ">> ICF: using ${ZYM_GOLD_EXECUTABLE} (-fuse-ld=gold -Wl,--icf=safe)")
-    target_link_options(zym PRIVATE
-            -fuse-ld=gold
-            "-Wl,--icf=safe"
-    )
+# gold is ELF-only -- it cannot emit PE/COFF, so on mingw we just stay on the
+# default BFD ld (which on mingw-w64 does understand the GCC LTO plugin) and
+# accept losing --icf=safe. The Linux rationale below still applies.
+if(WIN32)
+    message(STATUS ">> ICF: WIN32 build, ld.gold is ELF-only; using default mingw ld (no --icf=safe)")
 else()
-    message(STATUS ">> ICF: no ld.gold found; skipping --icf=safe (BFD ld has no ICF, lld is incompatible with GCC LTO)")
+    find_program(ZYM_GOLD_EXECUTABLE NAMES ld.gold gold)
+    if(ZYM_GOLD_EXECUTABLE)
+        message(STATUS ">> ICF: using ${ZYM_GOLD_EXECUTABLE} (-fuse-ld=gold -Wl,--icf=safe)")
+        target_link_options(zym PRIVATE
+                -fuse-ld=gold
+                "-Wl,--icf=safe"
+        )
+    else()
+        message(STATUS ">> ICF: no ld.gold found; skipping --icf=safe (BFD ld has no ICF, lld is incompatible with GCC LTO)")
+    endif()
 endif()
 
+# Platform system libraries: matches the LIBS list godot's SCons detect.py
+# appends for each platform (godot/platform/<plat>/detect.py). The order
+# matters on mingw because winsock / crypto interdepend.
+if(WIN32)
+    # mingw-w64 system libs mirroring godot/platform/windows/detect.py's
+    # `LIBS=[...]` block. Extras over the SCons list:
+    #   - `hid` for `HidD_*` / `HidP_*` (controller probing in os_windows.cpp)
+    #   - `dwrite` for `DWriteCreateFactory` (font path in os_windows.cpp)
+    # The Linux build doesn't need an equivalent because the headless CLI
+    # never pulls those vtables in, but on Windows os_windows.cpp wires them
+    # unconditionally.
+    set(ZYM_PLATFORM_SYSLIBS
+            mingw32
+            ws2_32 wsock32
+            iphlpapi
+            kernel32 user32 gdi32 ole32 oleaut32 advapi32
+            shell32 shlwapi shcore
+            bcrypt crypt32
+            dwmapi dwrite imm32
+            hid
+            uuid
+            ntdll
+            winmm
+    )
+else()
+    set(ZYM_PLATFORM_SYSLIBS pthread dl m)
+endif()
+# On Windows the platform symbols we actually need (`OS_Windows::*`,
+# `FileAccessWindows`, the IAT hooks, etc.) live inside the top-level
+# `libgodot.windows.<suffix>.a`, NOT inside `libplatform.windows.<suffix>.a`
+# (which only carries the cross-platform `api.o` stubs for android/ios/web/
+# visionos and `register_platform_apis.gen.o`). The catch is that the same
+# archive also contains `libgodot_windows.o`, which references the real
+# `Main::setup` / `Main::cleanup` -- zym replaces both with its own boot
+# (src/godot_host.cpp + src/boot/register_core.cpp) and never links
+# `main/main.cpp`, so `--whole-archive` over the unfiltered libgodot leaves
+# those refs undefined. To avoid editing `godot/` we rebuild a filtered copy
+# of `libgodot.windows.a` at configure time with `libgodot_windows.o`
+# extracted, then link the filtered archive instead.
+#
+# Linux doesn't need any of this: SCons there doesn't emit the top-level
+# `libgodot.linuxbsd.a` at all (the corresponding `libgodot_linuxbsd.o`
+# lives elsewhere or is suppressed), so the original Linux link line just
+# names a missing path and BFD ld silently no-ops on it. Keep that
+# behaviour by gating purely on `WIN32`.
+if(WIN32)
+    set(ZYM_GODOT_FILTERED_LIB "${CMAKE_BINARY_DIR}/libgodot_filtered.a")
+    set(ZYM_GODOT_FILTERED_DIR "${CMAKE_BINARY_DIR}/godot_filtered_objs")
+    # SCons emits `libgodot.windows.a` as a *thin* archive (just paths into
+    # `bin/obj/...`, no embedded bytes), so `ar x` refuses it. Instead, ask
+    # `ar t` for the member list, drop `libgodot_windows.o`, and build a new
+    # thin archive (`ar qcS`) from the remaining paths. The actual work
+    # lives in a generated shell script so we don't have to fight ninja's
+    # double-`$$` quoting rules for `$()` / `$VAR`.
+    set(ZYM_GODOT_FILTER_SCRIPT "${CMAKE_BINARY_DIR}/zym_filter_libgodot.sh")
+    file(WRITE "${ZYM_GODOT_FILTER_SCRIPT}"
+"#!/usr/bin/env bash
+set -euo pipefail
+AR='${CMAKE_AR}'
+RANLIB='${CMAKE_RANLIB}'
+IN='${ZYM_GODOT_LIB_PATH}'
+OUT='${ZYM_GODOT_FILTERED_LIB}'
+rm -f \"\$OUT\"
+mapfile -t members < <(\"\$AR\" t \"\$IN\" | grep -v '/libgodot_windows\\.[^/]*\\.o$')
+\"\$AR\" qcS \"\$OUT\" \"\${members[@]}\"
+\"\$RANLIB\" \"\$OUT\" 2>/dev/null || true
+")
+    add_custom_command(
+            OUTPUT "${ZYM_GODOT_FILTERED_LIB}"
+            COMMAND bash "${ZYM_GODOT_FILTER_SCRIPT}"
+            DEPENDS "${ZYM_GODOT_LIB_PATH}" "${ZYM_GODOT_FILTER_SCRIPT}"
+            COMMENT "Rebuilding libgodot.windows.a (thin) without libgodot_windows.o (Main::setup/cleanup entry-point)"
+            VERBATIM
+    )
+    add_custom_target(zym_godot_filtered DEPENDS "${ZYM_GODOT_FILTERED_LIB}")
+    add_dependencies(zym zym_godot_filtered)
+    set(ZYM_GODOT_TOP_ARCHIVE "${ZYM_GODOT_FILTERED_LIB}")
+else()
+    set(ZYM_GODOT_TOP_ARCHIVE "${ZYM_GODOT_LIB_PATH}")
+endif()
 target_link_libraries(zym PRIVATE
         -Wl,--whole-archive
-        "${ZYM_GODOT_LIB_PATH}"
+        "${ZYM_GODOT_TOP_ARCHIVE}"
         ${ZYM_GODOT_SUBLIBS}
         -Wl,--no-whole-archive
-        pthread dl m
+        ${ZYM_PLATFORM_SYSLIBS}
 )
 
 # Post-build compression via UPX. Runs for Release and Tiny builds, gated on

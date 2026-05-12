@@ -411,7 +411,12 @@ if(WIN32)
     # mingw-w64 system libs mirroring godot/platform/windows/detect.py's
     # `LIBS=[...]` block. Extras over the SCons list:
     #   - `hid` for `HidD_*` / `HidP_*` (controller probing in os_windows.cpp)
-    #   - `dwrite` for `DWriteCreateFactory` (font path in os_windows.cpp)
+    # zym: `dwrite` removed -- the DWrite system-font enumeration block in
+    # `OS_Windows::initialize()` has been stripped (see os_windows.cpp around
+    # line 298). The headless CLI never reaches `get_system_fonts` /
+    # `get_system_font_path*`, so dropping the import library both shaves
+    # the IAT and removes the ~300 ms - 2 s `GetSystemFontCollection()`
+    # stall on first boot (much worse under Wine via the fontconfig bridge).
     # The Linux build doesn't need an equivalent because the headless CLI
     # never pulls those vtables in, but on Windows os_windows.cpp wires them
     # unconditionally.
@@ -422,7 +427,7 @@ if(WIN32)
             kernel32 user32 gdi32 ole32 oleaut32 advapi32
             shell32 shlwapi shcore
             bcrypt crypt32
-            dwmapi dwrite imm32
+            dwmapi imm32
             hid
             uuid
             ntdll

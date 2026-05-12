@@ -295,25 +295,17 @@ void OS_Windows::initialize() {
 	IPWindows::make_default();
 	main_loop = nullptr;
 
-	HRESULT hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown **>(&dwrite_factory));
-	if (SUCCEEDED(hr)) {
-		hr = dwrite_factory->GetSystemFontCollection(&font_collection, false);
-		if (SUCCEEDED(hr)) {
-			dwrite_init = true;
-			hr = dwrite_factory->QueryInterface(&dwrite_factory2);
-			if (SUCCEEDED(hr)) {
-				hr = dwrite_factory2->GetSystemFontFallback(&system_font_fallback);
-				if (SUCCEEDED(hr)) {
-					dwrite2_init = true;
-				}
-			}
-		}
-	}
-	if (!dwrite_init) {
-		print_verbose("Unable to load IDWriteFactory, system font support is disabled.");
-	} else if (!dwrite2_init) {
-		print_verbose("Unable to load IDWriteFactory2, automatic system font fallback is disabled.");
-	}
+	// zym: DWrite system-font enumeration removed. GetSystemFontCollection()
+	// walks every installed face synchronously on first call (300 ms - 2 s on
+	// real Windows, often much more under Wine because of the fontconfig
+	// bridge), and the headless CLI never reaches get_system_fonts /
+	// get_system_font_path*. Leaving dwrite_factory / font_collection /
+	// system_font_fallback null is safe: every consumer of these pointers
+	// short-circuits on `if (!dwrite_init)`. finalize() Release-on-null
+	// guards already handle the null path. `-ldwrite` is also dropped from
+	// ZYM_PLATFORM_SYSLIBS in the top-level CMakeLists.txt.
+	// (Original block: DWriteCreateFactory + GetSystemFontCollection +
+	//  QueryInterface(IDWriteFactory2) + GetSystemFontFallback.)
 
 	FileAccessWindows::initialize();
 }

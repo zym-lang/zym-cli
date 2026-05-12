@@ -436,7 +436,18 @@ if(WIN32)
             mingw32
             ws2_32 wsock32
             iphlpapi
-            kernel32 user32 gdi32 ole32 oleaut32 advapi32
+            # zym: `ole32` and `oleaut32` removed. They were pulled in by
+            # `CoInitializeEx(COINIT_APARTMENTTHREADED)` in
+            # `OS_Windows::OS_Windows()` and by the WMI-based
+            # `_get_video_adapter_driver_info_wmi` (`CoCreateInstance` +
+            # `SysAllocString` / `VariantInit` / `VariantClear`). Both call
+            # sites have been removed/stubbed (see
+            # `godot/platform/windows/os_windows.cpp`), so neither DLL is
+            # referenced from the link graph any more and both drop out of
+            # zym.exe's import table. Saves ~30-80 ms of cold-start on
+            # Windows / Wine (two fewer DLLs to map + their DllMain +
+            # ole32's OXID resolver thread init).
+            kernel32 user32 gdi32 advapi32
             shell32 shlwapi shcore
             bcrypt crypt32
             dwmapi imm32

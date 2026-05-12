@@ -653,94 +653,20 @@ Vector<String> OS_Windows::_get_video_adapter_driver_info_reg(const String &p_na
 }
 
 Vector<String> OS_Windows::_get_video_adapter_driver_info_wmi(const String &p_name) const {
-	Vector<String> info;
-
-	REFCLSID clsid = CLSID_WbemLocator; // Unmarshaler CLSID
-	REFIID uuid = IID_IWbemLocator; // Interface UUID
-	IWbemLocator *wbemLocator = nullptr; // to get the services
-	IWbemServices *wbemServices = nullptr; // to get the class
-	IEnumWbemClassObject *iter = nullptr;
-	IWbemClassObject *pnpSDriverObject[1]; // contains driver name, version, etc.
-	String driver_name;
-	String driver_version;
-
-	HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, uuid, (LPVOID *)&wbemLocator);
-	if (hr != S_OK) {
-		return Vector<String>();
-	}
-	BSTR resource_name = SysAllocString(L"root\\CIMV2");
-	hr = wbemLocator->ConnectServer(resource_name, nullptr, nullptr, nullptr, 0, nullptr, nullptr, &wbemServices);
-	SysFreeString(resource_name);
-
-	SAFE_RELEASE(wbemLocator) // from now on, use `wbemServices`
-	if (hr != S_OK) {
-		SAFE_RELEASE(wbemServices)
-		return Vector<String>();
-	}
-
-	const String gpu_device_class_query = vformat("SELECT * FROM Win32_PnPSignedDriver WHERE DeviceName = \"%s\"", p_name);
-	BSTR query = SysAllocString((const WCHAR *)gpu_device_class_query.utf16().get_data());
-	BSTR query_lang = SysAllocString(L"WQL");
-	hr = wbemServices->ExecQuery(query_lang, query, WBEM_FLAG_RETURN_IMMEDIATELY | WBEM_FLAG_FORWARD_ONLY, nullptr, &iter);
-	SysFreeString(query_lang);
-	SysFreeString(query);
-	if (hr == S_OK) {
-		ULONG resultCount;
-		hr = iter->Next(5000, 1, pnpSDriverObject, &resultCount); // Get exactly 1. Wait max 5 seconds.
-
-		if (hr == S_OK && resultCount > 0) {
-			VARIANT dn;
-			VariantInit(&dn);
-
-			BSTR object_name = SysAllocString(L"DriverName");
-			hr = pnpSDriverObject[0]->Get(object_name, 0, &dn, nullptr, nullptr);
-			SysFreeString(object_name);
-			if (hr == S_OK && dn.vt == VT_BSTR) {
-				String d_name = String(V_BSTR(&dn));
-				if (d_name.is_empty()) {
-					object_name = SysAllocString(L"DriverProviderName");
-					hr = pnpSDriverObject[0]->Get(object_name, 0, &dn, nullptr, nullptr);
-					SysFreeString(object_name);
-					if (hr == S_OK) {
-						driver_name = String(V_BSTR(&dn));
-					}
-				} else {
-					driver_name = d_name;
-				}
-			} else {
-				object_name = SysAllocString(L"DriverProviderName");
-				hr = pnpSDriverObject[0]->Get(object_name, 0, &dn, nullptr, nullptr);
-				SysFreeString(object_name);
-				if (hr == S_OK && dn.vt == VT_BSTR) {
-					driver_name = String(V_BSTR(&dn));
-				} else {
-					driver_name = "Unknown";
-				}
-			}
-
-			VARIANT dv;
-			VariantInit(&dv);
-			object_name = SysAllocString(L"DriverVersion");
-			hr = pnpSDriverObject[0]->Get(object_name, 0, &dv, nullptr, nullptr);
-			SysFreeString(object_name);
-			if (hr == S_OK && dv.vt == VT_BSTR) {
-				driver_version = String(V_BSTR(&dv));
-			} else {
-				driver_version = "Unknown";
-			}
-			for (ULONG i = 0; i < resultCount; i++) {
-				SAFE_RELEASE(pnpSDriverObject[i])
-			}
-		}
-	}
-
-	SAFE_RELEASE(wbemServices)
-	SAFE_RELEASE(iter)
-
-	info.push_back(driver_name);
-	info.push_back(driver_version);
-
-	return info;
+	// zym: WMI-based driver-info probe stubbed out. The original
+	// implementation called `CoCreateInstance(CLSID_WbemLocator, ...)`
+	// + `SysAllocString` / `VariantInit` / `VariantClear` / `SysFreeString`,
+	// which pulls `ole32.dll` and `oleaut32.dll` into zym.exe's import
+	// table. The only caller of this helper is
+	// `OS_Windows::get_video_adapter_driver_info()`, which itself is
+	// stubbed (`return Vector<String>();`) because the headless CLI has
+	// no RenderingServer. Replacing this body with an empty return drops
+	// the last references to `ole32` / `oleaut32` from the link graph,
+	// so both DLLs disappear from the IAT (see ZYM_PLATFORM_SYSLIBS in
+	// CMakeLists.txt). The original WMI implementation is preserved in
+	// git history.
+	(void)p_name;
+	return Vector<String>();
 }
 
 Vector<String> OS_Windows::get_video_adapter_driver_info() const {
@@ -2801,7 +2727,17 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 	SetConsoleOutputCP(CP_UTF8);
 	SetConsoleCP(CP_UTF8);
 
-	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	// zym: `CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)` removed.
+	// The headless CLI never creates a COM object on the boot path
+	// (no DisplayServer, no TTS, no WMI driver-info probe -- see
+	// `_get_video_adapter_driver_info_wmi` below, which is also stubbed
+	// out). Initializing a COM apartment here pulls in `ole32.dll` (and
+	// transitively `oleaut32.dll`), runs the OLE32 DllMain, sets up the
+	// OXID resolver thread, and is a measurable boot cost on Windows /
+	// Wine (~30-100 ms cold). With this call gone and the WMI probe
+	// stubbed, both `ole32` and `oleaut32` drop out of zym.exe's import
+	// table entirely (see `ZYM_PLATFORM_SYSLIBS` in CMakeLists.txt).
+	// (Original: CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);)
 
 #ifdef WASAPI_ENABLED
 	AudioDriverManager::add_driver(&driver_wasapi);
@@ -2832,5 +2768,7 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 }
 
 OS_Windows::~OS_Windows() {
-	CoUninitialize();
+	// zym: `CoUninitialize()` removed -- pairs with the removed
+	// `CoInitializeEx` in the ctor. No COM apartment was initialized
+	// for this thread, so there is nothing to uninitialize.
 }

@@ -706,7 +706,19 @@ def configure_mingw(env: "SConsEnvironment"):
             env.Append(CCFLAGS=["-flto"])
             env.Append(LINKFLAGS=["-flto"])
         if not env["use_llvm"]:
-            # For mingw-gcc LTO, disable linker plugin and enable whole program to work around GH-102867.
+            # zym: We tried switching from the upstream workaround
+            # (`-fno-use-linker-plugin -fwhole-program`) to
+            # `-fuse-linker-plugin` to enable whole-program LTO DCE on
+            # COFF (would have saved ~1.7 MB of dispatch-table /
+            # StringName-hash bloat). However, Debian/Ubuntu's
+            # `x86_64-w64-mingw32-gcc-ar` is broken: the cross-prefixed
+            # gcc-ar wrapper cannot locate or load `liblto_plugin.so`
+            # even when explicitly given `--plugin=...`, so slim-LTO
+            # objects end up in archives with no usable symtab (only
+            # `__gnu_lto_slim` markers), and the final link fails with
+            # thousands of undefined references. Until that toolchain
+            # bug is fixed, we have to stay on the upstream workaround
+            # (fat LTO objects, no plugin), matching what Godot ships.
             env.Append(CCFLAGS=["-fno-use-linker-plugin", "-fwhole-program"])
             env.Append(LINKFLAGS=["-fno-use-linker-plugin", "-fwhole-program"])
 

@@ -89,55 +89,6 @@ ZYM_VARIANT_STRIP_SHIM="${ZYM_SHIM_DIR}/zym_variant_strip.h"
 ZYM_CCFLAGS="-fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
 ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR} -include ${ZYM_VARIANT_STRIP_SHIM} -fno-asynchronous-unwind-tables -fno-unwind-tables"
 
-# --- Size lever: override Godot's mingw-gcc LTO workaround ----------------
-#
-# godot/platform/windows/detect.py (around L708-L711) unconditionally
-# appends the following to both CCFLAGS and LINKFLAGS when building with
-# mingw-gcc + LTO:
-#
-#     -fno-use-linker-plugin -fwhole-program
-#
-# The comment in detect.py cites GH-102867 and admits the workaround is
-# kept "for posterity" even though the underlying mingw-gcc LTO bug
-# appears fixed on modern toolchains. The cost of that workaround on a
-# headless / no-graphics build like ours is enormous (~1.7 MB of
-# .data/.rdata in the final PE):
-#
-#   - `-fno-use-linker-plugin` makes GCC emit FAT LTO objects: each .o
-#     contains both native code/data AND the GCC LTO IR. The mingw BFD
-#     linker, without the LTO plugin, links the NATIVE half. That means
-#     huge dispatch tables like `operator_evaluator_table`,
-#     `ptr_operator_evaluator_table`, `validated_operator_evaluator_table`
-#     (variant_op.cpp), `StringName::Table::table` (a 65536-entry hash
-#     table that on Linux lands in .bss = zero file bytes, but on COFF
-#     becomes 512 KB of initialized .data), and `_certs_compressed`
-#     (128 KB CA blob) all ship in the PE even though our
-#     zym_variant_strip.h shim leaves the tables 95% empty. On Linux
-#     every Godot .o is a 32-byte LTO IR carrier and these tables only
-#     materialize at the final whole-program link, where LTO data-DCE
-#     deletes them outright.
-#
-#   - `-fwhole-program` marks every non-`main` symbol as effectively
-#     `static`, which only buys anything if the linker plugin is active
-#     -- without it, it's a no-op (and worse, masks symbols the plugin
-#     could otherwise have de-duplicated across TUs).
-#
-# To override without patching godot/, append `-fuse-linker-plugin` to
-# both CCFLAGS and LINKFLAGS via SCons. GCC honours the *last* such flag
-# on the command line, so the trailing `-fuse-linker-plugin` cancels
-# detect.py's earlier `-fno-use-linker-plugin`. (We cannot cancel
-# `-fwhole-program` the same way -- there's no `-fno-whole-program` --
-# but with the plugin re-enabled it is effectively harmless: the plugin
-# does its own cross-TU visibility analysis.)
-#
-# Requires a mingw-w64 GCC whose `ld.bfd` ships `liblto_plugin.so`
-# (true on Debian / Ubuntu mingw-w64 packages from ~2022 onwards). If
-# the resulting libgodot.windows.a fails to link, or you hit GH-102867
-# again, drop this flag and accept the size penalty.
-ZYM_CCFLAGS+=" -fuse-linker-plugin"
-ZYM_CXXFLAGS+=" -fuse-linker-plugin"
-ZYM_LINKFLAGS="-fuse-linker-plugin"
-
 exec scons \
     platform=windows \
     target=template_release \
@@ -158,5 +109,4 @@ exec scons \
     build_profile="../scripts/zym_profile.gdbuild" \
     ccflags="${ZYM_CCFLAGS}" \
     cxxflags="${ZYM_CXXFLAGS}" \
-    linkflags="${ZYM_LINKFLAGS}" \
     "$@"

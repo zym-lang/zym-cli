@@ -450,10 +450,10 @@ else()
     set(ZYM_GODOT_TOP_ARCHIVE "${ZYM_GODOT_LIB_PATH}")
 endif()
 target_link_libraries(zym PRIVATE
-        -Wl,--whole-archive
+        #-Wl,--whole-archive
         "${ZYM_GODOT_TOP_ARCHIVE}"
         ${ZYM_GODOT_SUBLIBS}
-        -Wl,--no-whole-archive
+        #-Wl,--no-whole-archive
         ${ZYM_PLATFORM_SYSLIBS}
 )
 

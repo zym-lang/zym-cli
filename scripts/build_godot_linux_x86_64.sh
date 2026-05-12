@@ -98,31 +98,6 @@ exec scons \
     optimize=size_extra \
     production=yes \
     \
-    modules_enabled_by_default=no \
-    \
-    vulkan=no \
-    opengl3=no \
-    x11=no \
-    wayland=no \
-    libdecor=no \
-    touch=no \
-    alsa=no \
-    pulseaudio=no \
-    dbus=no \
-    speechd=no \
-    fontconfig=no \
-    udev=no \
-    sdl=no \
-    accesskit=no \
-    \
-    disable_3d=yes \
-    disable_advanced_gui=yes \
-    disable_xr=yes \
-    disable_physics_2d=yes \
-    disable_physics_3d=yes \
-    disable_navigation_2d=yes \
-    disable_navigation_3d=yes \
-    \
     debug_symbols=no \
     dev_build=no \
     tests=no \
@@ -130,10 +105,6 @@ exec scons \
     minizip=no \
     brotli=yes \
     disable_exceptions=yes \
-    \
-    module_regex_enabled=yes \
-    module_mbedtls_enabled=yes \
-    module_enet_enabled=yes \
     \
     build_profile="../scripts/zym_profile.gdbuild" \
     ccflags="${ZYM_CCFLAGS}" \

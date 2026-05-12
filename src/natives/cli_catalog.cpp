@@ -52,6 +52,7 @@ void install_udp    (ZymVM* vm) { zym_defineGlobal(vm, "UDP",     nativeUdp_crea
 void install_tls    (ZymVM* vm) { zym_defineGlobal(vm, "TLS",     nativeTls_create(vm));     }
 void install_dtls   (ZymVM* vm) { zym_defineGlobal(vm, "DTLS",    nativeDtls_create(vm));    }
 void install_enet   (ZymVM* vm) { zym_defineGlobal(vm, "ENet",    nativeEnet_create(vm));    }
+void install_websocket(ZymVM* vm) { zym_defineGlobal(vm, "WebSocket", nativeWebSocket_create(vm)); }
 void install_aes    (ZymVM* vm) { zym_defineGlobal(vm, "AES",     nativeAes_create(vm));     }
 void install_sockets(ZymVM* vm) { zym_defineGlobal(vm, "Sockets", nativeSockets_create(vm)); }
 void install_pack   (ZymVM* vm) { zym_defineGlobal(vm, "Pack",    nativePack_create(vm));    }
@@ -66,7 +67,7 @@ void install_pack   (ZymVM* vm) { zym_defineGlobal(vm, "Pack",    nativePack_cre
 // as the new grantable entry. `Buffer` is intentionally absent
 // (auto-installed). When a new module is added, append it to this
 // table and to the corresponding declaration in natives.hpp.
-constexpr std::array<CatalogEntry, 22> kCatalog = {{
+constexpr std::array<CatalogEntry, 23> kCatalog = {{
     {"print",   install_print},
     {"Time",    install_time},
     {"File",    install_file},
@@ -86,6 +87,7 @@ constexpr std::array<CatalogEntry, 22> kCatalog = {{
     {"TLS",     install_tls},
     {"DTLS",    install_dtls},
     {"ENet",    install_enet},
+    {"WebSocket", install_websocket},
     {"AES",     install_aes},
     {"Sockets", install_sockets},
     {"Pack",    install_pack},

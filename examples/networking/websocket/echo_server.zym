@@ -1,0 +1,151 @@
+// echo_server.zym
+//
+// What this does:    Listens for WebSocket clients and echoes every
+//                    frame back to its sender, preserving text-vs-binary.
+//                    Multiplexes all connected clients with a single
+//                    Sockets.waitAny loop. Stays running until Ctrl-C.
+// How to run it:     zym examples/networking/websocket/echo_server.zym -- 9200
+//                      argv[1] = port (default 9200; 0 = OS-assigned)
+//                    Then in another terminal:
+//                      zym examples/networking/websocket/echo_client.zym -- 127.0.0.1 9200 hello world
+// What you'll see:   "listening on 0.0.0.0:9200"
+//                    "[127.0.0.1:55123] (text) hello"
+//                    Stop with Ctrl-C.
+//
+// Concepts introduced:
+//   * Server-side WebSocket = TCP.listen + srv.accept + WebSocket.accept(tcp).
+//     The TCP sock must outlive the WebSocket handle (close TCP last).
+//   * Two-phase per client: drive sock.poll() through "connecting", then
+//     once "connected" treat it like any other readable sock.
+//   * Sockets.waitAny wakes on whichever client (or the listener) has
+//     work. WebSocket socks count as readable when a decoded frame
+//     is sitting in the queue, or when the peer is closing/closed.
+//   * Echo back on the SAME kind of frame: text -> sendText, binary -> send.
+//     wasStringPacket() right after a successful recv tells you which.
+func main(argv) {
+    var port = 9200
+    if (length(argv) > 1) { port = num(argv[1]) }
+
+    var srv = TCP.listen("0.0.0.0", port)
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n\n", srv.localPort())
+
+    // Parallel arrays: each index is one client.
+    //   tcps[i]  = underlying TCP sock (kept alive)
+    //   wss[i]   = WebSocket sock layered on tcps[i]
+    //   peers[i] = { host, port } captured at accept time (for logs)
+    var tcps  = []
+    var wss   = []
+    var peers = []
+
+    while (true) {
+        // Build the waitAny watch list: listener + every connected sock.
+        // We include "connecting" socks too: waitAny will mark them
+        // readable when the handshake bytes arrive, and that's exactly
+        // when we want to call poll().
+        var watch = [srv]
+        var i = 0
+        while (i < length(wss)) {
+            push(watch, wss[i])
+            i = i + 1
+        }
+        var w = Sockets.waitAny(watch, "read", 500)
+        if (w["timedOut"]) { continue }
+
+        var ready = w["ready"]
+        var k = 0
+        while (k < length(ready)) {
+            var h = ready[k]
+            if (h == srv) {
+                var tcp = srv.accept(0)
+                if (tcp != null) {
+                    var pa = tcp.peerAddress()
+                    var ws = WebSocket.accept(tcp)
+                    if (ws == null) {
+                        print("[%s:%n] WebSocket.accept failed\n",
+                              pa["host"], pa["port"])
+                        tcp.close()
+                    } else {
+                        push(tcps,  tcp)
+                        push(wss,   ws)
+                        push(peers, pa)
+                        print("[%s:%n] tcp accepted, upgrading...\n",
+                              pa["host"], pa["port"])
+                    }
+                }
+            } else {
+                // Find the matching slot for handle h.
+                var idx = 0
+                var found = -1
+                while (idx < length(wss)) {
+                    if (wss[idx] == h) {
+                        found = idx
+                        idx = length(wss)
+                    } else {
+                        idx = idx + 1
+                    }
+                }
+                if (found < 0) {
+                    k = k + 1
+                    continue
+                }
+                var ws  = wss[found]
+                var pa  = peers[found]
+                ws.poll()
+                var s = ws.status()
+                if (s == "connecting") {
+                    k = k + 1
+                    continue
+                }
+                if (s == "closed" || s == "error") {
+                    print("[%s:%n] gone (%s)\n", pa["host"], pa["port"], s)
+                    ws.close()
+                    tcps[found].close()
+                    // Compact the parallel arrays.
+                    var nt = []
+                    var nw = []
+                    var np = []
+                    var j = 0
+                    while (j < length(wss)) {
+                        if (j != found) {
+                            push(nt, tcps[j])
+                            push(nw, wss[j])
+                            push(np, peers[j])
+                        }
+                        j = j + 1
+                    }
+                    tcps  = nt
+                    wss   = nw
+                    peers = np
+                    k = k + 1
+                    continue
+                }
+                // s == "connected" or "closing": drain available frames.
+                while (ws.available() > 0) {
+                    var frame = ws.recv(0)
+                    if (typeof(frame) == "string") {
+                        // busy / eof / closed / error - let the outer
+                        // loop pick the new status up next tick.
+                        k = k
+                        break
+                    }
+                    var isText = ws.wasStringPacket()
+                    print("[%s:%n] (%s) %s\n",
+                          pa["host"], pa["port"],
+                          isText ? "text" : "binary",
+                          frame.toUtf8())
+                    if (isText) {
+                        ws.sendText(frame.toUtf8())
+                    } else {
+                        ws.send(frame)
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}

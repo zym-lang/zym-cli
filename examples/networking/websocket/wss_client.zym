@@ -1,0 +1,88 @@
+// wss_client.zym
+//
+// What this does:    Connects to a `wss://` server (typically the
+//                    matching wss_self_signed_server.zym), sends each
+//                    argv[3..] as one text frame, and prints the
+//                    echoed reply.
+// How to run it:     # Terminal A
+//                    zym examples/networking/websocket/wss_self_signed_server.zym -- 9201
+//
+//                    # Terminal B
+//                    zym examples/networking/websocket/wss_client.zym -- 127.0.0.1 9201 hello world
+//                      argv[1] = host    (default 127.0.0.1)
+//                      argv[2] = port    (default 9201)
+//                      argv[3+] = lines  (default ["ping"])
+// What you'll see:   "connected" once the handshake finishes, then a
+//                    "-> <msg>" / "<- <reply>" pair per message.
+//
+// Concepts introduced (over echo_client.zym):
+//   * The URL scheme drives TLS: "wss://" turns on TLS, "ws://" does not.
+//   * opts.tls mirrors TLS.connect's opts. With { verify: false } the
+//     client trusts ANY cert - fine for demos against a self-signed
+//     server, never for production. Use { trustedRoots: [...] } or a
+//     real CA-signed cert + default verify=true instead.
+//   * Once handshake completes, the encrypted stream is invisible at
+//     the WebSocket API level: send/recv/sendText work identically.
+func main(argv) {
+    var host = "127.0.0.1"
+    var port = 9201
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    var payload = []
+    if (length(argv) > 3) {
+        var i = 3
+        while (i < length(argv)) {
+            push(payload, argv[i])
+            i = i + 1
+        }
+    } else {
+        push(payload, "ping")
+    }
+
+    var url = "wss://" + host + ":" + str(port) + "/"
+    print("connecting to %s (verify=false)\n", url)
+    var s = WebSocket.connect(url, { tls: { verify: false } })
+    if (s == null) {
+        print("WebSocket.connect failed (bad url / no WebSocket support)\n")
+        return 1
+    }
+
+    var deadline = Time.ticksMsec() + 10000
+    while (Time.ticksMsec() < deadline && s.status() == "connecting") {
+        s.poll()
+        System.sleep(20)
+    }
+    if (s.status() != "connected") {
+        print("handshake failed: %s\n", s.status())
+        s.close()
+        return 1
+    }
+    print("connected over TLS\n")
+
+    var i = 0
+    while (i < length(payload)) {
+        var msg = payload[i]
+        print("-> %s\n", msg)
+        var w = s.sendText(msg)
+        if (w != "ok") {
+            print("sendText failed: %s\n", w)
+            break
+        }
+        s.poll()
+        var reply = s.recv(3000)
+        if (typeof(reply) == "string") {
+            print("recv failed: %s\n", reply)
+            break
+        }
+        if (s.wasStringPacket()) {
+            print("<- (text) %s\n", reply.toUtf8())
+        } else {
+            print("<- (binary, %n bytes)\n", reply.size())
+        }
+        i = i + 1
+    }
+
+    s.close()
+    print("done.\n")
+    return 0
+}

@@ -1,0 +1,94 @@
+// broadcast_client.zym
+//
+// What this does:    Connects to broadcast_server.zym, registers a
+//                    nickname (first frame), sends each argv message
+//                    as a chat line, and then listens for everyone
+//                    else's broadcasts for a short window before
+//                    disconnecting.
+// How to run it:     # Terminal A
+//                    zym examples/networking/websocket/broadcast_server.zym -- 9202
+//
+//                    # Terminal B
+//                    zym examples/networking/websocket/broadcast_client.zym -- 127.0.0.1 9202 alice "hi all"
+//                    # Terminal C
+//                    zym examples/networking/websocket/broadcast_client.zym -- 127.0.0.1 9202 bob "hi alice"
+//                      argv[1] = host (default 127.0.0.1)
+//                      argv[2] = port (default 9202)
+//                      argv[3] = nickname (default "anon")
+//                      argv[4+] = messages (default ["hello"])
+// What you'll see:   "<- welcome, alice" from the server, then any
+//                    "bob: hi alice" lines from other clients.
+//
+// Concepts introduced:
+//   * Using a tiny in-band handshake (first frame = nick) on top of
+//     plain WebSocket text frames. The protocol layer above WebSocket
+//     is up to you - WebSocket itself is just a message pipe.
+//   * "Send all, then listen": after pushing your messages, drain
+//     incoming frames for a bounded window. Same pattern as
+//     enet/echo_client.zym, but on WebSocket.
+func main(argv) {
+    var host = "127.0.0.1"
+    var port = 9202
+    var nick = "anon"
+    if (length(argv) > 1) { host = argv[1] }
+    if (length(argv) > 2) { port = num(argv[2]) }
+    if (length(argv) > 3) { nick = argv[3] }
+    var msgs = []
+    if (length(argv) > 4) {
+        var i = 4
+        while (i < length(argv)) {
+            push(msgs, argv[i])
+            i = i + 1
+        }
+    } else {
+        push(msgs, "hello")
+    }
+
+    var url = "ws://" + host + ":" + str(port) + "/"
+    print("connecting to %s as %s\n", url, nick)
+    var s = WebSocket.connect(url)
+    if (s == null) {
+        print("WebSocket.connect failed\n")
+        return 1
+    }
+    var deadline = Time.ticksMsec() + 5000
+    while (Time.ticksMsec() < deadline && s.status() == "connecting") {
+        s.poll()
+        System.sleep(20)
+    }
+    if (s.status() != "connected") {
+        print("handshake failed: %s\n", s.status())
+        s.close()
+        return 1
+    }
+    print("connected\n")
+
+    // First frame = the nickname (the server's in-band handshake).
+    s.sendText(nick)
+
+    // Then every queued message.
+    var i = 0
+    while (i < length(msgs)) {
+        s.sendText(msgs[i])
+        print("-> %s\n", msgs[i])
+        i = i + 1
+    }
+
+    // Listen for other clients' chatter for a few seconds, then leave.
+    var stop = Time.ticksMsec() + 3000
+    while (Time.ticksMsec() < stop) {
+        s.poll()
+        if (s.status() != "connected") { break }
+        if (s.available() == 0) {
+            System.sleep(50)
+            continue
+        }
+        var frame = s.recv(0)
+        if (typeof(frame) == "string") { continue }
+        print("<- %s\n", frame.toUtf8())
+    }
+
+    s.close()
+    print("done.\n")
+    return 0
+}

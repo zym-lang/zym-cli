@@ -84,6 +84,21 @@
 #include "modules/mbedtls/packet_peer_mbed_dtls.h"
 #include "modules/mbedtls/stream_peer_mbedtls.h"
 
+// WebSocket module owns the `WebSocketPeer::_create` factory pointer.
+// We replicate just the `WSLPeer::initialize()` / `deinitialize()` calls
+// from the engine's `initialize_websocket_module(...)` wrapper here;
+// the wrapper's ClassDB / EngineDebugger registrations aren't needed.
+//
+// Forward-declared rather than `#include "modules/websocket/wsl_peer.h"`
+// because that header pulls in `<wslay/wslay.h>` from
+// `godot/thirdparty/wslay/`, which is not on our include path (this TU
+// doesn't need any wslay symbols, only the two static entry points).
+class WSLPeer {
+public:
+	static void initialize();
+	static void deinitialize();
+};
+
 #if defined(MBEDTLS_VERSION_MAJOR) && MBEDTLS_VERSION_MAJOR >= 3
 #include <psa/crypto.h>
 #endif
@@ -170,6 +185,17 @@ void register_core_types() {
 	// for any non-`unsafe` client.
 	Crypto::load_default_certificates(String());
 
+	// --- Additive batch #2b: WebSocket peer factory ---------------------
+	// Wires `WebSocketPeer::_create` to the `WSLPeer` (mbedtls-backed)
+	// implementation. Replicates the relevant body of
+	// `initialize_websocket_module(MODULE_INITIALIZATION_LEVEL_CORE)` —
+	// minus the ClassDB / EngineDebugger registrations, which zym doesn't
+	// use (the `WebSocket` native talks to `WebSocketPeer` directly, not
+	// through ClassDB). Without this call, `WebSocketPeer::create()`
+	// returns null and `WebSocket.connect`/`WebSocket.accept` raise the
+	// "WebSocketPeer unavailable in this build" error.
+	WSLPeer::initialize();
+
 	// --- Additive batch #3: IP singleton --------------------------------
 	// `IP` is the engine's DNS/local-interface namespace and is the
 	// foundation for every networking native (TCP/UDP/TLS). On Linux
@@ -191,6 +217,7 @@ void unregister_core_types() {
 		memdelete(ip);
 		ip = nullptr;
 	}
+	WSLPeer::deinitialize();
 	DTLSServerMbedTLS::finalize();
 	PacketPeerMbedDTLS::finalize_dtls();
 	StreamPeerMbedTLS::finalize_tls();

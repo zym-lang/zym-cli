@@ -178,6 +178,29 @@ static UdpsHandle* unwrapUdps(ZymValue ctx) { return static_cast<UdpsHandle*>(zy
 static TlsHandle*  unwrapTls (ZymValue ctx) { return static_cast<TlsHandle* >(zym_getNativeData(ctx)); }
 static DtlsHandle* unwrapDtls(ZymValue ctx) { return static_cast<DtlsHandle*>(zym_getNativeData(ctx)); }
 
+// Cross-TU accessors used by sibling natives (e.g. `WebSocket.accept`) that
+// need to wrap an already-accepted TCP / TLS socket. Returns false if `v`
+// isn't a socket map of the expected kind. Returns true with an empty
+// `*out` when the socket exists but has been closed (handle finalized).
+extern "C++" bool zymExtractTcpStream(ZymVM* vm, ZymValue v, Ref<StreamPeer>* out) {
+    if (!zym_isMap(v)) return false;
+    ZymValue ctx = zym_mapGet(vm, v, "__tcp__");
+    if (ctx == ZYM_ERROR) return false;
+    TcpHandle* h = unwrapTcp(ctx);
+    if (!h) { *out = Ref<StreamPeer>(); return true; }
+    *out = h->s;
+    return true;
+}
+extern "C++" bool zymExtractTlsStream(ZymVM* vm, ZymValue v, Ref<StreamPeer>* out) {
+    if (!zym_isMap(v)) return false;
+    ZymValue ctx = zym_mapGet(vm, v, "__tls__");
+    if (ctx == ZYM_ERROR) return false;
+    TlsHandle* h = unwrapTls(ctx);
+    if (!h) { *out = Ref<StreamPeer>(); return true; }
+    *out = h->tls;
+    return true;
+}
+
 // Forward decls.
 static ZymValue makeTcpInstance(ZymVM* vm, Ref<StreamPeerTCP> s);
 static ZymValue makeTcpsInstance(ZymVM* vm, Ref<TCPServer> s);
@@ -1655,6 +1678,14 @@ static bool isReady(ZymVM* vm, ZymValue handle, WaitMode mode) {
                 case WAIT_ANY:   return readable || writable;
             }
         }
+    }
+    // WebSocket — readiness query lives in src/natives/websocket.cpp so
+    // this TU doesn't need to know the WebSocketPeer type.
+    {
+        extern bool zymWsReady(ZymVM*, ZymValue, int /*mode: 0=read,1=write,2=any*/, bool* out);
+        bool ready = false;
+        int wmode = (mode == WAIT_READ) ? 0 : (mode == WAIT_WRITE) ? 1 : 2;
+        if (zymWsReady(vm, handle, wmode, &ready)) return ready;
     }
     return false;
 }

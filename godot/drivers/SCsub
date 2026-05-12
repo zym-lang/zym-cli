@@ -1,0 +1,25 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+
+env.drivers_sources = []
+
+# OS drivers
+SConscript("unix/SCsub")
+SConscript("windows/SCsub")
+
+# Shared Apple platform drivers
+if env["platform"] in ["macos", "ios", "visionos"]:
+    SConscript("apple/SCsub")
+if env["platform"] in ["ios", "visionos"]:
+    SConscript("apple_embedded/SCsub")
+
+# Crash diagnostics (Windows non-MSVC only)
+if env["platform"] == "windows" and not env.msvc:
+    SConscript("backtrace/SCsub")
+
+env.add_source_files(env.drivers_sources, "*.cpp")
+
+lib = env.add_library("drivers", env.drivers_sources)
+env.Prepend(LIBS=[lib])

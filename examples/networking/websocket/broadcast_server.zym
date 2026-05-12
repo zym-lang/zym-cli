@@ -1,0 +1,159 @@
+// broadcast_server.zym
+//
+// What this does:    A multi-client WebSocket chat hub. Every text
+//                    frame a client sends is broadcast back out as a
+//                    text frame to every OTHER connected client. The
+//                    first frame a client sends is treated as that
+//                    client's nickname; subsequent frames are messages.
+// How to run it:     zym examples/networking/websocket/broadcast_server.zym -- 9202
+//                    Then in two more terminals:
+//                      zym examples/networking/websocket/broadcast_client.zym -- 127.0.0.1 9202 alice "hi all"
+//                      zym examples/networking/websocket/broadcast_client.zym -- 127.0.0.1 9202 bob   "hi alice"
+//                    Stop with Ctrl-C.
+// What you'll see:   "+ alice joined (127.0.0.1:54321)"
+//                    "alice: hi all"
+//                    Each connected client also sees every OTHER
+//                    client's lines in the same "<nick>: <msg>" shape.
+//
+// Concepts introduced:
+//   * Sockets.waitAny(handles, "read", timeoutMs) over a mix of
+//     listening TCP, "connecting" WebSocket socks, and "connected"
+//     WebSocket socks. waitAny wakes on whichever has work.
+//   * Per-client state lives in a parallel map keyed by an integer id.
+//   * The same trick as chat_server.zym, but the framing is a single
+//     WebSocket frame per message - no line-based readLine needed.
+func main(argv) {
+    var port = 9202
+    if (length(argv) > 1) { port = num(argv[1]) }
+
+    var srv = TCP.listen("0.0.0.0", port)
+    if (srv == null) {
+        print("could not listen on 0.0.0.0:%n (port already in use?)\n", port)
+        return 1
+    }
+    print("listening on 0.0.0.0:%n\n", srv.localPort())
+
+    // Parallel arrays + a state map.
+    //   ids[i]      = integer client id at slot i
+    //   socks[i]    = WebSocket sock at slot i (watch list entry)
+    //   tcps[i]     = underlying TCP sock kept alive
+    //   state[str(id)] = { nick, peer }
+    var ids   = []
+    var socks = []
+    var tcps  = []
+    var state = {}
+    var nextId = 1
+
+    while (true) {
+        var watch = [srv]
+        var i = 0
+        while (i < length(socks)) {
+            push(watch, socks[i])
+            i = i + 1
+        }
+
+        var w = Sockets.waitAny(watch, "read", 500)
+        if (w["timedOut"]) { continue }
+
+        var ready = w["ready"]
+        var k = 0
+        while (k < length(ready)) {
+            var h = ready[k]
+            if (h == srv) {
+                var tcp = srv.accept(0)
+                if (tcp != null) {
+                    var pa = tcp.peerAddress()
+                    var ws = WebSocket.accept(tcp)
+                    if (ws == null) {
+                        print("[%s:%n] WebSocket.accept failed\n",
+                              pa["host"], pa["port"])
+                        tcp.close()
+                    } else {
+                        var id = nextId
+                        nextId = nextId + 1
+                        push(ids,   id)
+                        push(socks, ws)
+                        push(tcps,  tcp)
+                        state[str(id)] = { nick: null, peer: pa }
+                        print("? unnamed client connecting (id=%n, %s:%n)\n",
+                              id, pa["host"], pa["port"])
+                    }
+                }
+                k = k + 1
+                continue
+            }
+            // Match handle to a slot.
+            var idx = 0
+            var found = -1
+            while (idx < length(socks)) {
+                if (socks[idx] == h) {
+                    found = idx
+                    idx = length(socks)
+                } else {
+                    idx = idx + 1
+                }
+            }
+            if (found < 0) { k = k + 1; continue }
+            var ws  = socks[found]
+            var cid = ids[found]
+            var rec = state[str(cid)]
+            ws.poll()
+            var st = ws.status()
+            if (st == "connecting") {
+                k = k + 1
+                continue
+            }
+            if (st == "closed" || st == "error") {
+                var who = rec["nick"]
+                if (who == null) { who = "(unnamed)" }
+                print("- %s left (%s:%n)\n",
+                      who, rec["peer"]["host"], rec["peer"]["port"])
+                ws.close()
+                tcps[found].close()
+                state[str(cid)] = null
+                var nIds   = []
+                var nSocks = []
+                var nTcps  = []
+                var j = 0
+                while (j < length(ids)) {
+                    if (j != found) {
+                        push(nIds,   ids[j])
+                        push(nSocks, socks[j])
+                        push(nTcps,  tcps[j])
+                    }
+                    j = j + 1
+                }
+                ids   = nIds
+                socks = nSocks
+                tcps  = nTcps
+                k = k + 1
+                continue
+            }
+            // Drain every queued frame.
+            while (ws.available() > 0) {
+                var frame = ws.recv(0)
+                if (typeof(frame) == "string") { break }
+                var msg = frame.toUtf8()
+                if (rec["nick"] == null) {
+                    rec["nick"] = msg
+                    print("+ %s joined (%s:%n)\n",
+                          msg, rec["peer"]["host"], rec["peer"]["port"])
+                    ws.sendText("welcome, " + msg)
+                } else {
+                    var nick = rec["nick"]
+                    print("%s: %s\n", nick, msg)
+                    var broadcast = nick + ": " + msg
+                    var t = 0
+                    while (t < length(ids)) {
+                        if (ids[t] != cid) {
+                            socks[t].sendText(broadcast)
+                        }
+                        t = t + 1
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}

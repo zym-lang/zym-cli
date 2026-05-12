@@ -1,21 +1,22 @@
-# Networking (`IP`, `TCP`, `UDP`, `TLS`, `DTLS`, `Sockets`)
+# Networking (`IP`, `TCP`, `UDP`, `TLS`, `DTLS`, `Sockets`, `ENet`, `WebSocket`)
 
-Cross-platform TCP / UDP / TLS / DTLS sockets and DNS, exposed as a
-layered set of zym-flavored namespaces:
+Cross-platform TCP / UDP / TLS / DTLS / ENet / WebSocket sockets and
+DNS, exposed as a layered set of zym-flavored namespaces:
 
 - `IP` — DNS resolution and local-interface enumeration.
 - `TCP` — reliable byte streams; client `connect` + listening server.
 - `UDP` — unreliable datagrams; bound socket with `send` / `recv`, plus `UDP.listen` for per-source server-side demultiplexing.
 - `TLS` — encrypted TCP client and server over `X509Certificate` / `CryptoKey` from `Crypto`.
 - `DTLS` — encrypted UDP (datagram TLS) client and server, layered over `UDP` + `Crypto` types.
-- `Sockets` — `Sockets.waitAny(handles, mode, timeoutMs)` for multi-socket readiness (TCP, UDP, TLS, DTLS, and server handles).
+- `Sockets` — `Sockets.waitAny(handles, mode, timeoutMs)` for multi-socket readiness (TCP, UDP, TLS, DTLS, WebSocket, and server handles).
+- `ENet` — UDP with reliable + ordered + channels, optionally wrapped in DTLS.
+- `WebSocket` — RFC 6455 WebSocket client and server, optionally over TLS (`wss://`).
 
 ---
 
 ## Conventions
 
-The networking natives follow the rules in [conventions.md](conventions.md)
-verbatim. The most relevant ones:
+The networking natives share a small set of cross-cutting rules:
 
 - **Status strings.** Anywhere an operation can succeed *or* be in a
   recoverable not-ready state, the result is one of the standard
@@ -31,8 +32,7 @@ verbatim. The most relevant ones:
 - **Synchronous everywhere.** No async runtime, promises, callbacks,
   or event loop. Operations that *can* take time take an optional
   `timeoutMs` argument; non-blocking variants have explicit `*Some`
-  names. See [conventions.md](conventions.md) for the full mental
-  model.
+  names.
 
 ---
 
@@ -775,5 +775,254 @@ func main(argv) {
   DTLS this also stops the cookie machinery from responding to fresh
   ClientHellos, which is usually what you want during shutdown.
 - **TLS bring-up is shared with the `Crypto` / `TLS` / `DTLS` natives.**
-  No extra initialization is required — the mbedTLS module is
-  already brought up at startup.
+  No extra initialization is required — the TLS layer is already
+  brought up at startup.
+
+---
+
+## `WebSocket` — RFC 6455 WebSocket client and server
+
+RFC 6455 WebSocket client and server, exposed as a single namespace:
+
+- `WebSocket.connect(url [, opts])` — open a WebSocket client to a
+  `ws://` or `wss://` URL.
+- `WebSocket.accept(tcp [, opts])` — wrap an already-accepted TCP (or
+  TLS) socket as the **server** side of a WebSocket handshake.
+
+The instance returned by either factory exposes a frame-shaped API
+(`send` / `sendText` / `recv`) that follows the same status-string
+vocabulary and `Buffer` byte-currency as the rest of these networking
+natives.
+
+### Frame model
+
+- **One frame per call.** Each `send(buf)` / `sendText(text)` produces
+  exactly one WebSocket frame; each `recv(...)` returns exactly one
+  received frame. There is no implicit fragmentation; continuation
+  frames are reassembled before the frame surfaces to script.
+- **Text vs binary.** Binary frames are exchanged as `Buffer` instances;
+  text frames are sent and received as `string` (UTF-8 on the wire).
+  After a successful `recv(...)`, `sock.wasStringPacket()` reports
+  which kind of frame it was.
+- **Handshake is `poll()`-driven.** Both `connect` and `accept` return
+  immediately in `"connecting"` state. The caller must drive
+  `sock.poll()` (or include the sock in `Sockets.waitAny`) until
+  `sock.status() == "connected"`.
+
+### Statics
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `WebSocket.connect(url)` | sock \| `null` | Open a client to `url`. Returns the sock immediately in `"connecting"` state (drive the handshake with `sock.poll()`). `null` on outright failure (bad URL shape, WebSocket support unavailable in this build). |
+| `WebSocket.connect(url, opts)` | sock \| `null` | Same, with explicit options (see **opts** below). Pass `null` for defaults. |
+| `WebSocket.accept(tcp)` | sock \| `null` | Wrap an already-accepted **TCP** sock (a handle returned by `TCP.listen(...).accept(...)`) as the server side of a WebSocket handshake. The TCP sock must remain live as long as the returned WebSocket handle is in use. Returns the sock in `"connecting"` state; drive the handshake with `sock.poll()`. |
+| `WebSocket.accept(tcp, opts)` | sock \| `null` | Same, with explicit options. For `wss://` servers, wrap the accepted TCP with `TLS.accept(...)` first and pass the resulting TLS sock here. |
+
+### `opts` shape
+
+All keys are optional. Unknown keys are ignored.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `tls` | `null` | Client-side only. Controls TLS verification when `url` is `wss://`. Same shape as `TLS.connect`'s `opts`: `{ verify: bool = true, trustedRoots: cert \| [cert, ...] \| null, commonName: string }`. When `verify` is `false`, the handshake skips chain & hostname validation entirely. Ignored on `WebSocket.accept` (the underlying stream already carries the TLS layer). |
+| `protocols` | `[]` | List of WebSocket subprotocol names to advertise. On a client these go out as `Sec-WebSocket-Protocol`; on a server they constrain the set the peer is allowed to pick. The negotiated protocol is available after handshake via `sock.selectedProtocol()`. |
+| `headers` | `[]` | List of additional handshake header lines as `"Name: value"` strings. Client-side: appended to the HTTP `GET` upgrade request. Server-side: appended to the HTTP 101 upgrade response. |
+| `inboundBufferSize` | `65535` | Maximum size in bytes of the inbound packet buffer. Frames larger than this are rejected. |
+| `outboundBufferSize` | `65535` | Maximum size in bytes of the outbound packet buffer. |
+| `maxQueuedPackets` | `4096` | Maximum number of frames that can sit in the receive queue between `poll()`s before the peer is forced closed. |
+| `heartbeatInterval` | `0` | Seconds between automatic ping frames. `0` disables heartbeats. |
+
+### Address forms
+
+- **Client URLs.** `ws://host:port/path` (plain) or `wss://host:port/path`
+  (TLS). The `tls` option only matters for `wss://` URLs; if `tls` is
+  passed on a plain `ws://` URL it is ignored.
+- **Server side.** `WebSocket.accept` takes an already-bound TCP or TLS
+  socket — `WebSocket` itself does not bind a listening port. Pair it
+  with `TCP.listen(...)` + `srv.accept(...)` for plain `ws://`, or with
+  `TCP.listen(...)` + `srv.accept(...)` + `TLS.accept(...)` for `wss://`.
+
+### Sock instance methods
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `sock.status()` | string | One of `"connecting"`, `"connected"`, `"closing"`, `"closed"`. Does not advance state. |
+| `sock.poll()` | string | Drives one round of state advancement (handshake progress, frame parsing, heartbeats) and returns the new status. Required during the handshake when the caller used the non-waiting form of `connect` / `accept`. Safe to call any time. |
+| `sock.available()` | number | Pending frames (decoded, ready to read). Polls before reporting. |
+| `sock.send(buf)` | status | Send `buf` as one binary WebSocket frame. Returns `"ok"`, `"closed"` (peer is no longer OPEN), or `"error"`. Empty buffers send an empty binary frame. |
+| `sock.sendText(text)` | status | Send `text` as one text WebSocket frame. `text` is interpreted as UTF-8 on the wire. Status vocabulary is the same as `send`. |
+| `sock.recv()` | Buffer \| status | Block forever until one frame arrives, then return its payload as a `Buffer`. Use `sock.wasStringPacket()` immediately afterwards to find out whether it was a text frame. Returns `"eof"` if the peer closes before any frame arrives, or `"error"` if the connection drops. |
+| `sock.recv(timeoutMs)` | Buffer \| status | Same, bounded. `0` is a non-blocking peek — returns `"busy"` if no frame is queued. `> 0` waits up to that many milliseconds and returns `"timeout"` if nothing arrives before the deadline. `-1` blocks (default). |
+| `sock.wasStringPacket()` | bool | `true` if the most recently received frame was a text (UTF-8) frame, `false` for a binary frame. Reflects the *last* successful `recv(...)`; the value is undefined before the first frame arrives. |
+| `sock.selectedProtocol()` | string | Negotiated subprotocol name, or `""` if no subprotocol was selected. Valid once `status() == "connected"`. |
+| `sock.requestedUrl()` | string | Server-side: the URL the client used in its `GET` upgrade. Client-side: the URL passed to `WebSocket.connect`. Valid once `status() == "connected"`. |
+| `sock.closeCode()` | number | The 16-bit WebSocket close code reported by the peer (or sent locally) once the close handshake has happened. `-1` if no close has been observed yet. |
+| `sock.closeReason()` | string | The UTF-8 close reason that accompanied `closeCode()`, or `""` if none was provided. |
+| `sock.peerAddress()` | `{ host, port }` \| `null` | Remote address of the underlying TCP / TLS stream. `null` before the handshake completes. |
+| `sock.setNoDelay(b)` | `null` | Toggle `TCP_NODELAY` (Nagle's algorithm) on the underlying transport. |
+| `sock.close()` | `null` | Send a normal-closure (1000, no reason) close frame and tear down the underlying stream. Idempotent. |
+| `sock.close(code)` | `null` | Same, with an explicit close code. |
+| `sock.close(code, reason)` | `null` | Same, with an explicit close code **and** reason. `reason` is sent as UTF-8 and is limited by the WebSocket spec to 123 bytes; over-long reasons are truncated. |
+
+### Examples
+
+#### Client: connect to a public echo, exchange one message
+
+```zym
+var s = WebSocket.connect("ws://echo.websocket.events/")
+while s.status() == "connecting" {
+    s.poll()
+    System.sleep(20)
+}
+if s.status() != "connected" {
+    print("handshake failed:", s.status())
+    return
+}
+
+s.sendText("hello")
+var frame = s.recv(5000)
+if typeof(frame) == "string" {
+    print("error/timeout:", frame)
+} else {
+    if s.wasStringPacket() {
+        print("text reply:", frame.toString())
+    } else {
+        print("binary reply:", frame.size(), "bytes")
+    }
+}
+s.close()
+```
+
+#### Server: accept one plain `ws://` connection and echo a frame
+
+```zym
+var srv = TCP.listen("127.0.0.1", 0)
+print("listening on", srv.localPort())
+
+var raw = srv.accept()                  // TCP sock
+var ws  = WebSocket.accept(raw)         // upgrade to WebSocket
+while ws.status() == "connecting" {
+    ws.poll()
+    System.sleep(20)
+}
+
+var frame = ws.recv(5000)
+if typeof(frame) != "string" {
+    ws.send(frame)                       // echo back
+}
+ws.close()
+raw.close()
+srv.close()
+```
+
+#### Server: `wss://` with a self-signed certificate (in-process round-trip)
+
+```zym
+var c    = Crypto.create()
+var key  = c.generateRsa(2048)
+var cert = c.generateSelfSignedCertificate(key, "CN=localhost",
+                                           "20240101000000",
+                                           "20440101000000")
+
+var srv = TCP.listen("127.0.0.1", 0)
+var port = srv.localPort()
+
+// Client side runs concurrently; since zym is single-threaded we drive
+// both sides from one loop.
+var cli = WebSocket.connect("wss://127.0.0.1:" + port + "/",
+                            { tls: { verify: false } })
+
+var rawSrv = srv.accept(2000)
+var tlsSrv = TLS.accept(rawSrv, { key: key, cert: cert }, 0)
+var wsSrv  = WebSocket.accept(tlsSrv)
+
+while cli.status() == "connecting" || wsSrv.status() == "connecting" {
+    cli.poll()
+    tlsSrv.poll()
+    wsSrv.poll()
+    System.sleep(20)
+}
+
+cli.sendText("hello wss")
+wsSrv.poll()
+print(wsSrv.recv(2000).toString())     // "hello wss"
+
+cli.close()
+wsSrv.close()
+tlsSrv.close()
+srv.close()
+```
+
+#### Selecting a subprotocol
+
+```zym
+// Client advertises two protocols; server picks the first one it knows.
+var s = WebSocket.connect("ws://chat.example/",
+                          { protocols: ["chat.v2", "chat.v1"] })
+while s.status() == "connecting" { s.poll(); System.sleep(20) }
+print("server picked:", s.selectedProtocol())
+```
+
+### `Sockets.waitAny` and WebSocket
+
+WebSocket socks are valid handles for `Sockets.waitAny` — the readiness
+primitives apply the same way:
+
+- `"read"` — ready when a frame has been decoded and is sitting in the
+  queue (`available() > 0`), **or** the peer has terminated
+  (`"closing"` / `"closed"`) so EOF can be observed in the same loop.
+- `"write"` — ready when `status() == "connected"`, and also when
+  terminated so a send returns its own `"closed"` status without
+  spinning forever.
+- `"any"` — readable OR writable.
+
+Mixing WebSocket socks with TCP, TLS, UDP, DTLS, and server handles in
+one `waitAny` call is supported:
+
+```zym
+var clients = []                       // list of WebSocket handles
+var srv = TCP.listen("127.0.0.1", 0)
+while true {
+    var watch = [srv]
+    for c in clients { append(watch, c) }
+    var w = Sockets.waitAny(watch, "read", -1)
+    if w["timedOut"] { continue }
+    for h in w["ready"] {
+        if h == srv {
+            var raw = srv.accept(0)
+            append(clients, WebSocket.accept(raw))
+        } else {
+            var f = h.recv(0)
+            // handle `f`, including "busy"/"eof"/"closed"/"error"
+        }
+    }
+}
+```
+
+### Notes
+
+- **Peer-level API only.** `WebSocket` exposes a single peer per handle.
+  Game-style multi-peer messaging (many clients addressed through one
+  object) is what `ENet` covers above.
+- **The underlying TCP / TLS sock must outlive the WebSocket.** On the
+  server side, the sock returned by `srv.accept(...)` (or
+  `TLS.accept(...)`) is what carries the bytes — keep it in scope
+  until the WebSocket handle is closed. Closing the WebSocket does
+  *not* automatically close the TCP / TLS sock.
+- **Heartbeats are off by default.** Pass `heartbeatInterval` (in
+  seconds) in `opts` to send WebSocket ping frames on an interval. The
+  default behaviour is to leave the connection idle unless data flows,
+  matching the RFC 6455 baseline.
+- **Buffer sizes are hard caps.** `inboundBufferSize` and
+  `outboundBufferSize` are static at handshake time. Frames larger
+  than the inbound cap are rejected and force the connection into
+  `"error"`; sends larger than the outbound cap fail with `"error"`.
+  For applications that need to ship multi-megabyte payloads, raise
+  these in `opts` before connecting.
+- **Headers are unvalidated.** Lines passed via `opts.headers` are
+  written verbatim into the HTTP upgrade exchange. Don't pass
+  attacker-controlled strings without filtering for `\r\n`.
+- **`recv` returns one frame at a time.** Continuation frames and
+  fragmentation are reassembled before the frame surfaces to script;
+  from the script's point of view, every successful `recv(...)` is
+  one logical message.

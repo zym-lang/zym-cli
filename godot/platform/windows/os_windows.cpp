@@ -226,19 +226,9 @@ bool OS_Windows::is_using_con_wrapper() const {
 	return found_conwrap_exe;
 }
 
+// zym: EngineDebugger / ScriptDebugger removed (headless CLI).
 BOOL WINAPI HandlerRoutine(_In_ DWORD dwCtrlType) {
-	if (!EngineDebugger::is_active()) {
-		return FALSE;
-	}
-
-	switch (dwCtrlType) {
-		case CTRL_C_EVENT:
-			EngineDebugger::get_script_debugger()->set_depth(-1);
-			EngineDebugger::get_script_debugger()->set_lines_left(1);
-			return TRUE;
-		default:
-			return FALSE;
-	}
+	return FALSE;
 }
 
 void OS_Windows::alert(const String &p_alert, const String &p_title) {
@@ -289,21 +279,9 @@ void OS_Windows::initialize() {
 	QueryPerformanceFrequency((LARGE_INTEGER *)&ticks_per_second);
 	QueryPerformanceCounter((LARGE_INTEGER *)&ticks_start);
 
-#if WINAPI_FAMILY == WINAPI_FAMILY_DESKTOP_APP
-	// set minimum resolution for periodic timers, otherwise Sleep(n) may wait at least as
-	//  long as the windows scheduler resolution (~16-30ms) even for calls like Sleep(1)
-	TIMECAPS time_caps;
-	if (timeGetDevCaps(&time_caps, sizeof(time_caps)) == MMSYSERR_NOERROR) {
-		delay_resolution = time_caps.wPeriodMin * 1000;
-		timeBeginPeriod(time_caps.wPeriodMin);
-	} else {
-		ERR_PRINT("Unable to detect sleep timer resolution.");
-		delay_resolution = 1000;
-		timeBeginPeriod(1);
-	}
-#else
+	// zym: winmm timeBeginPeriod / TIMECAPS path removed (no <timeapi.h>);
+	// default to 1ms tick resolution like the original #else branch.
 	delay_resolution = 1000;
-#endif
 
 	process_map = memnew((HashMap<ProcessID, ProcessInfo>));
 
@@ -386,9 +364,7 @@ void OS_Windows::finalize_core() {
 
 	FileAccessWindows::finalize();
 
-#if WINAPI_FAMILY == WINAPI_FAMILY_DESKTOP_APP
-	timeEndPeriod(1);
-#endif
+	// zym: timeEndPeriod removed (paired with timeBeginPeriod strip).
 
 	memdelete(process_map);
 	NetSocketWinSock::cleanup();
@@ -605,55 +581,12 @@ String OS_Windows::get_distribution_name() const {
 }
 
 String OS_Windows::get_version() const {
-	RtlGetVersionPtr version_ptr = (RtlGetVersionPtr)(void *)GetProcAddress(GetModuleHandle("ntdll.dll"), "RtlGetVersion");
-	if (version_ptr != nullptr) {
-		RTL_OSVERSIONINFOEXW fow;
-		ZeroMemory(&fow, sizeof(fow));
-		fow.dwOSVersionInfoSize = sizeof(fow);
-		if (version_ptr(&fow) == 0x00000000) {
-			return vformat("%d.%d.%d", (int64_t)fow.dwMajorVersion, (int64_t)fow.dwMinorVersion, (int64_t)fow.dwBuildNumber);
-		}
-	}
+	// zym: RtlGetVersionPtr typedef came from removed header; version detection stripped.
 	return "";
 }
 
 String OS_Windows::get_version_alias() const {
-	RtlGetVersionPtr version_ptr = (RtlGetVersionPtr)(void *)GetProcAddress(GetModuleHandle("ntdll.dll"), "RtlGetVersion");
-	if (version_ptr != nullptr) {
-		RTL_OSVERSIONINFOEXW fow;
-		ZeroMemory(&fow, sizeof(fow));
-		fow.dwOSVersionInfoSize = sizeof(fow);
-		if (version_ptr(&fow) == 0x00000000) {
-			String windows_string;
-			if (fow.wProductType != VER_NT_WORKSTATION && fow.dwMajorVersion == 10 && fow.dwBuildNumber >= 26100) {
-				windows_string = "Server 2025";
-			} else if (fow.dwMajorVersion == 10 && fow.dwBuildNumber >= 20348) {
-				// Builds above 20348 correspond to Windows 11 / Windows Server 2022.
-				// Their major version numbers are still 10 though, not 11.
-				if (fow.wProductType != VER_NT_WORKSTATION) {
-					windows_string += "Server 2022";
-				} else {
-					windows_string += "11";
-				}
-			} else if (fow.dwMajorVersion == 10) {
-				if (fow.wProductType != VER_NT_WORKSTATION && fow.dwBuildNumber >= 17763) {
-					windows_string += "Server 2019";
-				} else {
-					if (fow.wProductType != VER_NT_WORKSTATION) {
-						windows_string += "Server 2016";
-					} else {
-						windows_string += "10";
-					}
-				}
-			} else {
-				windows_string += "Unknown";
-			}
-			// Windows versions older than 10 cannot run Godot.
-
-			return vformat("%s (build %d)", windows_string, (int64_t)fow.dwBuildNumber);
-		}
-	}
-
+	// zym: RtlGetVersionPtr typedef came from removed header; version detection stripped.
 	return "";
 }
 
@@ -819,25 +752,8 @@ Vector<String> OS_Windows::_get_video_adapter_driver_info_wmi(const String &p_na
 }
 
 Vector<String> OS_Windows::get_video_adapter_driver_info() const {
-	if (RenderingServer::get_singleton() == nullptr) {
-		return Vector<String>();
-	}
-
-	static Vector<String> info;
-	if (!info.is_empty()) {
-		return info;
-	}
-
-	const String device_name = RenderingServer::get_singleton()->get_video_adapter_name();
-	if (device_name.is_empty()) {
-		return Vector<String>();
-	}
-
-	info = _get_video_adapter_driver_info_reg(device_name);
-	if (info.is_empty()) {
-		info = _get_video_adapter_driver_info_wmi(device_name);
-	}
-	return info;
+	// zym: RenderingServer removed (headless CLI); no video adapter info.
+	return Vector<String>();
 }
 
 bool OS_Windows::get_user_prefers_integrated_gpu() const {
@@ -1750,9 +1666,7 @@ public:
 		if (IID_IUnknown == riid) {
 			AddRef();
 			*ppvInterface = (IUnknown *)this;
-		} else if (__uuidof(IMMNotificationClient) == riid) {
-			AddRef();
-			*ppvInterface = (IMMNotificationClient *)this;
+		// zym: IMMNotificationClient (WASAPI device-change COM iface) removed.
 		} else {
 			*ppvInterface = nullptr;
 			return E_NOINTERFACE;
@@ -1886,14 +1800,14 @@ DWRITE_FONT_STRETCH OS_Windows::_stretch_to_dw(int p_stretch) const {
 }
 
 Vector<String> OS_Windows::get_system_font_path_for_text(const String &p_font_name, const String &p_text, const String &p_locale, const String &p_script, int p_weight, int p_stretch, bool p_italic) const {
-	// This may be called before TextServerManager has been created, which would cause a crash downstream if we do not check here
-	if (!dwrite2_init || !TextServerManager::get_singleton()) {
+	// zym: TextServerManager / TS removed (headless CLI); rtl detection stubbed false.
+	if (!dwrite2_init) {
 		return Vector<String>();
 	}
 
 	String font_name = _get_default_fontname(p_font_name);
 
-	bool rtl = TS->is_locale_right_to_left(p_locale);
+	bool rtl = false;
 	Char16String text = p_text.utf16();
 	Char16String locale = p_locale.utf16();
 
@@ -2347,7 +2261,7 @@ void OS_Windows::run() {
 	while (true) {
 		GodotProfileFrameMark;
 		GodotProfileZone("OS_Windows::run");
-		DisplayServer::get_singleton()->process_events(); // get rid of pending events
+		// zym: DisplayServer removed (headless CLI); no event pumping.
 		if (Main::iteration()) {
 			break;
 		}
@@ -2594,19 +2508,8 @@ String OS_Windows::get_system_ca_certificates() {
 }
 
 void OS_Windows::add_frame_delay(bool p_can_draw, bool p_wake_for_events) {
-	if (p_wake_for_events) {
-		uint64_t delay = get_frame_delay(p_can_draw);
-		if (delay == 0) {
-			return;
-		}
-
-		DisplayServer *ds = DisplayServer::get_singleton();
-		DisplayServerWindows *ds_win = Object::cast_to<DisplayServerWindows>(ds);
-		if (ds_win) {
-			MsgWaitForMultipleObjects(0, nullptr, false, Math::floor(double(delay) / 1000.0), QS_ALLINPUT);
-			return;
-		}
-	}
+	// zym: DisplayServer / DisplayServerWindows removed (headless CLI); wake_for_events path stripped.
+	(void)p_wake_for_events;
 
 	const uint32_t frame_delay = Engine::get_singleton()->get_frame_delay();
 	if (frame_delay) {
@@ -2894,7 +2797,7 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 	AudioDriverManager::add_driver(&driver_xaudio2);
 #endif
 
-	DisplayServerWindows::register_windows_driver();
+	// zym: DisplayServerWindows::register_windows_driver() removed (headless CLI).
 
 	// Enable ANSI escape code support on Windows 10 v1607 (Anniversary Update) and later.
 	// This lets the engine and projects use ANSI escape codes to color text just like on macOS and Linux.

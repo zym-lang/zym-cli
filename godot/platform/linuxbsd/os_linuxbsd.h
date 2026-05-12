@@ -33,12 +33,8 @@
 #include "crash_handler_linuxbsd.h"
 
 #include "core/input/input.h"
-#include "drivers/alsa/audio_driver_alsa.h"
-#include "drivers/alsamidi/midi_driver_alsamidi.h"
-#include "drivers/pulseaudio/audio_driver_pulseaudio.h"
 #include "drivers/unix/os_unix.h"
-// zym: servers/* removed; `audio_server.h` was unreferenced from this header
-// (its presence was vestigial).
+// zym: servers/* and input/sound/rendering drivers removed.
 
 #ifdef FONTCONFIG_ENABLED
 #ifdef SOWRAP_ENABLED
@@ -47,8 +43,6 @@
 #include <fontconfig/fontconfig.h>
 #endif
 #endif
-
-class JoypadSDL;
 
 class OS_LinuxBSD : public OS_Unix {
 	virtual void delete_main_loop() override;
@@ -60,22 +54,6 @@ class OS_LinuxBSD : public OS_Unix {
 
 	int _weight_to_fc(int p_weight) const;
 	int _stretch_to_fc(int p_stretch) const;
-#endif
-
-#ifdef SDL_ENABLED
-	JoypadSDL *joypad_sdl = nullptr;
-#endif
-
-#ifdef ALSA_ENABLED
-	AudioDriverALSA driver_alsa;
-#endif
-
-#ifdef ALSAMIDI_ENABLED
-	MIDIDriverALSAMidi driver_alsamidi;
-#endif
-
-#ifdef PULSEAUDIO_ENABLED
-	AudioDriverPulseAudio driver_pulseaudio;
 #endif
 
 	CrashHandler crash_handler;

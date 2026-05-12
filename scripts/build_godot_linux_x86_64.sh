@@ -98,20 +98,14 @@ exec scons \
     optimize=size_extra \
     production=yes \
     \
-    vulkan=no \
-    opengl3=no \
     x11=no \
     wayland=no \
     libdecor=no \
     touch=no \
-    alsa=no \
-    pulseaudio=no \
     dbus=no \
     speechd=no \
     fontconfig=no \
     udev=no \
-    sdl=no \
-    accesskit=no \
     \
     disable_3d=yes \
     disable_advanced_gui=yes \

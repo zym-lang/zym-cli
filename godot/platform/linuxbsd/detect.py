@@ -327,27 +327,7 @@ def configure(env: "SConsEnvironment"):
         else:
             env.Append(CPPDEFINES=["FONTCONFIG_ENABLED"])
 
-    if env["alsa"]:
-        if not env["use_sowrap"]:
-            if os.system("pkg-config --exists alsa") == 0:  # 0 means found
-                env.ParseConfig("pkg-config alsa --cflags --libs")
-                env.Append(CPPDEFINES=["ALSA_ENABLED", "ALSAMIDI_ENABLED"])
-            else:
-                print_warning("ALSA development libraries not found. Disabling the ALSA audio driver.")
-                env["alsa"] = False
-        else:
-            env.Append(CPPDEFINES=["ALSA_ENABLED", "ALSAMIDI_ENABLED"])
-
-    if env["pulseaudio"]:
-        if not env["use_sowrap"]:
-            if os.system("pkg-config --exists libpulse") == 0:  # 0 means found
-                env.ParseConfig("pkg-config libpulse --cflags --libs")
-                env.Append(CPPDEFINES=["PULSEAUDIO_ENABLED"])
-            else:
-                print_warning("PulseAudio development libraries not found. Disabling the PulseAudio audio driver.")
-                env["pulseaudio"] = False
-        else:
-            env.Append(CPPDEFINES=["PULSEAUDIO_ENABLED", "_REENTRANT"])
+    # zym: ALSA/PulseAudio audio drivers removed.
 
     if env["dbus"] and env["threads"]:  # D-Bus functionality expects threads.
         if not env["use_sowrap"]:
@@ -400,17 +380,7 @@ def configure(env: "SConsEnvironment"):
     else:
         env["udev"] = False  # Linux specific
 
-    if env["sdl"]:
-        if env["builtin_sdl"]:
-            env.Append(CPPDEFINES=["SDL_ENABLED"])
-        elif os.system("pkg-config --exists sdl3") == 0:  # 0 means found
-            env.ParseConfig("pkg-config sdl3 --cflags --libs")
-            env.Append(CPPDEFINES=["SDL_ENABLED"])
-        else:
-            print_warning(
-                "SDL3 development libraries not found, and `builtin_sdl` was explicitly disabled. Disabling SDL input driver support."
-            )
-            env["sdl"] = False
+    # zym: SDL input driver removed.
 
     # Linkflags below this line should typically stay the last ones
     if not env["builtin_zlib"]:
@@ -490,34 +460,7 @@ def configure(env: "SConsEnvironment"):
         env.Append(CPPDEFINES=["WAYLAND_ENABLED"])
         env.Append(LIBS=["rt"])  # Needed by glibc, used by _allocate_shm_file
 
-    if env["accesskit"]:
-        if env["accesskit_sdk_path"] != "":
-            env.Prepend(CPPPATH=[env["accesskit_sdk_path"] + "/include"])
-            if env["arch"] == "arm64":
-                env.Append(LIBPATH=[env["accesskit_sdk_path"] + "/lib/linux/arm64/static/"])
-            elif env["arch"] == "arm32":
-                env.Append(LIBPATH=[env["accesskit_sdk_path"] + "/lib/linux/arm32/static/"])
-            elif env["arch"] == "rv64":
-                env.Append(LIBPATH=[env["accesskit_sdk_path"] + "/lib/linux/riscv64gc/static/"])
-            elif env["arch"] == "x86_64":
-                env.Append(LIBPATH=[env["accesskit_sdk_path"] + "/lib/linux/x86_64/static/"])
-            elif env["arch"] == "x86_32":
-                env.Append(LIBPATH=[env["accesskit_sdk_path"] + "/lib/linux/x86/static/"])
-            env.Append(LIBS=["accesskit"])
-        else:
-            env.Append(CPPDEFINES=["ACCESSKIT_DYNAMIC"])
-        env.Append(CPPDEFINES=["ACCESSKIT_ENABLED"])
-
-    if env["vulkan"]:
-        env.Append(CPPDEFINES=["VULKAN_ENABLED", "RD_ENABLED"])
-        if not env["use_volk"]:
-            env.ParseConfig("pkg-config vulkan --cflags --libs")
-        if not env["builtin_glslang"]:
-            # No pkgconfig file so far, hardcode expected lib name.
-            env.Append(LIBS=["glslang", "SPIRV", "glslang-default-resource-limits"])
-
-    if env["opengl3"]:
-        env.Append(CPPDEFINES=["GLES3_ENABLED"])
+    # zym: AccessKit / Vulkan / OpenGL3 rendering drivers removed.
 
     env.Append(LIBS=["pthread"])
 

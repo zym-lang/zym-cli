@@ -177,15 +177,19 @@ opts.Add(
 )
 opts.Add(BoolVariable("minizip", "Enable ZIP archive support using minizip", True))
 opts.Add(BoolVariable("brotli", "Enable Brotli for decompression and WOFF2 fonts support", True))
-opts.Add(BoolVariable("xaudio2", "Enable the XAudio2 audio driver on supported platforms", False))
-opts.Add(BoolVariable("vulkan", "Enable the Vulkan rendering driver", True))
-opts.Add(BoolVariable("opengl3", "Enable the OpenGL/GLES3 rendering driver", True))
-opts.Add(BoolVariable("d3d12", "Enable the Direct3D 12 rendering driver on supported platforms", False))
-opts.Add(BoolVariable("metal", "Enable the Metal rendering driver on supported platforms (Apple arm64 only)", False))
-opts.Add(BoolVariable("use_volk", "Use the volk library to load the Vulkan loader dynamically", True))
-opts.Add(BoolVariable("accesskit", "Use AccessKit C SDK", True))
-opts.Add(("accesskit_sdk_path", "Path to the AccessKit C SDK", ""))
-opts.Add(BoolVariable("sdl", "Enable the SDL3 input driver", True))
+# Input/sound/rendering driver options forced off — zym-cli does not use Godot's
+# input/audio/rendering, and the corresponding driver folders have been nuked.
+# These remain declared (as locked False) so platform/*/detect.py and SCsubs that
+# still read them don't KeyError; their `if env["x"]:` branches simply never fire.
+opts.Add(BoolVariable("xaudio2", "(disabled in zym-cli)", False))
+opts.Add(BoolVariable("vulkan", "(disabled in zym-cli)", False))
+opts.Add(BoolVariable("opengl3", "(disabled in zym-cli)", False))
+opts.Add(BoolVariable("d3d12", "(disabled in zym-cli)", False))
+opts.Add(BoolVariable("metal", "(disabled in zym-cli)", False))
+opts.Add(BoolVariable("use_volk", "(disabled in zym-cli)", False))
+opts.Add(BoolVariable("accesskit", "(disabled in zym-cli)", False))
+opts.Add(("accesskit_sdk_path", "(disabled in zym-cli)", ""))
+opts.Add(BoolVariable("sdl", "(disabled in zym-cli)", False))
 opts.Add(
     EnumVariable(
         "profiler", "Specify the profiler to use", "none", ["none", "tracy", "perfetto", "instruments"], ignorecase=2

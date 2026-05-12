@@ -33,19 +33,14 @@
 #include "core/io/file_access.h"
 #include "core/io/image.h"
 #include "drivers/png/png_driver_common.h"
-#include "scene/resources/image_texture.h"
 
+// zym: scene/* has been removed; ImageTexture lived under scene/resources and
+// is no longer available. The Resource-flavored save path (which required an
+// ImageTexture) is inert; the Image-buffer path used by zym (save_image /
+// save_image_to_buffer, hooked into Image::save_png_func in the ctor) is
+// untouched.
 Error ResourceSaverPNG::save(const Ref<Resource> &p_resource, const String &p_path, uint32_t p_flags) {
-	Ref<ImageTexture> texture = p_resource;
-
-	ERR_FAIL_COND_V_MSG(texture.is_null(), ERR_INVALID_PARAMETER, "Can't save invalid texture as PNG.");
-	ERR_FAIL_COND_V_MSG(!texture->get_width(), ERR_INVALID_PARAMETER, "Can't save empty texture as PNG.");
-
-	Ref<Image> img = texture->get_image();
-
-	Error err = save_image(p_path, img);
-
-	return err;
+	return ERR_UNAVAILABLE;
 }
 
 Error ResourceSaverPNG::save_image(const String &p_path, const Ref<Image> &p_img) {
@@ -73,13 +68,12 @@ Vector<uint8_t> ResourceSaverPNG::save_image_to_buffer(const Ref<Image> &p_img) 
 }
 
 bool ResourceSaverPNG::recognize(const Ref<Resource> &p_resource) const {
-	return (p_resource.is_valid() && p_resource->is_class("ImageTexture"));
+	// zym: ImageTexture lived under scene/resources/* which is gone.
+	return false;
 }
 
 void ResourceSaverPNG::get_recognized_extensions(const Ref<Resource> &p_resource, List<String> *p_extensions) const {
-	if (Object::cast_to<ImageTexture>(*p_resource)) {
-		p_extensions->push_back("png");
-	}
+	// zym: ImageTexture lived under scene/resources/* which is gone.
 }
 
 ResourceSaverPNG::ResourceSaverPNG() {

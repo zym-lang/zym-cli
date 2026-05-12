@@ -35,7 +35,6 @@
 #include "core/math/random_pcg.h"
 #include "core/os/os.h"
 #include "core/variant/container_type_validate.h"
-#include "scene/main/node.h" //only so casting works
 
 void Resource::emit_changed() {
 	if (emit_changed_state != EMIT_CHANGED_UNBLOCKED) {
@@ -281,8 +280,6 @@ Variant Resource::_duplicate_recursive(const Variant &p_variant, const Duplicate
 					should_duplicate = true;
 				} else if ((p_usage & PROPERTY_USAGE_NEVER_DUPLICATE)) {
 					should_duplicate = false;
-				} else if (p_params.local_scene) {
-					should_duplicate = sr->is_local_to_scene();
 				} else {
 					switch (p_params.subres_mode) {
 						case RESOURCE_DEEP_DUPLICATE_NONE: {
@@ -310,9 +307,7 @@ Variant Resource::_duplicate_recursive(const Variant &p_variant, const Duplicate
 				if (thread_duplicate_remap_cache->has(sr)) {
 					return thread_duplicate_remap_cache->get(sr);
 				} else {
-					const Ref<Resource> &dupe = p_params.local_scene
-							? sr->duplicate_for_local_scene(p_params.local_scene, *thread_duplicate_remap_cache)
-							: sr->_duplicate(p_params);
+					const Ref<Resource> &dupe = sr->_duplicate(p_params);
 					thread_duplicate_remap_cache->insert(sr, dupe);
 					return dupe;
 				}
@@ -365,8 +360,6 @@ Variant Resource::_duplicate_recursive(const Variant &p_variant, const Duplicate
 }
 
 Ref<Resource> Resource::_duplicate(const DuplicateParams &p_params) const {
-	ERR_FAIL_COND_V_MSG(p_params.local_scene && p_params.subres_mode != RESOURCE_DEEP_DUPLICATE_MAX, Ref<Resource>(), "Duplication for local-to-scene can't specify a deep duplicate mode.");
-
 	DuplicateRemapCacheT *remap_cache_backup = thread_duplicate_remap_cache;
 	bool remap_cache_needs_deallocation_backup = thread_duplicate_remap_cache_needs_deallocation;
 
@@ -386,10 +379,6 @@ Ref<Resource> Resource::_duplicate(const DuplicateParams &p_params) const {
 	ERR_FAIL_COND_V(r.is_null(), Ref<Resource>());
 
 	thread_duplicate_remap_cache->insert(Ref<Resource>(this), r);
-
-	if (p_params.local_scene) {
-		r->local_scene = p_params.local_scene;
-	}
 
 	// Duplicate script first, so the scripted properties are considered.
 	BEFORE_USER_CODE
@@ -421,37 +410,6 @@ Ref<Resource> Resource::_duplicate(const DuplicateParams &p_params) const {
 #undef AFTER_USER_CODE
 }
 
-Ref<Resource> Resource::duplicate_for_local_scene(Node *p_for_scene, DuplicateRemapCacheT &p_remap_cache) const {
-#ifdef DEBUG_ENABLED
-	// The only possibilities for the remap cache passed being valid are these:
-	// a) It's the same already used as the one of the thread. That happens when this function
-	//    is called within some recursion level within a duplication.
-	// b) There's no current thread remap cache, which means this function is acting as an entry point.
-	// This check failing means that this function is being called as an entry point during an ongoing
-	// duplication, likely due to custom instantiation or setter code. It would be an engine bug because
-	// code starting or joining a duplicate session must ensure to exit it temporarily when making calls
-	// that may in turn invoke such custom code.
-	if (thread_duplicate_remap_cache && &p_remap_cache != thread_duplicate_remap_cache) {
-		ERR_PRINT("Resource::duplicate_for_local_scene() called during an ongoing duplication session. This is an engine bug.");
-	}
-#endif
-
-	DuplicateRemapCacheT *remap_cache_backup = thread_duplicate_remap_cache;
-	bool remap_cache_needs_deallocation_backup = thread_duplicate_remap_cache_needs_deallocation;
-	thread_duplicate_remap_cache = &p_remap_cache;
-	thread_duplicate_remap_cache_needs_deallocation = false;
-
-	DuplicateParams params;
-	params.deep = true;
-	params.local_scene = p_for_scene;
-	const Ref<Resource> &dupe = _duplicate(params);
-
-	thread_duplicate_remap_cache = remap_cache_backup;
-	thread_duplicate_remap_cache_needs_deallocation = remap_cache_needs_deallocation_backup;
-
-	return dupe;
-}
-
 void Resource::_find_sub_resources(const Variant &p_variant, HashSet<Ref<Resource>> &p_resources_found) {
 	switch (p_variant.get_type()) {
 		case Variant::ARRAY: {
@@ -474,33 +432,6 @@ void Resource::_find_sub_resources(const Variant &p_variant, HashSet<Ref<Resourc
 			}
 		} break;
 		default: {
-		}
-	}
-}
-
-void Resource::configure_for_local_scene(Node *p_for_scene, DuplicateRemapCacheT &p_remap_cache) {
-	List<PropertyInfo> plist;
-	get_property_list(&plist);
-
-	reset_local_to_scene();
-	local_scene = p_for_scene;
-
-	for (const PropertyInfo &E : plist) {
-		if (!(E.usage & PROPERTY_USAGE_STORAGE)) {
-			continue;
-		}
-		Variant p = get(E.name);
-
-		HashSet<Ref<Resource>> sub_resources;
-		_find_sub_resources(p, sub_resources);
-
-		for (Ref<Resource> sr : sub_resources) {
-			if (sr->is_local_to_scene()) {
-				if (!p_remap_cache.has(sr)) {
-					sr->configure_for_local_scene(p_for_scene, p_remap_cache);
-					p_remap_cache[sr] = sr;
-				}
-			}
 		}
 	}
 }
@@ -640,40 +571,10 @@ uint32_t Resource::hash_edited_version_for_preview() const {
 
 #endif
 
-void Resource::set_local_to_scene(bool p_enable) {
-	local_to_scene = p_enable;
-}
-
-bool Resource::is_local_to_scene() const {
-	return local_to_scene;
-}
-
-Node *Resource::get_local_scene() const {
-	if (local_scene) {
-		return local_scene;
-	}
-
-	if (_get_local_scene_func) {
-		return _get_local_scene_func();
-	}
-
-	return nullptr;
-}
-
-void Resource::setup_local_to_scene() {
-	emit_signal(SNAME("setup_local_to_scene_requested"));
-	GDVIRTUAL_CALL(_setup_local_to_scene);
-}
-
-void Resource::reset_local_to_scene() {
-	// Restores the state as if setup_local_to_scene() hadn't been called.
-}
-
 String Resource::_to_string() {
 	return (name.is_empty() ? "" : String(name) + " ") + "(" + path_cache + "):" + Object::_to_string();
 }
 
-Node *(*Resource::_get_local_scene_func)() = nullptr;
 void (*Resource::_update_configuration_warning)() = nullptr;
 
 void Resource::set_as_translation_remapped(bool p_remapped) {
@@ -729,10 +630,6 @@ void Resource::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_name", "name"), &Resource::set_name);
 	ClassDB::bind_method(D_METHOD("get_name"), &Resource::get_name);
 	ClassDB::bind_method(D_METHOD("get_rid"), &Resource::get_rid);
-	ClassDB::bind_method(D_METHOD("set_local_to_scene", "enable"), &Resource::set_local_to_scene);
-	ClassDB::bind_method(D_METHOD("is_local_to_scene"), &Resource::is_local_to_scene);
-	ClassDB::bind_method(D_METHOD("get_local_scene"), &Resource::get_local_scene);
-	ClassDB::bind_method(D_METHOD("setup_local_to_scene"), &Resource::setup_local_to_scene);
 	ClassDB::bind_method(D_METHOD("reset_state"), &Resource::reset_state);
 
 	ClassDB::bind_method(D_METHOD("set_id_for_path", "path", "id"), &Resource::set_id_for_path);
@@ -756,15 +653,12 @@ void Resource::_bind_methods() {
 	ClassDB::bind_integer_constant(get_class_static(), StringName("DeepDuplicateMode"), "DEEP_DUPLICATE_ALL", RESOURCE_DEEP_DUPLICATE_ALL);
 
 	ADD_SIGNAL(MethodInfo("changed"));
-	ADD_SIGNAL(MethodInfo("setup_local_to_scene_requested"));
 
 	ADD_GROUP("Resource", "resource_");
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "resource_local_to_scene"), "set_local_to_scene", "is_local_to_scene");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "resource_path", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_EDITOR), "set_path", "get_path");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "resource_name"), "set_name", "get_name");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "resource_scene_unique_id", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_scene_unique_id", "get_scene_unique_id");
 
-	GDVIRTUAL_BIND(_setup_local_to_scene);
 	GDVIRTUAL_BIND(_get_rid);
 	GDVIRTUAL_BIND(_reset_state);
 	GDVIRTUAL_BIND(_set_path_cache, "path");

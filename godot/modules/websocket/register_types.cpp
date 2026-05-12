@@ -31,8 +31,9 @@
 #include "register_types.h"
 
 #include "remote_debugger_peer_websocket.h"
-#include "websocket_multiplayer_peer.h"
 #include "websocket_peer.h"
+// zym: WebSocketMultiplayerPeer was scene-bound (extended MultiplayerPeer
+// from scene/main/) and has been removed; its header is now empty.
 
 #ifdef WEB_ENABLED
 #include "emws_peer.h"
@@ -66,7 +67,7 @@ void initialize_websocket_module(ModuleInitializationLevel p_level) {
 		WSLPeer::initialize();
 #endif
 
-		GDREGISTER_CLASS(WebSocketMultiplayerPeer);
+		// zym: WebSocketMultiplayerPeer removed alongside scene/*.
 		ClassDB::register_custom_instance_class<WebSocketPeer>();
 
 		EngineDebugger::register_uri_handler("ws://", RemoteDebuggerPeerWebSocket::create);

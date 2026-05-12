@@ -36,8 +36,6 @@
 #include "core/io/missing_resource.h"
 #include "core/object/script_language.h"
 #include "core/version.h"
-#include "scene/property_utils.h"
-#include "scene/resources/packed_scene.h"
 
 //#define print_bl(m_what) print_line(m_what)
 #define print_bl(m_what) (void)(m_what)
@@ -1519,43 +1517,6 @@ void ResourceFormatLoaderBinary::get_classes_used(const String &p_path, HashSet<
 	loader.local_path = ProjectSettings::get_singleton()->localize_path(p_path);
 	loader.res_path = loader.local_path;
 	loader.get_classes_used(f, r_classes);
-
-	if (loader.type != "PackedScene") {
-		return;
-	}
-
-	// Fetch the nodes inside scene files.
-
-	// Reopening is necessary, or errors will occur.
-	f->reopen(p_path, FileAccess::READ);
-	loader.open(f);
-	ERR_FAIL_COND(loader.load() != OK);
-
-	Ref<SceneState> state = Ref<PackedScene>(loader.get_resource())->get_state();
-	for (int i = 0; i < state->get_node_count(); i++) {
-		const StringName node_name = state->get_node_type(i);
-		if (ClassDB::class_exists(node_name)) {
-			r_classes->insert(node_name);
-		}
-
-		// Fetch the values of properties in the node.
-		for (int j = 0; j < state->get_node_property_count(i); j++) {
-			const Variant var = state->get_node_property_value(i, j);
-			if (var.get_type() != Variant::OBJECT) {
-				continue;
-			}
-
-			const Object *obj = var.get_validated_object();
-			if (obj == nullptr) {
-				continue;
-			}
-
-			const StringName obj_name = obj->get_class_name();
-			if (ClassDB::class_exists(obj_name)) {
-				r_classes->insert(obj_name);
-			}
-		}
-	}
 }
 
 String ResourceFormatLoaderBinary::get_resource_type(const String &p_path) const {
@@ -2289,13 +2250,6 @@ Error ResourceFormatSaverBinaryInstance::save(const String &p_path, const Ref<Re
 						if (res.is_null()) {
 							p.value = missing_resource_properties[F.name];
 						}
-					}
-
-					bool is_script = F.name == CoreStringName(script);
-					Variant default_value = is_script ? Variant() : PropertyUtils::get_property_default_value(E.ptr(), F.name);
-
-					if (default_value.get_type() != Variant::NIL && bool(Variant::evaluate(Variant::OP_EQUAL, p.value, default_value))) {
-						continue;
 					}
 
 					p.pi = F;

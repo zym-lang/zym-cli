@@ -31,8 +31,9 @@
 #include "register_types.h"
 
 #include "enet_connection.h"
-#include "enet_multiplayer_peer.h"
 #include "enet_packet_peer.h"
+// zym: ENetMultiplayerPeer was scene-bound (extended MultiplayerPeer from
+// scene/main/) and has been removed; its header is now empty.
 
 #include "core/error/error_macros.h"
 
@@ -49,7 +50,7 @@ void initialize_enet_module(ModuleInitializationLevel p_level) {
 		enet_ok = true;
 	}
 
-	GDREGISTER_CLASS(ENetMultiplayerPeer);
+	// zym: ENetMultiplayerPeer removed alongside scene/*.
 	GDREGISTER_ABSTRACT_CLASS(ENetPacketPeer);
 	GDREGISTER_CLASS(ENetConnection);
 }

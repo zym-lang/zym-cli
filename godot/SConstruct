@@ -1142,8 +1142,8 @@ if "cpp_compiler_launcher" in env:
 Export("env")
 
 SConscript("core/SCsub")
-SConscript("servers/SCsub")
-SConscript("scene/SCsub")
+# zym: servers/ has been removed from this fork (no scenes, no servers).
+# SConscript("servers/SCsub")
 SConscript("drivers/SCsub")
 
 SConscript("platform/SCsub")

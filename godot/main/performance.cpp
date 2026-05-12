@@ -33,8 +33,6 @@
 
 #include "core/os/os.h"
 #include "core/variant/typed_array.h"
-#include "scene/main/node.h"
-#include "scene/main/scene_tree.h"
 #include "servers/audio/audio_server.h"
 #include "servers/rendering/rendering_server.h"
 
@@ -142,22 +140,11 @@ void Performance::_bind_methods() {
 }
 
 int Performance::_get_node_count() const {
-	MainLoop *ml = OS::get_singleton()->get_main_loop();
-	SceneTree *sml = Object::cast_to<SceneTree>(ml);
-	if (!sml) {
-		return 0;
-	}
-	return sml->get_node_count();
+	return 0;
 }
 
 int Performance::_get_orphan_node_count() const {
-#ifdef DEBUG_ENABLED
-	const int total_node_count = Node::total_node_count.get();
-	const int orphan_node_count = total_node_count - _get_node_count();
-	return orphan_node_count;
-#else
 	return 0;
-#endif
 }
 
 String Performance::get_monitor_name(Monitor p_monitor) const {

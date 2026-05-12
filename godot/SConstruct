@@ -70,7 +70,6 @@ if ARGUMENTS.get("target", "editor") == "editor":
 platform_list = []  # list of platforms
 platform_opts = {}  # options for each platform
 platform_flags = {}  # flags for each platform
-platform_doc_class_path = {}
 platform_exporters = []
 platform_apis = []
 
@@ -81,15 +80,6 @@ for x in sorted(glob.glob("platform/*")):
 
     sys.path.insert(0, tmppath)
     import detect
-
-    # Get doc classes paths (if present)
-    try:
-        doc_classes = detect.get_doc_classes()
-        doc_path = detect.get_doc_path()
-        for c in doc_classes:
-            platform_doc_class_path[c] = x.replace("\\", "/") + "/" + doc_path
-    except Exception:
-        pass
 
     platform_name = x[9:]
 
@@ -1082,7 +1072,6 @@ if not env["verbose"]:
 modules_enabled = OrderedDict()
 env.module_dependencies = {}
 env.module_icons_paths = []
-env.doc_class_path = platform_doc_class_path
 
 for name, path in modules_detected.items():
     if not env[f"module_{name}_enabled"]:
@@ -1097,14 +1086,6 @@ for name, path in modules_detected.items():
             continue
 
         config.configure(env)
-        # Get doc classes paths (if present)
-        try:
-            doc_classes = config.get_doc_classes()
-            doc_path = config.get_doc_path()
-            for c in doc_classes:
-                env.doc_class_path[c] = path + "/" + doc_path
-        except Exception:
-            pass
         # Get icon paths (if present)
         try:
             icons_path = config.get_icons_path()

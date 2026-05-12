@@ -98,8 +98,6 @@ exec scons \
     optimize=size_extra \
     production=yes \
     \
-    modules_enabled_by_default=no \
-    \
     vulkan=no \
     opengl3=no \
     x11=no \
@@ -130,11 +128,6 @@ exec scons \
     minizip=no \
     brotli=yes \
     disable_exceptions=yes \
-    \
-    module_regex_enabled=yes \
-    module_mbedtls_enabled=yes \
-    module_enet_enabled=yes \
-    module_websocket_enabled=yes \
     \
     build_profile="../scripts/zym_profile.gdbuild" \
     ccflags="${ZYM_CCFLAGS}" \

@@ -112,6 +112,7 @@ set(ZYM_NATIVE_SOURCES
         src/natives/ip.cpp
         src/natives/sockets.cpp
         src/natives/enet.cpp
+        src/natives/websocket.cpp
         src/natives/aes.cpp
         src/natives/pack.cpp
 )
@@ -179,6 +180,7 @@ set(ZYM_GODOT_SUBLIBS
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_regex.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_mbedtls.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_enet.${ZYM_GODOT_LIB_SUFFIX}.a"
+        "${ZYM_GODOT_BIN_DIR}/obj/modules/libmodule_websocket.${ZYM_GODOT_LIB_SUFFIX}.a"
         "${ZYM_GODOT_BIN_DIR}/obj/core/libcore.${ZYM_GODOT_LIB_SUFFIX}.a"
 )
 

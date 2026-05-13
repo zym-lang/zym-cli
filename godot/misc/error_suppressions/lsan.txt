@@ -1,2 +1,0 @@
-# Supported suppression types are:
-# - leak

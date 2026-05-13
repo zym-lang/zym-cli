@@ -35,25 +35,8 @@
 #include "drivers/unix/os_unix.h"
 // zym: servers/*, input/*, sound/rendering drivers removed.
 
-#ifdef FONTCONFIG_ENABLED
-#ifdef SOWRAP_ENABLED
-#include "fontconfig-so_wrap.h"
-#else
-#include <fontconfig/fontconfig.h>
-#endif
-#endif
-
 class OS_LinuxBSD : public OS_Unix {
 	virtual void delete_main_loop() override;
-
-#ifdef FONTCONFIG_ENABLED
-	bool font_config_initialized = false;
-	FcConfig *config = nullptr;
-	FcObjectSet *object_set = nullptr;
-
-	int _weight_to_fc(int p_weight) const;
-	int _stretch_to_fc(int p_stretch) const;
-#endif
 
 	CrashHandler crash_handler;
 

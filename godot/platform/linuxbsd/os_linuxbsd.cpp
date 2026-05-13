@@ -549,12 +549,6 @@ Error OS_LinuxBSD::shell_open(const String &p_uri) {
 }
 
 bool OS_LinuxBSD::_check_internal_feature_support(const String &p_feature) {
-#ifdef FONTCONFIG_ENABLED
-	if (p_feature == "system_fonts") {
-		return font_config_initialized;
-	}
-#endif
-
 #ifndef __linux__
 	// `bsd` includes **all** BSD, not only "other BSD" (see `get_name()`).
 	if (p_feature == "bsd") {
@@ -660,205 +654,15 @@ uint64_t OS_LinuxBSD::get_embedded_pck_offset() const {
 }
 
 Vector<String> OS_LinuxBSD::get_system_fonts() const {
-#ifdef FONTCONFIG_ENABLED
-	if (!font_config_initialized) {
-		ERR_FAIL_V_MSG(Vector<String>(), "Unable to load fontconfig, system font support is disabled.");
-	}
-
-	HashSet<String> font_names;
-	Vector<String> ret;
-	static const char *allowed_formats[] = { "TrueType", "CFF" };
-	for (size_t i = 0; i < sizeof(allowed_formats) / sizeof(const char *); i++) {
-		FcPattern *pattern = FcPatternCreate();
-		ERR_CONTINUE(!pattern);
-
-		FcPatternAddBool(pattern, FC_SCALABLE, FcTrue);
-		FcPatternAddString(pattern, FC_FONTFORMAT, reinterpret_cast<const FcChar8 *>(allowed_formats[i]));
-
-		FcFontSet *font_set = FcFontList(config, pattern, object_set);
-		if (font_set) {
-			for (int j = 0; j < font_set->nfont; j++) {
-				char *family_name = nullptr;
-				if (FcPatternGetString(font_set->fonts[j], FC_FAMILY, 0, reinterpret_cast<FcChar8 **>(&family_name)) == FcResultMatch) {
-					if (family_name) {
-						font_names.insert(String::utf8(family_name));
-					}
-				}
-			}
-			FcFontSetDestroy(font_set);
-		}
-		FcPatternDestroy(pattern);
-	}
-
-	for (const String &E : font_names) {
-		ret.push_back(E);
-	}
-	return ret;
-#else
 	ERR_FAIL_V_MSG(Vector<String>(), "Godot was compiled without fontconfig, system font support is disabled.");
-#endif
 }
-
-#ifdef FONTCONFIG_ENABLED
-int OS_LinuxBSD::_weight_to_fc(int p_weight) const {
-	if (p_weight < 150) {
-		return FC_WEIGHT_THIN;
-	} else if (p_weight < 250) {
-		return FC_WEIGHT_EXTRALIGHT;
-	} else if (p_weight < 325) {
-		return FC_WEIGHT_LIGHT;
-	} else if (p_weight < 375) {
-		return FC_WEIGHT_DEMILIGHT;
-	} else if (p_weight < 390) {
-		return FC_WEIGHT_BOOK;
-	} else if (p_weight < 450) {
-		return FC_WEIGHT_REGULAR;
-	} else if (p_weight < 550) {
-		return FC_WEIGHT_MEDIUM;
-	} else if (p_weight < 650) {
-		return FC_WEIGHT_DEMIBOLD;
-	} else if (p_weight < 750) {
-		return FC_WEIGHT_BOLD;
-	} else if (p_weight < 850) {
-		return FC_WEIGHT_EXTRABOLD;
-	} else if (p_weight < 925) {
-		return FC_WEIGHT_BLACK;
-	} else {
-		return FC_WEIGHT_EXTRABLACK;
-	}
-}
-
-int OS_LinuxBSD::_stretch_to_fc(int p_stretch) const {
-	if (p_stretch < 56) {
-		return FC_WIDTH_ULTRACONDENSED;
-	} else if (p_stretch < 69) {
-		return FC_WIDTH_EXTRACONDENSED;
-	} else if (p_stretch < 81) {
-		return FC_WIDTH_CONDENSED;
-	} else if (p_stretch < 93) {
-		return FC_WIDTH_SEMICONDENSED;
-	} else if (p_stretch < 106) {
-		return FC_WIDTH_NORMAL;
-	} else if (p_stretch < 137) {
-		return FC_WIDTH_SEMIEXPANDED;
-	} else if (p_stretch < 144) {
-		return FC_WIDTH_EXPANDED;
-	} else if (p_stretch < 162) {
-		return FC_WIDTH_EXTRAEXPANDED;
-	} else {
-		return FC_WIDTH_ULTRAEXPANDED;
-	}
-}
-#endif // FONTCONFIG_ENABLED
 
 Vector<String> OS_LinuxBSD::get_system_font_path_for_text(const String &p_font_name, const String &p_text, const String &p_locale, const String &p_script, int p_weight, int p_stretch, bool p_italic) const {
-#ifdef FONTCONFIG_ENABLED
-	if (!font_config_initialized) {
-		ERR_FAIL_V_MSG(Vector<String>(), "Unable to load fontconfig, system font support is disabled.");
-	}
-
-	Vector<String> ret;
-	static const char *allowed_formats[] = { "TrueType", "CFF" };
-	for (size_t i = 0; i < std_size(allowed_formats); i++) {
-		FcPattern *pattern = FcPatternCreate();
-		if (pattern) {
-			FcPatternAddBool(pattern, FC_SCALABLE, FcTrue);
-			FcPatternAddString(pattern, FC_FONTFORMAT, reinterpret_cast<const FcChar8 *>(allowed_formats[i]));
-			FcPatternAddString(pattern, FC_FAMILY, reinterpret_cast<const FcChar8 *>(p_font_name.utf8().get_data()));
-			FcPatternAddInteger(pattern, FC_WEIGHT, _weight_to_fc(p_weight));
-			FcPatternAddInteger(pattern, FC_WIDTH, _stretch_to_fc(p_stretch));
-			FcPatternAddInteger(pattern, FC_SLANT, p_italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
-
-			FcCharSet *char_set = FcCharSetCreate();
-			for (int j = 0; j < p_text.size(); j++) {
-				FcCharSetAddChar(char_set, p_text[j]);
-			}
-			FcPatternAddCharSet(pattern, FC_CHARSET, char_set);
-
-			FcLangSet *lang_set = FcLangSetCreate();
-			FcLangSetAdd(lang_set, reinterpret_cast<const FcChar8 *>(p_locale.utf8().get_data()));
-			FcPatternAddLangSet(pattern, FC_LANG, lang_set);
-
-			FcConfigSubstitute(nullptr, pattern, FcMatchPattern);
-			FcDefaultSubstitute(pattern);
-
-			FcResult result;
-			FcPattern *match = FcFontMatch(nullptr, pattern, &result);
-			if (match) {
-				char *file_name = nullptr;
-				if (FcPatternGetString(match, FC_FILE, 0, reinterpret_cast<FcChar8 **>(&file_name)) == FcResultMatch) {
-					if (file_name) {
-						ret.push_back(String::utf8(file_name));
-					}
-				}
-				FcPatternDestroy(match);
-			}
-			FcPatternDestroy(pattern);
-			FcCharSetDestroy(char_set);
-			FcLangSetDestroy(lang_set);
-		}
-	}
-
-	return ret;
-#else
 	ERR_FAIL_V_MSG(Vector<String>(), "Godot was compiled without fontconfig, system font support is disabled.");
-#endif
 }
 
 String OS_LinuxBSD::get_system_font_path(const String &p_font_name, int p_weight, int p_stretch, bool p_italic) const {
-#ifdef FONTCONFIG_ENABLED
-	if (!font_config_initialized) {
-		ERR_FAIL_V_MSG(String(), "Unable to load fontconfig, system font support is disabled.");
-	}
-
-	static const char *allowed_formats[] = { "TrueType", "CFF" };
-	for (size_t i = 0; i < sizeof(allowed_formats) / sizeof(const char *); i++) {
-		FcPattern *pattern = FcPatternCreate();
-		if (pattern) {
-			bool allow_substitutes = (p_font_name.to_lower() == "sans-serif") || (p_font_name.to_lower() == "serif") || (p_font_name.to_lower() == "monospace") || (p_font_name.to_lower() == "cursive") || (p_font_name.to_lower() == "fantasy");
-
-			FcPatternAddBool(pattern, FC_SCALABLE, FcTrue);
-			FcPatternAddString(pattern, FC_FONTFORMAT, reinterpret_cast<const FcChar8 *>(allowed_formats[i]));
-			FcPatternAddString(pattern, FC_FAMILY, reinterpret_cast<const FcChar8 *>(p_font_name.utf8().get_data()));
-			FcPatternAddInteger(pattern, FC_WEIGHT, _weight_to_fc(p_weight));
-			FcPatternAddInteger(pattern, FC_WIDTH, _stretch_to_fc(p_stretch));
-			FcPatternAddInteger(pattern, FC_SLANT, p_italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
-
-			FcConfigSubstitute(nullptr, pattern, FcMatchPattern);
-			FcDefaultSubstitute(pattern);
-
-			FcResult result;
-			FcPattern *match = FcFontMatch(nullptr, pattern, &result);
-			if (match) {
-				if (!allow_substitutes) {
-					char *family_name = nullptr;
-					if (FcPatternGetString(match, FC_FAMILY, 0, reinterpret_cast<FcChar8 **>(&family_name)) == FcResultMatch) {
-						if (family_name && String::utf8(family_name).to_lower() != p_font_name.to_lower()) {
-							FcPatternDestroy(match);
-							FcPatternDestroy(pattern);
-							continue;
-						}
-					}
-				}
-				char *file_name = nullptr;
-				if (FcPatternGetString(match, FC_FILE, 0, reinterpret_cast<FcChar8 **>(&file_name)) == FcResultMatch) {
-					if (file_name) {
-						String ret = String::utf8(file_name);
-						FcPatternDestroy(match);
-						FcPatternDestroy(pattern);
-						return ret;
-					}
-				}
-				FcPatternDestroy(match);
-			}
-			FcPatternDestroy(pattern);
-		}
-	}
-
-	return String();
-#else
 	ERR_FAIL_V_MSG(String(), "Godot was compiled without fontconfig, system font support is disabled.");
-#endif
 }
 
 String OS_LinuxBSD::get_config_path() const {
@@ -1239,47 +1043,7 @@ OS_LinuxBSD::OS_LinuxBSD() {
 
 	// zym: DisplayServerX11 / DisplayServerWayland registration removed.
 
-#ifdef FONTCONFIG_ENABLED
-#ifdef SOWRAP_ENABLED
-#ifdef DEBUG_ENABLED
-	int dylibloader_verbose = 1;
-#else
-	int dylibloader_verbose = 0;
-#endif
-	font_config_initialized = (initialize_fontconfig(dylibloader_verbose) == 0);
-#else
-	font_config_initialized = true;
-#endif
-	if (font_config_initialized) {
-		bool ver_ok = false;
-		int version = FcGetVersion();
-		ver_ok = ((version / 100 / 100) == 2 && (version / 100 % 100) >= 11) || ((version / 100 / 100) > 2); // 2.11.0
-		print_verbose(vformat("FontConfig %d.%d.%d detected.", version / 100 / 100, version / 100 % 100, version % 100));
-		if (!ver_ok) {
-			font_config_initialized = false;
-		}
-	}
-
-	if (font_config_initialized) {
-		config = FcInitLoadConfigAndFonts();
-		if (!config) {
-			font_config_initialized = false;
-		}
-		object_set = FcObjectSetBuild(FC_FAMILY, FC_FILE, nullptr);
-		if (!object_set) {
-			font_config_initialized = false;
-		}
-	}
-#endif // FONTCONFIG_ENABLED
 }
 
 OS_LinuxBSD::~OS_LinuxBSD() {
-#ifdef FONTCONFIG_ENABLED
-	if (object_set) {
-		FcObjectSetDestroy(object_set);
-	}
-	if (config) {
-		FcConfigDestroy(config);
-	}
-#endif // FONTCONFIG_ENABLED
 }

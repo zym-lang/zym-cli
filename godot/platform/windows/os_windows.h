@@ -34,7 +34,6 @@
 #include "key_mapping_windows.h"
 
 #include "core/config/project_settings.h"
-#include "core/input/input.h"
 #include "core/os/os.h"
 // zym: audio drivers (wasapi/winmidi/xaudio2) and AudioServer removed
 // (headless CLI). WASAPI_ENABLED / WINMIDI_ENABLED / XAUDIO2_ENABLED are

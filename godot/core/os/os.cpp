@@ -34,7 +34,6 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/json.h"
-#include "core/os/midi_driver.h"
 #include "core/version_generated.gen.h"
 
 #include <cstdarg>
@@ -658,28 +657,16 @@ List<String> OS::get_restart_on_exit_arguments() const {
 }
 
 PackedStringArray OS::get_connected_midi_inputs() {
-	if (MIDIDriver::get_singleton()) {
-		return MIDIDriver::get_singleton()->get_connected_inputs();
-	}
-
-	PackedStringArray list;
-	ERR_FAIL_V_MSG(list, vformat("MIDI input isn't supported on %s.", OS::get_singleton()->get_name()));
+	// zym: MIDI nuked along with core/input.
+	return PackedStringArray();
 }
 
 void OS::open_midi_inputs() {
-	if (MIDIDriver::get_singleton()) {
-		MIDIDriver::get_singleton()->open();
-	} else {
-		ERR_PRINT(vformat("MIDI input isn't supported on %s.", OS::get_singleton()->get_name()));
-	}
+	// zym: MIDI nuked along with core/input.
 }
 
 void OS::close_midi_inputs() {
-	if (MIDIDriver::get_singleton()) {
-		MIDIDriver::get_singleton()->close();
-	} else {
-		ERR_PRINT(vformat("MIDI input isn't supported on %s.", OS::get_singleton()->get_name()));
-	}
+	// zym: MIDI nuked along with core/input.
 }
 
 uint64_t OS::get_frame_delay(bool p_can_draw) const {

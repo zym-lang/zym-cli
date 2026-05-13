@@ -31,7 +31,6 @@
 #include "project_settings.h"
 
 #include "core/core_bind.h" // For Compression enum.
-#include "core/input/input_map.h"
 #include "core/io/config_file.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
@@ -1640,26 +1639,7 @@ void ProjectSettings::_bind_methods() {
 }
 
 void ProjectSettings::_add_builtin_input_map() {
-	if (InputMap::get_singleton()) {
-		HashMap<String, List<Ref<InputEvent>>> builtins = InputMap::get_singleton()->get_builtins();
-
-		for (KeyValue<String, List<Ref<InputEvent>>> &E : builtins) {
-			Array events;
-
-			// Convert list of input events into array
-			for (const Ref<InputEvent> &event : E.value) {
-				events.push_back(event);
-			}
-
-			Dictionary action;
-			action["deadzone"] = Variant(InputMap::DEFAULT_TOGGLE_DEADZONE);
-			action["events"] = events;
-
-			String action_name = "input/" + E.key;
-			GLOBAL_DEF(action_name, action);
-			input_presets.push_back(action_name);
-		}
-	}
+	// zym: core/input nuked; no builtin input actions to register.
 }
 
 ProjectSettings::ProjectSettings() {

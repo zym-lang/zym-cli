@@ -31,7 +31,6 @@
 #pragma once
 
 #include "core/core_string_names.h"
-#include "core/input/input_enums.h"
 #include "core/io/ip_address.h"
 #include "core/math/aabb.h"
 #include "core/math/basis.h"

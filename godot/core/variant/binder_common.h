@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include "core/input/input_enums.h"
 #include "core/object/object.h"
 #include "core/os/keyboard.h"
 #include "core/templates/simple_type.h"
@@ -100,14 +99,6 @@ VARIANT_ENUM_CAST(Error);
 VARIANT_ENUM_CAST(Side);
 VARIANT_ENUM_CAST(ClockDirection);
 VARIANT_ENUM_CAST(Corner);
-VARIANT_ENUM_CAST(HatDir);
-VARIANT_BITFIELD_CAST(HatMask);
-VARIANT_ENUM_CAST(JoyAxis);
-VARIANT_ENUM_CAST(JoyButton);
-
-VARIANT_ENUM_CAST(MIDIMessage);
-VARIANT_ENUM_CAST(MouseButton);
-VARIANT_BITFIELD_CAST(MouseButtonMask);
 VARIANT_ENUM_CAST(Orientation);
 VARIANT_ENUM_CAST(HorizontalAlignment);
 VARIANT_ENUM_CAST(VerticalAlignment);

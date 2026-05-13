@@ -147,16 +147,6 @@ void OS_LinuxBSD::initialize() {
 	system_dir_desktop_cache = get_system_dir(SYSTEM_DIR_DESKTOP);
 }
 
-void OS_LinuxBSD::initialize_joypads() {
-#ifdef SDL_ENABLED
-	joypad_sdl = memnew(JoypadSDL());
-	if (joypad_sdl->initialize() != OK) {
-		ERR_PRINT("Couldn't initialize SDL joypad input driver.");
-		memdelete(joypad_sdl);
-		joypad_sdl = nullptr;
-	}
-#endif
-}
 
 String OS_LinuxBSD::get_unique_id() const {
 	static String machine_id;

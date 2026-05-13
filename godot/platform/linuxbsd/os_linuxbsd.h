@@ -32,9 +32,8 @@
 
 #include "crash_handler_linuxbsd.h"
 
-#include "core/input/input.h"
 #include "drivers/unix/os_unix.h"
-// zym: servers/* and input/sound/rendering drivers removed.
+// zym: servers/*, input/*, sound/rendering drivers removed.
 
 #ifdef FONTCONFIG_ENABLED
 #ifdef SOWRAP_ENABLED
@@ -71,7 +70,7 @@ protected:
 	virtual void initialize() override;
 	virtual void finalize() override;
 
-	virtual void initialize_joypads() override;
+	virtual void initialize_joypads() override {}
 
 	virtual void set_main_loop(MainLoop *p_main_loop) override;
 

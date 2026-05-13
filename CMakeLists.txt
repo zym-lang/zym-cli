@@ -420,40 +420,38 @@ endif()
 # appends for each platform (godot/platform/<plat>/detect.py). The order
 # matters on mingw because winsock / crypto interdepend.
 if(WIN32)
-    # mingw-w64 system libs mirroring godot/platform/windows/detect.py's
-    # `LIBS=[...]` block. Extras over the SCons list:
+    # mingw-w64 system libs, pruned to what zym actually still references
+    # after the platform/windows strip. Audited via cross-archive
+    # `nm --undefined-only` against every libgodot*.a; only libs with >=1
+    # remaining undefined symbol are kept.
+    #
+    # Extras over the original SCons LIBS list:
     #   - `hid` for `HidD_*` / `HidP_*` (controller probing in os_windows.cpp)
-    # zym: `dwrite` removed -- the DWrite system-font enumeration block in
-    # `OS_Windows::initialize()` has been stripped (see os_windows.cpp around
-    # line 298). The headless CLI never reaches `get_system_fonts` /
-    # `get_system_font_path*`, so dropping the import library both shaves
-    # the IAT and removes the ~300 ms - 2 s `GetSystemFontCollection()`
-    # stall on first boot (much worse under Wine via the fontconfig bridge).
-    # The Linux build doesn't need an equivalent because the headless CLI
-    # never pulls those vtables in, but on Windows os_windows.cpp wires them
-    # unconditionally.
+    #
+    # zym-dropped, with rationale:
+    #   - `gdi32`     : no GDI calls (DisplayServer/window/cursor/font GDI paths gone).
+    #   - `shlwapi`   : no Path*/Str*I helpers referenced.
+    #   - `shcore`    : no `GetDpiFor*` / `SetProcessDpiAware` (DisplayServer gone).
+    #   - `dwmapi`    : no `Dwm*` (DWM compositor calls were DisplayServer-only).
+    #   - `imm32`     : no IME hooks (input gone with DisplayServer).
+    #   - `winmm`     : no `timeBeginPeriod` / `waveOut*` / midi (audio gone).
+    #   - `wsock32`   : redundant with `ws2_32`; only WSARecvEx lives there
+    #                   and we don't call it.
+    #   - `ole32`/`oleaut32` : `CoInitializeEx` + WMI video-adapter probe gone.
+    #   - `dwrite`    : DWrite system-font block was never actually compiled
+    #                   in (system-fonts are not stripped at the .cpp level
+    #                   yet, but no DWrite symbols leak past the archive
+    #                   boundary -- the import lib was unnecessary already).
     set(ZYM_PLATFORM_SYSLIBS
             mingw32
-            ws2_32 wsock32
+            ws2_32
             iphlpapi
-            # zym: `ole32` and `oleaut32` removed. They were pulled in by
-            # `CoInitializeEx(COINIT_APARTMENTTHREADED)` in
-            # `OS_Windows::OS_Windows()` and by the WMI-based
-            # `_get_video_adapter_driver_info_wmi` (`CoCreateInstance` +
-            # `SysAllocString` / `VariantInit` / `VariantClear`). Both call
-            # sites have been removed/stubbed (see
-            # `godot/platform/windows/os_windows.cpp`), so neither DLL is
-            # referenced from the link graph any more and both drop out of
-            # zym.exe's import table. Saves ~30-80 ms of cold-start on
-            # Windows / Wine (two fewer DLLs to map + their DllMain +
-            # ole32's OXID resolver thread init).
-            kernel32 user32 gdi32 advapi32
-            shell32 shlwapi shcore
+            kernel32 user32 advapi32
+            shell32
             bcrypt crypt32
-            dwmapi imm32
             uuid
-            ntdll
-            winmm
+            hid
+            ntdll  # NtQueryInformationFile in drivers/windows/dir_access_windows.cpp
     )
 else()
     set(ZYM_PLATFORM_SYSLIBS pthread dl m)

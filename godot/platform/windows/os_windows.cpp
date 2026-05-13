@@ -69,23 +69,7 @@ extern "C" {
 #include <hidsdi.h>
 #endif
 
-#if defined(RD_ENABLED)
-#include "servers/rendering/rendering_device.h"
-#endif
-
-#if defined(GLES3_ENABLED)
-#include "gl_manager_windows_native.h"
-#endif
-
-#if defined(VULKAN_ENABLED)
-#include "rendering_context_driver_vulkan_windows.h"
-#endif
-#if defined(D3D12_ENABLED)
-#include "drivers/d3d12/rendering_context_driver_d3d12.h"
-#endif
-#if defined(GLES3_ENABLED)
-#include "drivers/gles3/rasterizer_gles3.h"
-#endif
+// zym: RD / GLES3 / Vulkan / D3D12 rendering backends removed (headless CLI).
 
 #ifdef DEBUG_ENABLED
 #pragma pack(push, before_imagehlp, 8)

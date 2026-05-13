@@ -31,7 +31,6 @@
 #pragma once
 
 #include "crash_handler_windows.h"
-#include "key_mapping_windows.h"
 
 #include "core/config/project_settings.h"
 #include "core/os/os.h"

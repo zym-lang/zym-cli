@@ -307,16 +307,16 @@ def configure(env: "SConsEnvironment"):
     # zym: ALSA/PulseAudio audio drivers removed.
     # zym: fontconfig / D-Bus / speech-dispatcher / xkbcommon / libudev
     # / SDL input integrations removed (headless, no DisplayServer).
-    # The `xkbcommon-so_wrap.c` stub still compiles unconditionally for the
-    # benefit of vendored linuxbsd_headers (see SCsub).
+    # zym: thirdparty/linuxbsd_headers/ (X11/alsa/dbus/fontconfig/libdecor-0/
+    # pulse/speechd/udev/wayland/xkbcommon) was deleted in the godot-root
+    # cleanup pass -- no retained source includes any of those headers, so
+    # the `use_sowrap` CPPPATH branch is gone too.
 
     # Linkflags below this line should typically stay the last ones
     if not env["builtin_zlib"]:
         env.ParseConfig("pkg-config zlib --cflags --libs")
 
     env.Prepend(CPPPATH=["#platform/linuxbsd"])
-    if env["use_sowrap"]:
-        env.Prepend(CPPPATH=["#thirdparty/linuxbsd_headers"])
 
     env.Append(
         CPPDEFINES=[

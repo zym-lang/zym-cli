@@ -37,7 +37,6 @@
 // zym: core/debugger/* removed (no script/engine debugger in headless CLI).
 #include "core/io/marshalls.h"
 #include "core/os/main_loop.h"
-#include "core/profiling/profiling.h"
 #include "core/version_generated.gen.h"
 #include "drivers/windows/dir_access_windows.h"
 #include "drivers/windows/file_access_windows.h"
@@ -2177,8 +2176,6 @@ void OS_Windows::run() {
 	main_loop->initialize();
 
 	while (true) {
-		GodotProfileFrameMark;
-		GodotProfileZone("OS_Windows::run");
 		// zym: DisplayServer removed (headless CLI); no event pumping.
 		if (Main::iteration()) {
 			break;

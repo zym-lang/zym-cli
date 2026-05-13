@@ -37,7 +37,6 @@
 #ifdef SDL_ENABLED
 #include "drivers/sdl/joypad_sdl.h"
 #endif
-#include "core/profiling/profiling.h"
 #include "main/main.h"
 // zym: servers/* removed.
 
@@ -964,8 +963,6 @@ void OS_LinuxBSD::run() {
 	//uint64_t frame=0;
 
 	while (true) {
-		GodotProfileFrameMark;
-		GodotProfileZone("OS_LinuxBSD::run");
 		// zym: DisplayServer removed; no display events to process.
 #ifdef SDL_ENABLED
 		if (joypad_sdl) {

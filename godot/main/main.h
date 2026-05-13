@@ -60,13 +60,6 @@ class Main {
 
 public:
 	static bool is_cmdline_tool();
-#ifdef TOOLS_ENABLED
-	enum CLIScope {
-		CLI_SCOPE_TOOL, // Editor and project manager.
-		CLI_SCOPE_PROJECT,
-	};
-	static const Vector<String> &get_forwardable_cli_arguments(CLIScope p_scope);
-#endif
 
 	static int test_entrypoint(int argc, char *argv[], bool &tests_need_run);
 	static Error setup(const char *execpath, int argc, char *argv[], bool p_second_phase = true);
@@ -74,10 +67,6 @@ public:
 	static String get_rendering_driver_name();
 	static String get_locale_override();
 	static void setup_boot_logo();
-#ifdef TESTS_ENABLED
-	static Error test_setup();
-	static void test_cleanup();
-#endif
 	static int start();
 
 	static bool iteration();

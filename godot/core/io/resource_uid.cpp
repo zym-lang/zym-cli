@@ -195,17 +195,6 @@ String ResourceUID::get_id_path(ID p_id) const {
 	MutexLock l(mutex);
 	const ResourceUID::Cache *cache = unique_ids.getptr(p_id);
 
-#if TOOLS_ENABLED
-	// On startup, the scan_for_uid_on_startup callback should be set and will
-	// execute EditorFileSystem::scan_for_uid, which scans all project files
-	// to reload the UID cache before the first scan.
-	// Note: EditorFileSystem::scan_for_uid sets scan_for_uid_on_startup to nullptr
-	//       once the first scan_for_uid is complete.
-	if (!cache && scan_for_uid_on_startup) {
-		scan_for_uid_on_startup();
-		cache = unique_ids.getptr(p_id);
-	}
-#endif
 
 	if (unlikely(!cache)) {
 		if (cache_initialized) {

@@ -71,11 +71,6 @@ extern "C" {
 
 // zym: RD / GLES3 / Vulkan / D3D12 rendering backends removed (headless CLI).
 
-#ifdef DEBUG_ENABLED
-#pragma pack(push, before_imagehlp, 8)
-#include <imagehlp.h>
-#pragma pack(pop, before_imagehlp)
-#endif
 
 extern "C" {
 __declspec(dllexport) DWORD NvOptimusEnablement = 1;
@@ -355,72 +350,6 @@ Error OS_Windows::get_entropy(uint8_t *r_buffer, int p_bytes) {
 	return OK;
 }
 
-#ifdef DEBUG_ENABLED
-void debug_dynamic_library_check_dependencies(const String &p_path, HashSet<String> &r_checked, HashSet<String> &r_missing) {
-	if (r_checked.has(p_path)) {
-		return;
-	}
-	r_checked.insert(p_path);
-
-	LOADED_IMAGE loaded_image;
-	HANDLE file = CreateFileW((LPCWSTR)p_path.utf16().get_data(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-	if (file != INVALID_HANDLE_VALUE) {
-		HANDLE file_mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY | SEC_COMMIT, 0, 0, nullptr);
-		if (file_mapping != INVALID_HANDLE_VALUE) {
-			PVOID mapping = MapViewOfFile(file_mapping, FILE_MAP_READ, 0, 0, 0);
-			if (mapping) {
-				PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)mapping;
-				PIMAGE_NT_HEADERS nt_header = nullptr;
-				if (dos_header->e_magic == IMAGE_DOS_SIGNATURE) {
-					PCHAR nt_header_ptr;
-					nt_header_ptr = ((PCHAR)mapping) + dos_header->e_lfanew;
-					nt_header = (PIMAGE_NT_HEADERS)nt_header_ptr;
-					if (nt_header->Signature != IMAGE_NT_SIGNATURE) {
-						nt_header = nullptr;
-					}
-				}
-				if (nt_header) {
-					loaded_image.ModuleName = nullptr;
-					loaded_image.hFile = file;
-					loaded_image.MappedAddress = (PUCHAR)mapping;
-					loaded_image.FileHeader = nt_header;
-					loaded_image.Sections = (PIMAGE_SECTION_HEADER)((LPBYTE)&nt_header->OptionalHeader + nt_header->FileHeader.SizeOfOptionalHeader);
-					loaded_image.NumberOfSections = nt_header->FileHeader.NumberOfSections;
-					loaded_image.SizeOfImage = GetFileSize(file, nullptr);
-					loaded_image.Characteristics = nt_header->FileHeader.Characteristics;
-					loaded_image.LastRvaSection = loaded_image.Sections;
-					loaded_image.fSystemImage = false;
-					loaded_image.fDOSImage = false;
-					loaded_image.Links.Flink = &loaded_image.Links;
-					loaded_image.Links.Blink = &loaded_image.Links;
-
-					ULONG size = 0;
-					const IMAGE_IMPORT_DESCRIPTOR *import_desc = (const IMAGE_IMPORT_DESCRIPTOR *)ImageDirectoryEntryToData((HMODULE)loaded_image.MappedAddress, false, IMAGE_DIRECTORY_ENTRY_IMPORT, &size);
-					if (import_desc) {
-						for (; import_desc->Name && import_desc->FirstThunk; import_desc++) {
-							char16_t full_name_wc[32767];
-							const char *name_cs = (const char *)ImageRvaToVa(loaded_image.FileHeader, loaded_image.MappedAddress, import_desc->Name, nullptr);
-							String name = String(name_cs);
-							if (name.begins_with("api-ms-win-")) {
-								r_checked.insert(name);
-							} else if (SearchPathW(nullptr, (LPCWSTR)name.utf16().get_data(), nullptr, 32767, (LPWSTR)full_name_wc, nullptr)) {
-								debug_dynamic_library_check_dependencies(String::utf16(full_name_wc), r_checked, r_missing);
-							} else if (SearchPathW((LPCWSTR)(p_path.get_base_dir().utf16().get_data()), (LPCWSTR)name.utf16().get_data(), nullptr, 32767, (LPWSTR)full_name_wc, nullptr)) {
-								debug_dynamic_library_check_dependencies(String::utf16(full_name_wc), r_checked, r_missing);
-							} else {
-								r_missing.insert(name);
-							}
-						}
-					}
-				}
-				UnmapViewOfFile(mapping);
-			}
-			CloseHandle(file_mapping);
-		}
-		CloseHandle(file);
-	}
-}
-#endif
 
 Error OS_Windows::open_dynamic_library(const String &p_path, void *&p_library_handle, GDExtensionData *p_data) {
 	String path = p_path;
@@ -474,30 +403,9 @@ Error OS_Windows::open_dynamic_library(const String &p_path, void *&p_library_ha
 			DirAccess::remove_absolute(load_path);
 		}
 
-#ifdef DEBUG_ENABLED
-		DWORD err_code = GetLastError();
-
-		HashSet<String> checked_libs;
-		HashSet<String> missing_libs;
-		debug_dynamic_library_check_dependencies(dll_path, checked_libs, missing_libs);
-		if (!missing_libs.is_empty()) {
-			String missing;
-			for (const String &E : missing_libs) {
-				if (!missing.is_empty()) {
-					missing += ", ";
-				}
-				missing += E;
-			}
-			ERR_FAIL_V_MSG(ERR_CANT_OPEN, vformat("Can't open dynamic library: %s. Missing dependencies: %s. Error: %s.", p_path, missing, format_error_message(err_code)));
-		} else {
-			ERR_FAIL_V_MSG(ERR_CANT_OPEN, vformat("Can't open dynamic library: %s. Error: %s.", p_path, format_error_message(err_code)));
-		}
-#endif
 	}
 
-#ifndef DEBUG_ENABLED
 	ERR_FAIL_NULL_V_MSG(p_library_handle, ERR_CANT_OPEN, vformat("Can't open dynamic library: %s. Error: %s.", p_path, format_error_message(GetLastError())));
-#endif
 
 	if (cookie) {
 		RemoveDllDirectory(cookie);
@@ -2462,100 +2370,6 @@ void OS_Windows::add_frame_delay(bool p_can_draw, bool p_wake_for_events) {
 	}
 }
 
-#ifdef TOOLS_ENABLED
-bool OS_Windows::_test_create_rendering_device(const String &p_display_driver) const {
-	// Tests Rendering Device creation.
-
-	bool ok = false;
-#if defined(RD_ENABLED)
-	Error err;
-	RenderingContextDriver *rcd = nullptr;
-
-#if defined(VULKAN_ENABLED)
-	rcd = memnew(RenderingContextDriverVulkan);
-#endif
-#ifdef D3D12_ENABLED
-	if (rcd == nullptr) {
-		rcd = memnew(RenderingContextDriverD3D12);
-	}
-#endif
-	if (rcd != nullptr) {
-		err = rcd->initialize();
-		if (err == OK) {
-			RenderingDevice *rd = memnew(RenderingDevice);
-			err = rd->initialize(rcd);
-			memdelete(rd);
-			rd = nullptr;
-			if (err == OK) {
-				ok = true;
-			}
-		}
-		memdelete(rcd);
-		rcd = nullptr;
-	}
-#endif
-
-	return ok;
-}
-
-bool OS_Windows::_test_create_rendering_device_and_gl(const String &p_display_driver) const {
-	// Tests OpenGL context and Rendering Device simultaneous creation. This function is expected to crash on some NVIDIA drivers.
-
-	WNDCLASSEXW wc_probe;
-	memset(&wc_probe, 0, sizeof(WNDCLASSEXW));
-	wc_probe.cbSize = sizeof(WNDCLASSEXW);
-	wc_probe.style = CS_OWNDC | CS_DBLCLKS;
-	wc_probe.lpfnWndProc = (WNDPROC)::DefWindowProcW;
-	wc_probe.cbClsExtra = 0;
-	wc_probe.cbWndExtra = 0;
-	wc_probe.hInstance = GetModuleHandle(nullptr);
-	wc_probe.hIcon = LoadIcon(nullptr, IDI_WINLOGO);
-	wc_probe.hCursor = nullptr;
-	wc_probe.hbrBackground = nullptr;
-	wc_probe.lpszMenuName = nullptr;
-	wc_probe.lpszClassName = L"Engine probe window";
-
-	if (!RegisterClassExW(&wc_probe)) {
-		return false;
-	}
-
-	HWND hWnd = CreateWindowExW(WS_EX_WINDOWEDGE, L"Engine probe window", L"", WS_OVERLAPPEDWINDOW, 0, 0, 800, 600, nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
-	if (!hWnd) {
-		UnregisterClassW(L"Engine probe window", GetModuleHandle(nullptr));
-		return false;
-	}
-
-	bool ok = true;
-#ifdef GLES3_ENABLED
-	GLManagerNative_Windows *test_gl_manager_native = memnew(GLManagerNative_Windows);
-	if (test_gl_manager_native->window_create(DisplayServer::MAIN_WINDOW_ID, hWnd, GetModuleHandle(nullptr), 800, 600) == OK) {
-		RasterizerGLES3::make_current(true);
-	} else {
-		ok = false;
-	}
-#endif
-
-	MSG msg = {};
-	while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-		TranslateMessage(&msg);
-		DispatchMessageW(&msg);
-	}
-
-	if (ok) {
-		ok = _test_create_rendering_device(p_display_driver);
-	}
-
-#ifdef GLES3_ENABLED
-	if (test_gl_manager_native) {
-		memdelete(test_gl_manager_native);
-	}
-#endif
-
-	DestroyWindow(hWnd);
-	UnregisterClassW(L"Engine probe window", GetModuleHandle(nullptr));
-	return ok;
-}
-#endif
 
 #ifdef _MSC_VER
 #define IAT_HOOK_CALL __declspec(guard(nocf))

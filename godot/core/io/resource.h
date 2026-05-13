@@ -71,11 +71,6 @@ private:
 	String path_cache;
 	String scene_unique_id;
 
-#ifdef TOOLS_ENABLED
-	uint64_t last_modified_time = 0;
-	uint64_t import_last_modified_time = 0;
-	String import_path;
-#endif
 
 	enum EmitChangedState {
 		EMIT_CHANGED_UNBLOCKED,
@@ -147,20 +142,6 @@ public:
 	Ref<Resource> _duplicate_from_variant(bool p_deep, ResourceDeepDuplicateMode p_deep_subresources_mode, int p_recursion_count) const;
 	static void _teardown_duplicate_from_variant();
 
-#ifdef TOOLS_ENABLED
-
-	virtual uint32_t hash_edited_version_for_preview() const;
-
-	virtual void set_last_modified_time(uint64_t p_time) { last_modified_time = p_time; }
-	uint64_t get_last_modified_time() const { return last_modified_time; }
-
-	virtual void set_import_last_modified_time(uint64_t p_time) { import_last_modified_time = p_time; }
-	uint64_t get_import_last_modified_time() const { return import_last_modified_time; }
-
-	void set_import_path(const String &p_path) { import_path = p_path; }
-	String get_import_path() const { return import_path; }
-
-#endif
 
 	void set_as_translation_remapped(bool p_remapped);
 
@@ -182,10 +163,6 @@ class ResourceCache {
 	friend class ResourceLoader; // Need the lock.
 	static Mutex lock;
 	static HashMap<String, Resource *> resources;
-#ifdef TOOLS_ENABLED
-	static HashMap<String, HashMap<String, String>> resource_path_cache; // Each tscn has a set of resource paths and IDs.
-	static RWLock path_cache_lock;
-#endif // TOOLS_ENABLED
 	friend void unregister_core_types();
 	static void clear();
 	friend void register_core_types();

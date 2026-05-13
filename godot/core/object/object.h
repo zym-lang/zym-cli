@@ -142,11 +142,7 @@ enum PropertyUsageFlags {
 #define ADD_SUBGROUP_INDENT(m_name, m_prefix, m_depth) ::ClassDB::add_property_subgroup(get_class_static(), m_name, m_prefix, m_depth)
 #define ADD_LINKED_PROPERTY(m_property, m_linked_property) ::ClassDB::add_linked_property(get_class_static(), m_property, m_linked_property)
 
-#ifdef TOOLS_ENABLED
-#define ADD_CLASS_DEPENDENCY(m_class) ::ClassDB::add_class_dependency(get_class_static(), m_class)
-#else
 #define ADD_CLASS_DEPENDENCY(m_class)
-#endif
 
 #define ADD_ARRAY_COUNT(m_label, m_count_property, m_count_property_setter, m_count_property_getter, m_prefix) ClassDB::add_property_array_count(get_class_static(), m_label, m_count_property, StringName(m_count_property_setter), StringName(m_count_property_getter), m_prefix)
 #define ADD_ARRAY_COUNT_WITH_USAGE_FLAGS(m_label, m_count_property, m_count_property_setter, m_count_property_getter, m_prefix, m_property_usage_flags) ClassDB::add_property_array_count(get_class_static(), m_label, m_count_property, StringName(m_count_property_setter), StringName(m_count_property_getter), m_prefix, m_property_usage_flags)
@@ -324,10 +320,6 @@ struct ObjectGDExtension {
 	bool is_virtual = false;
 	bool is_abstract = false;
 	bool is_exposed = true;
-#ifdef TOOLS_ENABLED
-	bool is_runtime = false;
-	bool is_placeholder = false;
-#endif
 #ifndef DISABLE_DEPRECATED
 	bool legacy_unexposed_class = false;
 #endif // DISABLE_DEPRECATED
@@ -364,11 +356,6 @@ struct ObjectGDExtension {
 	GDExtensionClassCallVirtualWithData call_virtual_with_data;
 	GDExtensionClassRecreateInstance recreate_instance;
 
-#ifdef TOOLS_ENABLED
-	void *tracking_userdata = nullptr;
-	void (*track_instance)(void *p_userdata, void *p_instance) = nullptr;
-	void (*untrack_instance)(void *p_userdata, void *p_instance) = nullptr;
-#endif
 
 	/// A type for this Object extension.
 	/// This is not exposed through the GDExtension API (yet) so it is inferred from above parameters.
@@ -382,11 +369,7 @@ struct ObjectGDExtension {
 #define GDVIRTUAL_CALL(m_name, ...) _gdvirtual_##m_name##_call(__VA_ARGS__)
 #define GDVIRTUAL_CALL_PTR(m_obj, m_name, ...) m_obj->_gdvirtual_##m_name##_call(__VA_ARGS__)
 
-#ifdef DEBUG_ENABLED
-#define GDVIRTUAL_BIND(m_name, ...) ::ClassDB::add_virtual_method(get_class_static(), _gdvirtual_##m_name##_get_method_info(), true, sarray(__VA_ARGS__));
-#else
 #define GDVIRTUAL_BIND(m_name, ...)
-#endif // DEBUG_ENABLED
 #define GDVIRTUAL_BIND_COMPAT(m_alias, ...) ::ClassDB::add_virtual_compatibility_method(get_class_static(), _gdvirtual_##m_alias##_get_method_info(), true, sarray(__VA_ARGS__));
 #define GDVIRTUAL_IS_OVERRIDDEN(m_name) _gdvirtual_##m_name##_overridden()
 #define GDVIRTUAL_IS_OVERRIDDEN_PTR(m_obj, m_name) m_obj->_gdvirtual_##m_name##_overridden()
@@ -618,9 +601,6 @@ public:
 	};
 
 private:
-#ifdef DEBUG_ENABLED
-	friend struct _ObjectDebugLock;
-#endif // DEBUG_ENABLED
 	friend struct ObjectSignalLock;
 	friend bool predelete_handler(Object *);
 	friend void postinitialize_handler(Object *);
@@ -642,9 +622,6 @@ private:
 	mutable Mutex *signal_mutex = nullptr;
 	HashMap<StringName, SignalData> signal_map;
 	List<Connection> connections;
-#ifdef DEBUG_ENABLED
-	SafeRefCount _lock_index;
-#endif // DEBUG_ENABLED
 	ObjectID _instance_id;
 	bool _predelete();
 	void _initialize();
@@ -661,11 +638,6 @@ public:
 	bool _is_queued_for_deletion : 1; // Set to true by SceneTree::queue_delete().
 
 private:
-#ifdef TOOLS_ENABLED
-	bool _edited : 1;
-	uint32_t _edited_version = 0;
-	HashSet<String> editor_section_folding;
-#endif
 	ScriptInstance *script_instance = nullptr;
 	HashMap<StringName, Variant> metadata;
 	HashMap<StringName, Variant *> metadata_properties;
@@ -804,14 +776,6 @@ protected:
 	// Internal helper to get the current locale, taking into account the translation domain.
 	String _get_locale() const;
 
-#ifdef TOOLS_ENABLED
-	struct VirtualMethodTracker {
-		void **method;
-		VirtualMethodTracker *next;
-	};
-
-	mutable VirtualMethodTracker *virtual_method_list = nullptr;
-#endif
 
 public: // Should be protected, but bug in clang++.
 	static void initialize_class();
@@ -939,11 +903,7 @@ public:
 	/* SCRIPT */
 
 // When in debug, some non-virtual functions can be overridden.
-#ifdef DEBUG_ENABLED
-#define DEBUG_VIRTUAL virtual
-#else
 #define DEBUG_VIRTUAL
-#endif // DEBUG_ENABLED
 
 	DEBUG_VIRTUAL void set_script(const Variant &p_script);
 	DEBUG_VIRTUAL Variant get_script() const;
@@ -955,12 +915,6 @@ public:
 	DEBUG_VIRTUAL void get_meta_list(List<StringName> *p_list) const;
 	DEBUG_VIRTUAL void merge_meta_from(const Object *p_src);
 
-#ifdef TOOLS_ENABLED
-	void set_edited(bool p_edited);
-	bool is_edited() const;
-	// This function is used to check when something changed beyond a point, it's used mainly for generating previews.
-	uint32_t get_edited_version() const;
-#endif
 
 	void set_script_instance(ScriptInstance *p_instance);
 	_FORCE_INLINE_ ScriptInstance *get_script_instance() const { return script_instance; }
@@ -1016,13 +970,6 @@ public:
 	virtual StringName get_translation_domain() const;
 	virtual void set_translation_domain(const StringName &p_domain);
 
-#ifdef TOOLS_ENABLED
-	virtual void get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const;
-	void editor_set_section_unfold(const String &p_section, bool p_unfolded, bool p_initializing = false);
-	bool editor_is_section_unfolded(const String &p_section);
-	const HashSet<String> &editor_get_section_folding() const { return editor_section_folding; }
-	void editor_clear_section_folding() { editor_section_folding.clear(); }
-#endif
 
 	// Used by script languages to store binding data.
 	void *get_instance_binding(void *p_token, const GDExtensionInstanceBindingCallbacks *p_callbacks);
@@ -1031,11 +978,6 @@ public:
 	bool has_instance_binding(void *p_token);
 	void free_instance_binding(void *p_token);
 
-#ifdef TOOLS_ENABLED
-	void clear_internal_extension();
-	void reset_internal_extension(ObjectGDExtension *p_extension);
-	bool is_extension_placeholder() const { return _extension && _extension->is_placeholder; }
-#endif
 
 	void clear_internal_resource_paths();
 

@@ -359,11 +359,6 @@ MainFrameTime MainTimerSync::advance_core(double p_physics_step, int p_physics_t
 		}
 	}
 
-#ifdef DEBUG_ENABLED
-	if (max_typical_steps < 0) {
-		WARN_PRINT_ONCE("`max_typical_steps` is negative. This could hint at an engine bug or system timer misconfiguration.");
-	}
-#endif
 
 	// try to keep it consistent with previous iterations
 	if (ret.physics_steps < min_typical_steps) {
@@ -454,11 +449,6 @@ MainFrameTime MainTimerSync::advance_checked(double p_physics_step, int p_physic
 
 	// forcing ret.process_step to be positive may trigger a violation of the
 	// promise that time_accum is between 0 and p_physics_step
-#ifdef DEBUG_ENABLED
-	if (time_accum < -1E-7) {
-		WARN_PRINT_ONCE("Intermediate value of `time_accum` is negative. This could hint at an engine bug or system timer misconfiguration.");
-	}
-#endif
 
 	if (time_accum > p_physics_step) {
 		const int extra_physics_steps = std::floor(time_accum * p_physics_ticks_per_second);
@@ -466,14 +456,6 @@ MainFrameTime MainTimerSync::advance_checked(double p_physics_step, int p_physic
 		ret.physics_steps += extra_physics_steps;
 	}
 
-#ifdef DEBUG_ENABLED
-	if (time_accum < -1E-7) {
-		WARN_PRINT_ONCE("Final value of `time_accum` is negative. It should always be between 0 and `p_physics_step`. This hints at an engine bug.");
-	}
-	if (time_accum > p_physics_step + 1E-7) {
-		WARN_PRINT_ONCE("Final value of `time_accum` is larger than `p_physics_step`. It should always be between 0 and `p_physics_step`. This hints at an engine bug.");
-	}
-#endif
 
 	// track deficit
 	time_deficit = p_process_step - ret.process_step;

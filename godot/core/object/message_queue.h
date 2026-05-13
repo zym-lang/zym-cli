@@ -76,9 +76,6 @@ private:
 	uint32_t pages_used = 0;
 	bool flushing = false;
 
-#ifdef DEV_ENABLED
-	bool is_current_thread_override = false;
-#endif
 
 	struct Message {
 		Callable callable;

@@ -307,27 +307,13 @@ Variant Variant::get_named(const StringName &p_member, bool &r_valid) const {
 
 /**** INDEXED SETTERS AND GETTERS ****/
 
-#ifdef DEBUG_ENABLED
-
-#define OOB_TEST(m_idx, m_v) \
-	ERR_FAIL_INDEX(m_idx, m_v)
-
-#else
 
 #define OOB_TEST(m_idx, m_v)
 
-#endif
 
-#ifdef DEBUG_ENABLED
-
-#define NULL_TEST(m_key) \
-	ERR_FAIL_NULL(m_key)
-
-#else
 
 #define NULL_TEST(m_key)
 
-#endif
 
 #define INDEXED_SETGET_STRUCT_TYPED(m_base_type, m_elem_type)                                                                  \
 	struct VariantIndexedSetGet_##m_base_type {                                                                                \
@@ -1370,10 +1356,6 @@ bool Variant::iter_init(Variant &r_iter, bool &valid) const {
 				return false;
 			}
 
-#ifdef DEBUG_ENABLED
-
-
-#endif
 			Callable::CallError ce;
 			ce.error = Callable::CallError::CALL_OK;
 			Array ref = { r_iter };
@@ -1600,10 +1582,6 @@ bool Variant::iter_next(Variant &r_iter, bool &valid) const {
 				return false;
 			}
 
-#ifdef DEBUG_ENABLED
-
-
-#endif
 			Callable::CallError ce;
 			ce.error = Callable::CallError::CALL_OK;
 			Array ref = { r_iter };
@@ -1791,9 +1769,6 @@ Variant Variant::iter_get(const Variant &r_iter, bool &r_valid) const {
 				r_valid = false;
 				return Variant();
 			}
-#ifdef DEBUG_ENABLED
-
-#endif
 			Callable::CallError ce;
 			ce.error = Callable::CallError::CALL_OK;
 			const Variant *refp[] = { &r_iter };
@@ -1820,133 +1795,56 @@ Variant Variant::iter_get(const Variant &r_iter, bool &r_valid) const {
 		case ARRAY: {
 			const Array *arr = reinterpret_cast<const Array *>(_data._mem);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for Array of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_BYTE_ARRAY: {
 			const Vector<uint8_t> *arr = &PackedArrayRef<uint8_t>::get_array(_data.packed_array);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedByteArray of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_INT32_ARRAY: {
 			const Vector<int32_t> *arr = &PackedArrayRef<int32_t>::get_array(_data.packed_array);
 			int32_t idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedInt32Array of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_INT64_ARRAY: {
 			const Vector<int64_t> *arr = &PackedArrayRef<int64_t>::get_array(_data.packed_array);
 			int64_t idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedInt64Array of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_FLOAT32_ARRAY: {
 			const Vector<float> *arr = &PackedArrayRef<float>::get_array(_data.packed_array);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedFloat32Array of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_FLOAT64_ARRAY: {
 			const Vector<double> *arr = &PackedArrayRef<double>::get_array(_data.packed_array);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedFloat64Array of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_STRING_ARRAY: {
 			const Vector<String> *arr = &PackedArrayRef<String>::get_array(_data.packed_array);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedStringArray of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_VECTOR2_ARRAY: {
 			const Vector<Vector2> *arr = &PackedArrayRef<Vector2>::get_array(_data.packed_array);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedVector2Array of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_VECTOR3_ARRAY: {
 			const Vector<Vector3> *arr = &PackedArrayRef<Vector3>::get_array(_data.packed_array);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedVector3Array of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_COLOR_ARRAY: {
 			const Vector<Color> *arr = &PackedArrayRef<Color>::get_array(_data.packed_array);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedColorArray of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		case PACKED_VECTOR4_ARRAY: {
 			const Vector<Vector4> *arr = &PackedArrayRef<Vector4>::get_array(_data.packed_array);
 			int idx = r_iter;
-#ifdef DEBUG_ENABLED
-			if (idx < 0 || idx >= arr->size()) {
-				ERR_PRINT(vformat("iter_get: Index %d is out of bounds for PackedVector4Array of size %d.", idx, arr->size()));
-				r_valid = false;
-				return Variant();
-			}
-#endif
 			return arr->get(idx);
 		} break;
 		default: {

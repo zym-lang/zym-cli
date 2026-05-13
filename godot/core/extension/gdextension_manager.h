@@ -63,9 +63,6 @@ private:
 	void _finish_load_extension(const Ref<GDExtension> &p_extension);
 	LoadStatus _unload_extension_internal(const Ref<GDExtension> &p_extension);
 
-#ifdef TOOLS_ENABLED
-	static void _reload_all_scripts();
-#endif
 
 public:
 	LoadStatus load_extension(const String &p_path);
@@ -83,10 +80,6 @@ public:
 	void initialize_extensions(GDExtension::InitializationLevel p_level);
 	void deinitialize_extensions(GDExtension::InitializationLevel p_level);
 
-#ifdef TOOLS_ENABLED
-	void track_instance_binding(void *p_token, Object *p_object);
-	void untrack_instance_binding(void *p_token, Object *p_object);
-#endif
 
 	static GDExtensionManager *get_singleton();
 

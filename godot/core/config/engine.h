@@ -78,9 +78,6 @@ private:
 	bool use_validation_layers = false;
 	bool generate_spirv_debug_info = false;
 	bool extra_gpu_memory_tracking = false;
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
-	bool accurate_breadcrumbs = false;
-#endif
 	int32_t gpu_idx = -1;
 
 	uint64_t _process_frames = 0;
@@ -167,19 +164,6 @@ public:
 	bool is_singleton_user_created(const StringName &p_name) const;
 	bool is_singleton_editor_only(const StringName &p_name) const;
 
-#ifdef TOOLS_ENABLED
-	_FORCE_INLINE_ void set_editor_hint(bool p_enabled) { editor_hint = p_enabled; }
-	_FORCE_INLINE_ bool is_editor_hint() const { return editor_hint; }
-
-	_FORCE_INLINE_ void set_project_manager_hint(bool p_enabled) { project_manager_hint = p_enabled; }
-	_FORCE_INLINE_ bool is_project_manager_hint() const { return project_manager_hint; }
-
-	_FORCE_INLINE_ void set_extension_reloading_enabled(bool p_enabled) { extension_reloading = p_enabled; }
-	_FORCE_INLINE_ bool is_extension_reloading_enabled() const { return extension_reloading; }
-
-	_FORCE_INLINE_ void set_recovery_mode_hint(bool p_enabled) { recovery_mode_hint = p_enabled; }
-	_FORCE_INLINE_ bool is_recovery_mode_hint() const { return recovery_mode_hint; }
-#else
 	_FORCE_INLINE_ void set_editor_hint(bool p_enabled) {}
 	_FORCE_INLINE_ bool is_editor_hint() const { return false; }
 
@@ -191,7 +175,6 @@ public:
 
 	_FORCE_INLINE_ void set_recovery_mode_hint(bool p_enabled) {}
 	_FORCE_INLINE_ bool is_recovery_mode_hint() const { return false; }
-#endif
 
 	Dictionary get_version_info() const;
 	Dictionary get_author_info() const;
@@ -212,9 +195,6 @@ public:
 	bool is_validation_layers_enabled() const;
 	bool is_generate_spirv_debug_info_enabled() const;
 	bool is_extra_gpu_memory_tracking_enabled() const;
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
-	bool is_accurate_breadcrumbs_enabled() const;
-#endif
 	int32_t get_gpu_index() const;
 
 	void increment_frames_drawn();

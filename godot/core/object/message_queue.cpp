@@ -36,22 +36,10 @@
 
 #include <cstdio>
 
-#ifdef DEV_ENABLED
-// Includes safety checks to ensure that a queue set as a thread singleton override
-// is only ever called from the thread it was set for.
-#define LOCK_MUTEX                                \
-	if (this != MessageQueue::thread_singleton) { \
-		DEV_ASSERT(!is_current_thread_override);  \
-		mutex.lock();                             \
-	} else {                                      \
-		DEV_ASSERT(is_current_thread_override);   \
-	}
-#else
 #define LOCK_MUTEX                                \
 	if (this != MessageQueue::thread_singleton) { \
 		mutex.lock();                             \
 	}
-#endif
 
 #define UNLOCK_MUTEX                              \
 	if (this != MessageQueue::thread_singleton) { \
@@ -490,17 +478,7 @@ CallQueue *MessageQueue::main_singleton = nullptr;
 thread_local CallQueue *MessageQueue::thread_singleton = nullptr;
 
 void MessageQueue::set_thread_singleton_override(CallQueue *p_thread_singleton) {
-#ifdef DEV_ENABLED
-	if (thread_singleton) {
-		thread_singleton->is_current_thread_override = false;
-	}
-#endif
 	thread_singleton = p_thread_singleton;
-#ifdef DEV_ENABLED
-	if (thread_singleton) {
-		thread_singleton->is_current_thread_override = true;
-	}
-#endif
 }
 
 MessageQueue::MessageQueue() :

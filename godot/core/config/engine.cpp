@@ -286,11 +286,6 @@ bool Engine::is_extra_gpu_memory_tracking_enabled() const {
 	return extra_gpu_memory_tracking;
 }
 
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
-bool Engine::is_accurate_breadcrumbs_enabled() const {
-	return accurate_breadcrumbs;
-}
-#endif
 
 void Engine::set_print_to_stdout(bool p_enabled) {
 	CoreGlobals::print_line_enabled = p_enabled;
@@ -330,11 +325,6 @@ Object *Engine::get_singleton_object(const StringName &p_name) const {
 	HashMap<StringName, Object *>::ConstIterator E = singleton_ptrs.find(p_name);
 	ERR_FAIL_COND_V_MSG(!E, nullptr, vformat("Failed to retrieve non-existent singleton '%s'.", p_name));
 
-#ifdef TOOLS_ENABLED
-	if (!is_editor_hint() && is_singleton_editor_only(p_name)) {
-		ERR_FAIL_V_MSG(nullptr, vformat("Can't retrieve singleton '%s' outside of editor.", p_name));
-	}
-#endif
 
 	return E->value;
 }
@@ -381,11 +371,6 @@ bool Engine::has_singleton(const StringName &p_name) const {
 
 void Engine::get_singletons(List<Singleton> *p_singletons) {
 	for (const Singleton &E : singletons) {
-#ifdef TOOLS_ENABLED
-		if (!is_editor_hint() && E.editor_only) {
-			continue;
-		}
-#endif
 
 		p_singletons->push_back(E);
 	}
@@ -441,10 +426,4 @@ Engine::Singleton::Singleton(const StringName &p_name, Object *p_ptr, const Stri
 		name(p_name),
 		ptr(p_ptr),
 		class_name(p_class_name) {
-#ifdef DEBUG_ENABLED
-	RefCounted *rc = Object::cast_to<RefCounted>(p_ptr);
-	if (rc && !rc->is_referenced()) {
-		WARN_PRINT("You must use Ref<> to ensure the lifetime of a RefCounted object intended to be used as a singleton.");
-	}
-#endif
 }

@@ -74,13 +74,6 @@ public:
 
 	_FORCE_INLINE_ Span(const T *p_ptr, uint64_t p_len) :
 			_ptr(p_ptr), _len(p_len) {
-#ifdef DEBUG_ENABLED
-		// TODO In c++20, make this check run only in non-consteval, and make this constructor constexpr.
-		if (_ptr == nullptr && _len > 0) {
-			ERR_PRINT("Internal bug, please report: Span was created from nullptr with size > 0. Recovering by using size = 0.");
-			_len = 0;
-		}
-#endif
 	}
 
 	// Allows creating Span directly from C arrays and string literals.

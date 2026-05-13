@@ -40,11 +40,6 @@ class TranslationServer : public Object {
 	String fallback;
 
 	Ref<TranslationDomain> main_domain;
-#ifdef TOOLS_ENABLED
-	Ref<TranslationDomain> editor_domain;
-	Ref<TranslationDomain> property_domain;
-	Ref<TranslationDomain> doc_domain;
-#endif // TOOLS_ENABLED
 	HashMap<StringName, Ref<TranslationDomain>> custom_domains;
 
 	mutable HashMap<String, int> locale_compare_cache;
@@ -101,11 +96,6 @@ public:
 
 	// Built-in domain accessors. For engine code only, user code should use `get_or_add_domain()` instead.
 	Ref<TranslationDomain> get_main_domain() const { return main_domain; }
-#ifdef TOOLS_ENABLED
-	Ref<TranslationDomain> get_editor_domain() const { return editor_domain; }
-	Ref<TranslationDomain> get_property_domain() const { return property_domain; }
-	Ref<TranslationDomain> get_doc_domain() const { return doc_domain; }
-#endif // TOOLS_ENABLED
 
 	void set_locale(const String &p_locale);
 	String get_locale() const;
@@ -169,9 +159,6 @@ public:
 
 	void load_project_translations(Ref<TranslationDomain> p_domain);
 
-#ifdef TOOLS_ENABLED
-	virtual void get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const override;
-#endif // TOOLS_ENABLED
 
 	TranslationServer();
 };

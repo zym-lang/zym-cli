@@ -994,41 +994,6 @@ String OS_LinuxBSD::get_system_ca_certificates() {
 	return f->get_as_text();
 }
 
-#ifdef TOOLS_ENABLED
-bool OS_LinuxBSD::_test_create_rendering_device(const String &p_display_driver) const {
-	// Tests Rendering Device creation.
-
-	bool ok = false;
-#if defined(RD_ENABLED)
-	Error err;
-	RenderingContextDriver *rcd = nullptr;
-
-	// zym: Vulkan rendering context drivers (x11/wayland) removed.
-	if (rcd != nullptr) {
-		err = rcd->initialize();
-		if (err == OK) {
-			RenderingDevice *rd = memnew(RenderingDevice);
-			err = rd->initialize(rcd);
-			memdelete(rd);
-			rd = nullptr;
-			if (err == OK) {
-				ok = true;
-			}
-		}
-		memdelete(rcd);
-		rcd = nullptr;
-	}
-#endif
-	return ok;
-}
-
-bool OS_LinuxBSD::_test_create_rendering_device_and_gl(const String &p_display_driver) const {
-	// Tests OpenGL context and Rendering Device simultaneous creation. This function is expected to crash on some drivers.
-
-	// zym: GLES3 / X11 / Wayland prime detection removed.
-	return _test_create_rendering_device(p_display_driver);
-}
-#endif
 
 OS_LinuxBSD::OS_LinuxBSD() {
 	main_loop = nullptr;

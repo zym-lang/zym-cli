@@ -609,21 +609,9 @@ void TranslationServer::setup() {
 	main_domain->set_pseudolocalization_suffix(GLOBAL_DEF("internationalization/pseudolocalization/suffix", "]"));
 	main_domain->set_pseudolocalization_skip_placeholders_enabled(GLOBAL_DEF("internationalization/pseudolocalization/skip_placeholders", true));
 
-#ifdef TOOLS_ENABLED
-	ProjectSettings::get_singleton()->set_custom_property_info(PropertyInfo(Variant::STRING, "internationalization/locale/test", PROPERTY_HINT_LOCALE_ID, ""));
-	ProjectSettings::get_singleton()->set_custom_property_info(PropertyInfo(Variant::STRING, "internationalization/locale/fallback", PROPERTY_HINT_LOCALE_ID, ""));
-#endif
 }
 
 String TranslationServer::get_tool_locale() {
-#ifdef TOOLS_ENABLED
-	if (Engine::get_singleton()->is_editor_hint() || Engine::get_singleton()->is_project_manager_hint()) {
-		if (editor_domain->has_translation_for_locale(locale, true)) {
-			return locale;
-		}
-		return "en";
-	}
-#endif
 
 	Ref<Translation> res;
 	int best_score = 0;
@@ -676,28 +664,6 @@ StringName TranslationServer::pseudolocalize(const StringName &p_message) const 
 	return main_domain->pseudolocalize(p_message);
 }
 
-#ifdef TOOLS_ENABLED
-void TranslationServer::get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const {
-	const String pf = p_function;
-	if (p_idx == 0) {
-		HashMap<String, String> *target_hash_map = nullptr;
-		if (pf == "get_language_name") {
-			target_hash_map = &language_map;
-		} else if (pf == "get_script_name") {
-			target_hash_map = &script_map;
-		} else if (pf == "get_country_name") {
-			target_hash_map = &country_name_map;
-		}
-
-		if (target_hash_map) {
-			for (const KeyValue<String, String> &E : *target_hash_map) {
-				r_options->push_back(E.key.quote());
-			}
-		}
-	}
-	Object::get_argument_options(p_function, p_idx, r_options);
-}
-#endif // TOOLS_ENABLED
 
 void TranslationServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_locale", "locale"), &TranslationServer::set_locale);
@@ -775,11 +741,6 @@ TranslationServer::TranslationServer() {
 
 	main_domain.instantiate();
 
-#ifdef TOOLS_ENABLED
-	editor_domain = get_or_add_domain("godot.editor");
-	property_domain = get_or_add_domain("godot.properties");
-	doc_domain = get_or_add_domain("godot.documentation");
-#endif // TOOLS_ENABLED
 
 	init_locale_info();
 }

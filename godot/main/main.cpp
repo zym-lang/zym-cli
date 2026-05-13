@@ -63,12 +63,6 @@ bool Main::is_cmdline_tool() {
 	return false;
 }
 
-#ifdef TOOLS_ENABLED
-const Vector<String> &Main::get_forwardable_cli_arguments(Main::CLIScope p_scope) {
-	static const Vector<String> empty;
-	return empty;
-}
-#endif
 
 int Main::test_entrypoint(int argc, char *argv[], bool &tests_need_run) {
 	tests_need_run = false;
@@ -93,13 +87,6 @@ String Main::get_locale_override() {
 
 void Main::setup_boot_logo() {}
 
-#ifdef TESTS_ENABLED
-Error Main::test_setup() {
-	return OK;
-}
-
-void Main::test_cleanup() {}
-#endif
 
 int Main::start() {
 	return 0;

@@ -233,12 +233,6 @@ public:
 	}
 
 	~SafeList() {
-#ifdef DEBUG_ENABLED
-		if (!maybe_cleanup()) {
-			ERR_PRINT("There are still iterators around when destructing a SafeList. Memory will be leaked. This is a bug.");
-		}
-#else
 		maybe_cleanup();
-#endif
 	}
 };

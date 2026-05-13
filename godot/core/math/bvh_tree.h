@@ -52,16 +52,6 @@
 #define BVH_EXPAND_LEAF_AABBS
 
 // never do these checks in release
-#ifdef DEV_ENABLED
-//#define BVH_VERBOSE
-//#define BVH_VERBOSE_TREE
-//#define BVH_VERBOSE_PAIRING
-//#define BVH_VERBOSE_MOVES
-
-//#define BVH_VERBOSE_FRAME
-//#define BVH_CHECKS
-//#define BVH_INTEGRITY_CHECKS
-#endif
 
 // debug only assert
 #ifdef BVH_CHECKS

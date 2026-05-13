@@ -32,9 +32,6 @@
 
 #include "core/config/project_settings.h"
 
-#ifdef TOOLS_ENABLED
-#include "editor/settings/editor_settings.h"
-#endif // TOOLS_ENABLED
 
 static void my_debug(void *ctx, int level,
 		const char *file, int line,

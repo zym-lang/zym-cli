@@ -549,27 +549,6 @@ RID Resource::get_rid() const {
 	return ret;
 }
 
-#ifdef TOOLS_ENABLED
-
-uint32_t Resource::hash_edited_version_for_preview() const {
-	uint32_t hash = hash_murmur3_one_32(get_edited_version());
-
-	List<PropertyInfo> plist;
-	get_property_list(&plist);
-
-	for (const PropertyInfo &E : plist) {
-		if (E.usage & PROPERTY_USAGE_STORAGE && E.type == Variant::OBJECT && E.hint == PROPERTY_HINT_RESOURCE_TYPE) {
-			Ref<Resource> res = get(E.name);
-			if (res.is_valid()) {
-				hash = hash_murmur3_one_32(res->hash_edited_version_for_preview(), hash);
-			}
-		}
-	}
-
-	return hash;
-}
-
-#endif
 
 String Resource::_to_string() {
 	return (name.is_empty() ? "" : String(name) + " ") + "(" + path_cache + "):" + Object::_to_string();
@@ -593,33 +572,10 @@ void Resource::set_as_translation_remapped(bool p_remapped) {
 
 // Helps keep IDs the same when loading/saving scenes. An empty ID clears the entry, and an empty ID is returned when not found.
 void Resource::set_resource_id_for_path(const String &p_referrer_path, const String &p_resource_path, const String &p_id) {
-#ifdef TOOLS_ENABLED
-	if (p_id.is_empty()) {
-		ResourceCache::path_cache_lock.write_lock();
-		ResourceCache::resource_path_cache[p_referrer_path].erase(p_resource_path);
-		ResourceCache::path_cache_lock.write_unlock();
-	} else {
-		ResourceCache::path_cache_lock.write_lock();
-		ResourceCache::resource_path_cache[p_referrer_path][p_resource_path] = p_id;
-		ResourceCache::path_cache_lock.write_unlock();
-	}
-#endif
 }
 
 String Resource::get_id_for_path(const String &p_referrer_path) const {
-#ifdef TOOLS_ENABLED
-	ResourceCache::path_cache_lock.read_lock();
-	if (ResourceCache::resource_path_cache[p_referrer_path].has(get_path())) {
-		String result = ResourceCache::resource_path_cache[p_referrer_path][get_path()];
-		ResourceCache::path_cache_lock.read_unlock();
-		return result;
-	} else {
-		ResourceCache::path_cache_lock.read_unlock();
-		return "";
-	}
-#else
 	return "";
-#endif
 }
 
 void Resource::_bind_methods() {
@@ -684,14 +640,8 @@ Resource::~Resource() {
 }
 
 HashMap<String, Resource *> ResourceCache::resources;
-#ifdef TOOLS_ENABLED
-HashMap<String, HashMap<String, String>> ResourceCache::resource_path_cache;
-#endif
 
 Mutex ResourceCache::lock;
-#ifdef TOOLS_ENABLED
-RWLock ResourceCache::path_cache_lock;
-#endif
 
 void ResourceCache::clear() {
 	if (!resources.is_empty()) {

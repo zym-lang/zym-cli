@@ -85,25 +85,10 @@ private:
 	_FORCE_INLINE_ bool _internal_validate_object(const Variant &p_variant, const char *p_operation, bool p_output_errors) const {
 		ERR_FAIL_COND_V(p_variant.get_type() != Variant::OBJECT, false);
 
-#ifdef DEBUG_ENABLED
-		ObjectID object_id = p_variant;
-		if (object_id == ObjectID()) {
-			return true; // This is fine, it's null.
-		}
-		Object *object = ObjectDB::get_instance(object_id);
-		if (object == nullptr) {
-			if (p_output_errors) {
-				ERR_FAIL_V_MSG(false, vformat("Attempted to %s an invalid (previously freed?) object instance into a '%s'.", String(p_operation), String(where)));
-			} else {
-				return false;
-			}
-		}
-#else
 		Object *object = p_variant;
 		if (object == nullptr) {
 			return true; //fine
 		}
-#endif
 		if (class_name == StringName()) {
 			return true; // All good, no class type requested.
 		}

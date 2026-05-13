@@ -1666,30 +1666,15 @@ static void *gdextension_classdb_get_class_tag(GDExtensionConstStringNamePtr p_c
 }
 
 static void gdextension_editor_add_plugin(GDExtensionConstStringNamePtr p_classname) {
-#ifdef TOOLS_ENABLED
-	const StringName classname = *reinterpret_cast<const StringName *>(p_classname);
-	GDExtensionEditorPlugins::add_extension_class(classname);
-#endif
 }
 
 static void gdextension_editor_remove_plugin(GDExtensionConstStringNamePtr p_classname) {
-#ifdef TOOLS_ENABLED
-	const StringName classname = *reinterpret_cast<const StringName *>(p_classname);
-	GDExtensionEditorPlugins::remove_extension_class(classname);
-#endif
 }
 
 static void gdextension_editor_help_load_xml_from_utf8_chars_and_len(const char *p_data, GDExtensionInt p_size) {
-#ifdef TOOLS_ENABLED
-	GDExtensionEditorHelp::load_xml_buffer((const uint8_t *)p_data, p_size);
-#endif
 }
 
 static void gdextension_editor_help_load_xml_from_utf8_chars(const char *p_data) {
-#ifdef TOOLS_ENABLED
-	size_t len = strlen(p_data);
-	gdextension_editor_help_load_xml_from_utf8_chars_and_len(p_data, len);
-#endif
 }
 
 #define REGISTER_INTERFACE_FUNC(m_name) GDExtension::register_interface_function(#m_name, (GDExtensionInterfaceFunctionPtr) & gdextension_##m_name)

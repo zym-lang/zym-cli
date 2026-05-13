@@ -243,9 +243,6 @@ bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, 
 				f->seek(pck_off);
 				magic = f->get_32();
 				if (magic == PACK_HEADER_MAGIC) {
-#ifdef DEBUG_ENABLED
-					print_verbose("PCK header found in executable pck section, loading from offset 0x" + String::num_int64(pck_off - 4, 16));
-#endif
 					pck_header_found = true;
 					break;
 				}
@@ -271,9 +268,6 @@ bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, 
 			f->seek(f->get_position() - ds - 8);
 			magic = f->get_32();
 			if (magic == PACK_HEADER_MAGIC) {
-#ifdef DEBUG_ENABLED
-				print_verbose("PCK header found at the end of executable, loading from offset 0x" + String::num_int64(f->get_position() - 4, 16));
-#endif
 				pck_header_found = true;
 			}
 		}

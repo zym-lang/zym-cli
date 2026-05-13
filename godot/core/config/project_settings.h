@@ -59,10 +59,6 @@ public:
 	// Properties that are not for built in values begin from this value, so builtin ones are displayed first.
 	constexpr static const int32_t NO_BUILTIN_ORDER_BASE = 1 << 16;
 
-#ifdef TOOLS_ENABLED
-	const static PackedStringArray get_required_features();
-	const static PackedStringArray get_unsupported_features(const PackedStringArray &p_project_features);
-#endif // TOOLS_ENABLED
 
 	struct AutoloadInfo {
 		StringName name;
@@ -80,9 +76,6 @@ protected:
 		Variant initial;
 		bool hide_from_editor = false;
 		bool restart_if_changed = false;
-#ifdef DEBUG_ENABLED
-		bool ignore_value_in_docs = false;
-#endif // DEBUG_ENABLED
 
 		VariantContainer() {}
 
@@ -137,10 +130,6 @@ protected:
 
 	Error _save_custom_bnd(const String &p_file);
 
-#ifdef TOOLS_ENABLED
-	const static PackedStringArray _get_supported_features();
-	const static PackedStringArray _trim_to_supported_features(const PackedStringArray &p_project_features);
-#endif // TOOLS_ENABLED
 
 	void _convert_to_last_version(int p_from_version);
 
@@ -159,9 +148,6 @@ protected:
 public:
 	static const int CONFIG_VERSION = 5;
 
-#ifdef TOOLS_ENABLED
-	HashMap<String, PropertyInfo> editor_settings_info;
-#endif
 
 	void set_setting(const String &p_setting, const Variant &p_value);
 	Variant get_setting(const String &p_setting, const Variant &p_default_value = Variant()) const;
@@ -240,9 +226,6 @@ public:
 	// Testing a version allows fast cached GET_GLOBAL macros.
 	uint32_t get_version() const { return _version; }
 
-#ifdef TOOLS_ENABLED
-	virtual void get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const override;
-#endif
 
 	void set_editor_setting_override(const String &p_setting, const Variant &p_value);
 	bool has_editor_setting_override(const String &p_setting) const;

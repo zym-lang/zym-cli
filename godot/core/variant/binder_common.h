@@ -157,64 +157,12 @@ struct VariantObjectClassChecker<const Ref<T> &> {
 	}
 };
 
-#ifdef DEBUG_ENABLED
-
-template <typename T>
-struct VariantCasterAndValidate {
-	static _FORCE_INLINE_ T cast(const Variant **p_args, uint32_t p_arg_idx, Callable::CallError &r_error) {
-		Variant::Type argtype = GetTypeInfo<T>::VARIANT_TYPE;
-		if (!Variant::can_convert_strict(p_args[p_arg_idx]->get_type(), argtype) ||
-				!VariantObjectClassChecker<T>::check(*p_args[p_arg_idx])) {
-			r_error.error = Callable::CallError::CALL_ERROR_INVALID_ARGUMENT;
-			r_error.argument = p_arg_idx;
-			r_error.expected = argtype;
-		}
-
-		return VariantCaster<T>::cast(*p_args[p_arg_idx]);
-	}
-};
-
-template <typename T>
-struct VariantCasterAndValidate<T &> {
-	static _FORCE_INLINE_ T cast(const Variant **p_args, uint32_t p_arg_idx, Callable::CallError &r_error) {
-		Variant::Type argtype = GetTypeInfo<T>::VARIANT_TYPE;
-		if (!Variant::can_convert_strict(p_args[p_arg_idx]->get_type(), argtype) ||
-				!VariantObjectClassChecker<T>::check(*p_args[p_arg_idx])) {
-			r_error.error = Callable::CallError::CALL_ERROR_INVALID_ARGUMENT;
-			r_error.argument = p_arg_idx;
-			r_error.expected = argtype;
-		}
-
-		return VariantCaster<T>::cast(*p_args[p_arg_idx]);
-	}
-};
-
-template <typename T>
-struct VariantCasterAndValidate<const T &> {
-	static _FORCE_INLINE_ T cast(const Variant **p_args, uint32_t p_arg_idx, Callable::CallError &r_error) {
-		Variant::Type argtype = GetTypeInfo<T>::VARIANT_TYPE;
-		if (!Variant::can_convert_strict(p_args[p_arg_idx]->get_type(), argtype) ||
-				!VariantObjectClassChecker<T>::check(*p_args[p_arg_idx])) {
-			r_error.error = Callable::CallError::CALL_ERROR_INVALID_ARGUMENT;
-			r_error.argument = p_arg_idx;
-			r_error.expected = argtype;
-		}
-
-		return VariantCaster<T>::cast(*p_args[p_arg_idx]);
-	}
-};
-
-#endif // DEBUG_ENABLED
 
 template <typename T, typename... P, size_t... Is>
 void call_with_variant_args_helper(T *p_instance, void (T::*p_method)(P...), const Variant **p_args, Callable::CallError &r_error, IndexSequence<Is...>) {
 	r_error.error = Callable::CallError::CALL_OK;
 
-#ifdef DEBUG_ENABLED
-	(p_instance->*p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...);
-#else
 	(p_instance->*p_method)(VariantCaster<P>::cast(*p_args[Is])...);
-#endif // DEBUG_ENABLED
 	(void)(p_args); //avoid warning
 }
 
@@ -222,11 +170,7 @@ template <typename T, typename... P, size_t... Is>
 void call_with_variant_argsc_helper(T *p_instance, void (T::*p_method)(P...) const, const Variant **p_args, Callable::CallError &r_error, IndexSequence<Is...>) {
 	r_error.error = Callable::CallError::CALL_OK;
 
-#ifdef DEBUG_ENABLED
-	(p_instance->*p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...);
-#else
 	(p_instance->*p_method)(VariantCaster<P>::cast(*p_args[Is])...);
-#endif // DEBUG_ENABLED
 	(void)(p_args); //avoid warning
 }
 
@@ -312,42 +256,15 @@ void call_with_validated_variant_args_static_method_helper(void (*p_method)(P...
 
 template <typename T, typename... P>
 void call_with_variant_args(T *p_instance, void (T::*p_method)(P...), const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-
-	if ((size_t)p_argcount < sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 	call_with_variant_args_helper<T, P...>(p_instance, p_method, p_args, r_error, BuildIndexSequence<sizeof...(P)>{});
 }
 
 template <typename T, typename... P>
 void call_with_variant_args_dv(T *p_instance, void (T::*p_method)(P...), const Variant **p_args, int p_argcount, Callable::CallError &r_error, const Vector<Variant> &default_values) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	int32_t missing = (int32_t)sizeof...(P) - (int32_t)p_argcount;
 
 	int32_t dvs = default_values.size();
-#ifdef DEBUG_ENABLED
-	if (missing > dvs) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	const Variant *args[sizeof...(P) == 0 ? 1 : sizeof...(P)]; //avoid zero sized array
 	for (int32_t i = 0; i < (int32_t)sizeof...(P); i++) {
@@ -363,42 +280,15 @@ void call_with_variant_args_dv(T *p_instance, void (T::*p_method)(P...), const V
 
 template <typename T, typename... P>
 void call_with_variant_argsc(T *p_instance, void (T::*p_method)(P...) const, const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-
-	if ((size_t)p_argcount < sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 	call_with_variant_argsc_helper<T, P...>(p_instance, p_method, p_args, r_error, BuildIndexSequence<sizeof...(P)>{});
 }
 
 template <typename T, typename... P>
 void call_with_variant_argsc_dv(T *p_instance, void (T::*p_method)(P...) const, const Variant **p_args, int p_argcount, Callable::CallError &r_error, const Vector<Variant> &default_values) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	int32_t missing = (int32_t)sizeof...(P) - (int32_t)p_argcount;
 
 	int32_t dvs = default_values.size();
-#ifdef DEBUG_ENABLED
-	if (missing > dvs) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	const Variant *args[sizeof...(P) == 0 ? 1 : sizeof...(P)]; //avoid zero sized array
 	for (int32_t i = 0; i < (int32_t)sizeof...(P); i++) {
@@ -414,24 +304,10 @@ void call_with_variant_argsc_dv(T *p_instance, void (T::*p_method)(P...) const, 
 
 template <typename T, typename R, typename... P>
 void call_with_variant_args_ret_dv(T *p_instance, R (T::*p_method)(P...), const Variant **p_args, int p_argcount, Variant &r_ret, Callable::CallError &r_error, const Vector<Variant> &default_values) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	int32_t missing = (int32_t)sizeof...(P) - (int32_t)p_argcount;
 
 	int32_t dvs = default_values.size();
-#ifdef DEBUG_ENABLED
-	if (missing > dvs) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	const Variant *args[sizeof...(P) == 0 ? 1 : sizeof...(P)]; //avoid zero sized array
 	for (int32_t i = 0; i < (int32_t)sizeof...(P); i++) {
@@ -447,24 +323,10 @@ void call_with_variant_args_ret_dv(T *p_instance, R (T::*p_method)(P...), const 
 
 template <typename T, typename R, typename... P>
 void call_with_variant_args_retc_dv(T *p_instance, R (T::*p_method)(P...) const, const Variant **p_args, int p_argcount, Variant &r_ret, Callable::CallError &r_error, const Vector<Variant> &default_values) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	int32_t missing = (int32_t)sizeof...(P) - (int32_t)p_argcount;
 
 	int32_t dvs = default_values.size();
-#ifdef DEBUG_ENABLED
-	if (missing > dvs) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	const Variant *args[sizeof...(P) == 0 ? 1 : sizeof...(P)]; //avoid zero sized array
 	for (int32_t i = 0; i < (int32_t)sizeof...(P); i++) {
@@ -629,29 +491,6 @@ void call_get_argument_type_info(int p_arg, PropertyInfo &info) {
 	(void)index; // Suppress GCC warning.
 }
 
-#ifdef DEBUG_ENABLED
-template <typename Q>
-void call_get_argument_metadata_helper(int p_arg, int &index, GodotTypeInfo::Metadata &md) {
-	if (p_arg == index) {
-		md = GetTypeInfo<Q>::METADATA;
-	}
-	index++;
-}
-
-template <typename... P>
-GodotTypeInfo::Metadata call_get_argument_metadata(int p_arg) {
-	GodotTypeInfo::Metadata md = GodotTypeInfo::METADATA_NONE;
-
-	int index = 0;
-	// I think rocket science is simpler than modern C++.
-	using expand_type = int[];
-	expand_type a{ 0, (call_get_argument_metadata_helper<P>(p_arg, index, md), 0)... };
-	(void)a; // Suppress (valid, but unavoidable) -Wunused-variable warning.
-	(void)index;
-	return md;
-}
-
-#endif // DEBUG_ENABLED
 
 //////////////////////
 
@@ -659,50 +498,25 @@ template <typename T, typename R, typename... P, size_t... Is>
 void call_with_variant_args_ret_helper(T *p_instance, R (T::*p_method)(P...), const Variant **p_args, Variant &r_ret, Callable::CallError &r_error, IndexSequence<Is...>) {
 	r_error.error = Callable::CallError::CALL_OK;
 
-#ifdef DEBUG_ENABLED
-	r_ret = VariantInternal::make((p_instance->*p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...));
-#else
 	r_ret = VariantInternal::make((p_instance->*p_method)(VariantCaster<P>::cast(*p_args[Is])...));
-#endif
 }
 
 template <typename R, typename... P, size_t... Is>
 void call_with_variant_args_static_ret(R (*p_method)(P...), const Variant **p_args, Variant &r_ret, Callable::CallError &r_error, IndexSequence<Is...>) {
 	r_error.error = Callable::CallError::CALL_OK;
 
-#ifdef DEBUG_ENABLED
-	r_ret = VariantInternal::make((p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...));
-#else
 	r_ret = VariantInternal::make((p_method)(VariantCaster<P>::cast(*p_args[Is])...));
-#endif // DEBUG_ENABLED
 }
 
 template <typename... P, size_t... Is>
 void call_with_variant_args_static(void (*p_method)(P...), const Variant **p_args, Callable::CallError &r_error, IndexSequence<Is...>) {
 	r_error.error = Callable::CallError::CALL_OK;
 
-#ifdef DEBUG_ENABLED
-	(p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...);
-#else
 	(p_method)(VariantCaster<P>::cast(*p_args[Is])...);
-#endif // DEBUG_ENABLED
 }
 
 template <typename T, typename R, typename... P>
 void call_with_variant_args_ret(T *p_instance, R (T::*p_method)(P...), const Variant **p_args, int p_argcount, Variant &r_ret, Callable::CallError &r_error) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-
-	if ((size_t)p_argcount < sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 	call_with_variant_args_ret_helper<T, R, P...>(p_instance, p_method, p_args, r_ret, r_error, BuildIndexSequence<sizeof...(P)>{});
 }
 
@@ -710,65 +524,22 @@ template <typename T, typename R, typename... P, size_t... Is>
 void call_with_variant_args_retc_helper(T *p_instance, R (T::*p_method)(P...) const, const Variant **p_args, Variant &r_ret, Callable::CallError &r_error, IndexSequence<Is...>) {
 	r_error.error = Callable::CallError::CALL_OK;
 
-#ifdef DEBUG_ENABLED
-	r_ret = VariantInternal::make((p_instance->*p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...));
-#else
 	r_ret = VariantInternal::make((p_instance->*p_method)(VariantCaster<P>::cast(*p_args[Is])...));
-#endif // DEBUG_ENABLED
 	(void)p_args;
 }
 
 template <typename R, typename... P>
 void call_with_variant_args_static_ret(R (*p_method)(P...), const Variant **p_args, int p_argcount, Variant &r_ret, Callable::CallError &r_error) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-
-	if ((size_t)p_argcount < sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 	call_with_variant_args_static_ret<R, P...>(p_method, p_args, r_ret, r_error, BuildIndexSequence<sizeof...(P)>{});
 }
 
 template <typename... P>
 void call_with_variant_args_static(void (*p_method)(P...), const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-
-	if ((size_t)p_argcount < sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 	call_with_variant_args_static<P...>(p_method, p_args, r_error, BuildIndexSequence<sizeof...(P)>{});
 }
 
 template <typename T, typename R, typename... P>
 void call_with_variant_args_retc(T *p_instance, R (T::*p_method)(P...) const, const Variant **p_args, int p_argcount, Variant &r_ret, Callable::CallError &r_error) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-
-	if ((size_t)p_argcount < sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 	call_with_variant_args_retc_helper<T, R, P...>(p_instance, p_method, p_args, r_ret, r_error, BuildIndexSequence<sizeof...(P)>{});
 }
 
@@ -776,35 +547,17 @@ template <typename T, typename R, typename... P, size_t... Is>
 void call_with_variant_args_retc_static_helper(T *p_instance, R (*p_method)(T *, P...), const Variant **p_args, Variant &r_ret, Callable::CallError &r_error, IndexSequence<Is...>) {
 	r_error.error = Callable::CallError::CALL_OK;
 
-#ifdef DEBUG_ENABLED
-	r_ret = VariantInternal::make((p_method)(p_instance, VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...));
-#else
 	r_ret = VariantInternal::make((p_method)(p_instance, VariantCaster<P>::cast(*p_args[Is])...));
-#endif // DEBUG_ENABLED
 
 	(void)p_args;
 }
 
 template <typename T, typename R, typename... P>
 void call_with_variant_args_retc_static_helper_dv(T *p_instance, R (*p_method)(T *, P...), const Variant **p_args, int p_argcount, Variant &r_ret, const Vector<Variant> &default_values, Callable::CallError &r_error) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	int32_t missing = (int32_t)sizeof...(P) - (int32_t)p_argcount;
 
 	int32_t dvs = default_values.size();
-#ifdef DEBUG_ENABLED
-	if (missing > dvs) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	const Variant *args[sizeof...(P) == 0 ? 1 : sizeof...(P)]; //avoid zero sized array
 	for (int32_t i = 0; i < (int32_t)sizeof...(P); i++) {
@@ -822,35 +575,17 @@ template <typename T, typename... P, size_t... Is>
 void call_with_variant_args_static_helper(T *p_instance, void (*p_method)(T *, P...), const Variant **p_args, Callable::CallError &r_error, IndexSequence<Is...>) {
 	r_error.error = Callable::CallError::CALL_OK;
 
-#ifdef DEBUG_ENABLED
-	(p_method)(p_instance, VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...);
-#else
 	(p_method)(p_instance, VariantCaster<P>::cast(*p_args[Is])...);
-#endif // DEBUG_ENABLED
 
 	(void)p_args;
 }
 
 template <typename T, typename... P>
 void call_with_variant_args_static_helper_dv(T *p_instance, void (*p_method)(T *, P...), const Variant **p_args, int p_argcount, const Vector<Variant> &default_values, Callable::CallError &r_error) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	int32_t missing = (int32_t)sizeof...(P) - (int32_t)p_argcount;
 
 	int32_t dvs = default_values.size();
-#ifdef DEBUG_ENABLED
-	if (missing > dvs) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	const Variant *args[sizeof...(P) == 0 ? 1 : sizeof...(P)]; //avoid zero sized array
 	for (int32_t i = 0; i < (int32_t)sizeof...(P); i++) {
@@ -866,24 +601,10 @@ void call_with_variant_args_static_helper_dv(T *p_instance, void (*p_method)(T *
 
 template <typename R, typename... P>
 void call_with_variant_args_static_ret_dv(R (*p_method)(P...), const Variant **p_args, int p_argcount, Variant &r_ret, Callable::CallError &r_error, const Vector<Variant> &default_values) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	int32_t missing = (int32_t)sizeof...(P) - (int32_t)p_argcount;
 
 	int32_t dvs = default_values.size();
-#ifdef DEBUG_ENABLED
-	if (missing > dvs) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	const Variant *args[sizeof...(P) == 0 ? 1 : sizeof...(P)]; //avoid zero sized array
 	for (int32_t i = 0; i < (int32_t)sizeof...(P); i++) {
@@ -899,24 +620,10 @@ void call_with_variant_args_static_ret_dv(R (*p_method)(P...), const Variant **p
 
 template <typename... P>
 void call_with_variant_args_static_dv(void (*p_method)(P...), const Variant **p_args, int p_argcount, Callable::CallError &r_error, const Vector<Variant> &default_values) {
-#ifdef DEBUG_ENABLED
-	if ((size_t)p_argcount > sizeof...(P)) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	int32_t missing = (int32_t)sizeof...(P) - (int32_t)p_argcount;
 
 	int32_t dvs = default_values.size();
-#ifdef DEBUG_ENABLED
-	if (missing > dvs) {
-		r_error.error = Callable::CallError::CALL_ERROR_TOO_FEW_ARGUMENTS;
-		r_error.expected = sizeof...(P);
-		return;
-	}
-#endif // DEBUG_ENABLED
 
 	const Variant *args[sizeof...(P) == 0 ? 1 : sizeof...(P)]; //avoid zero sized array
 	for (int32_t i = 0; i < (int32_t)sizeof...(P); i++) {

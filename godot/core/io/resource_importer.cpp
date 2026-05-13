@@ -127,14 +127,6 @@ Error ResourceFormatImporter::_get_path_and_type(const String &p_path, PathAndTy
 		return OK;
 	}
 
-#ifdef TOOLS_ENABLED
-	if (r_path_and_type.metadata && !r_path_and_type.path.is_empty()) {
-		Dictionary meta = r_path_and_type.metadata;
-		if (meta.has("has_editor_variant")) {
-			r_path_and_type.path = r_path_and_type.path.get_basename() + ".editor." + r_path_and_type.path.get_extension();
-		}
-	}
-#endif
 
 	if (r_path_and_type.type.is_empty()) {
 		return ERR_FILE_CORRUPT;
@@ -155,15 +147,6 @@ Error ResourceFormatImporter::_get_path_and_type(const String &p_path, PathAndTy
 }
 
 Ref<Resource> ResourceFormatImporter::load(const String &p_path, const String &p_original_path, Error *r_error, bool p_use_sub_threads, float *r_progress, CacheMode p_cache_mode) {
-#ifdef TOOLS_ENABLED
-	// When loading a resource on startup, we use the load_on_startup callback,
-	// which executes the loading in the EditorFileSystem. It can reimport
-	// the resource and retry the load, allowing the resource to be loaded
-	// even if it is not yet imported.
-	if (ResourceImporter::load_on_startup != nullptr) {
-		return ResourceImporter::load_on_startup(this, p_path, r_error, p_use_sub_threads, r_progress, p_cache_mode);
-	}
-#endif
 
 	return load_internal(p_path, r_error, p_use_sub_threads, r_progress, p_cache_mode, false);
 }
@@ -189,12 +172,6 @@ Ref<Resource> ResourceFormatImporter::load_internal(const String &p_path, Error 
 
 	Ref<Resource> res = ResourceLoader::_load(pat.path, p_path, pat.type, p_cache_mode, r_error, p_use_sub_threads, r_progress);
 
-#ifdef TOOLS_ENABLED
-	if (res.is_valid()) {
-		res->set_import_last_modified_time(res->get_last_modified_time()); //pass this, if used
-		res->set_import_path(pat.path);
-	}
-#endif
 
 	return res;
 }

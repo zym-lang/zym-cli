@@ -367,12 +367,6 @@ void UndoRedo::_process_operation_list(List<Operation>::Element *E, bool p_execu
 					if (ce.error != Callable::CallError::CALL_OK) {
 						ERR_PRINT(vformat("Error calling UndoRedo method operation '%s': %s.", String(op.name), Variant::get_call_error_text(obj, op.name, nullptr, 0, ce)));
 					}
-#ifdef TOOLS_ENABLED
-					Resource *res = Object::cast_to<Resource>(obj);
-					if (res) {
-						res->set_edited(true);
-					}
-#endif
 				}
 
 				if (method_callback) {
@@ -400,12 +394,6 @@ void UndoRedo::_process_operation_list(List<Operation>::Element *E, bool p_execu
 			case Operation::TYPE_PROPERTY: {
 				if (p_execute) {
 					obj->set(op.name, op.value);
-#ifdef TOOLS_ENABLED
-					Resource *res = Object::cast_to<Resource>(obj);
-					if (res) {
-						res->set_edited(true);
-					}
-#endif
 				}
 
 				if (property_callback) {

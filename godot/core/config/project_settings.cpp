@@ -44,9 +44,6 @@
 #include "core/version.h"
 // zym: servers/* removed.
 
-#ifdef TOOLS_ENABLED
-#include "modules/modules_enabled.gen.h" // For mono.
-#endif // TOOLS_ENABLED
 
 ProjectSettings *ProjectSettings::get_singleton() {
 	return singleton;
@@ -69,84 +66,6 @@ String ProjectSettings::get_imported_files_path() const {
 	return get_project_data_path().path_join("imported");
 }
 
-#ifdef TOOLS_ENABLED
-// Returns the features that a project must have when opened with this build of Godot.
-// This is used by the project manager to provide the initial_settings for config/features.
-const PackedStringArray ProjectSettings::get_required_features() {
-	PackedStringArray features;
-	features.append(GODOT_VERSION_BRANCH);
-#ifdef REAL_T_IS_DOUBLE
-	features.append("Double Precision");
-#endif
-	return features;
-}
-
-// Returns the features supported by this build of Godot. Includes all required features.
-const PackedStringArray ProjectSettings::_get_supported_features() {
-	PackedStringArray features = get_required_features();
-
-#ifdef LIBGODOT_ENABLED
-	features.append("LibGodot");
-#endif
-
-#ifdef MODULE_MONO_ENABLED
-	features.append("C#");
-#endif
-	// Allow pinning to a specific patch number or build type by marking
-	// them as supported. They're only used if the user adds them manually.
-	features.append(GODOT_VERSION_BRANCH "." _MKSTR(GODOT_VERSION_PATCH));
-	features.append(GODOT_VERSION_FULL_CONFIG);
-	features.append(GODOT_VERSION_FULL_BUILD);
-
-#ifdef RD_ENABLED
-	features.append("Forward Plus");
-	features.append("Mobile");
-#endif
-
-#ifdef GLES3_ENABLED
-	features.append("GL Compatibility");
-#endif
-	return features;
-}
-
-// Returns the features that this project needs but this build of Godot lacks.
-const PackedStringArray ProjectSettings::get_unsupported_features(const PackedStringArray &p_project_features) {
-	PackedStringArray unsupported_features;
-	PackedStringArray supported_features = singleton->_get_supported_features();
-	for (int i = 0; i < p_project_features.size(); i++) {
-		if (!supported_features.has(p_project_features[i])) {
-			// Temporary compatibility code to ease upgrade to 4.0 beta 2+.
-			if (p_project_features[i].begins_with("Vulkan")) {
-				continue;
-			}
-			unsupported_features.append(p_project_features[i]);
-		}
-	}
-	unsupported_features.sort();
-	return unsupported_features;
-}
-
-// Returns the features that both this project has and this build of Godot has, ensuring required features exist.
-const PackedStringArray ProjectSettings::_trim_to_supported_features(const PackedStringArray &p_project_features) {
-	// Remove unsupported features if present.
-	PackedStringArray features = PackedStringArray(p_project_features);
-	PackedStringArray supported_features = _get_supported_features();
-	for (int i = p_project_features.size() - 1; i > -1; i--) {
-		if (!supported_features.has(p_project_features[i])) {
-			features.remove_at(i);
-		}
-	}
-	// Add required features if not present.
-	PackedStringArray required_features = get_required_features();
-	for (int i = 0; i < required_features.size(); i++) {
-		if (!features.has(required_features[i])) {
-			features.append(required_features[i]);
-		}
-	}
-	features.sort();
-	return features;
-}
-#endif // TOOLS_ENABLED
 
 String ProjectSettings::localize_path(const String &p_path) const {
 	String path = p_path.simplify_path();
@@ -238,18 +157,11 @@ void ProjectSettings::set_as_internal(const String &p_name, bool p_internal) {
 
 void ProjectSettings::set_ignore_value_in_docs(const String &p_name, bool p_ignore) {
 	ERR_FAIL_COND_MSG(!props.has(p_name), vformat("Request for nonexistent project setting: '%s'.", p_name));
-#ifdef DEBUG_ENABLED
-	props[p_name].ignore_value_in_docs = p_ignore;
-#endif // DEBUG_ENABLED
 }
 
 bool ProjectSettings::get_ignore_value_in_docs(const String &p_name) const {
 	ERR_FAIL_COND_V_MSG(!props.has(p_name), false, vformat("Request for nonexistent project setting: '%s'.", p_name));
-#ifdef DEBUG_ENABLED
-	return props[p_name].ignore_value_in_docs;
-#else
 	return false;
-#endif // DEBUG_ENABLED
 }
 
 void ProjectSettings::add_hidden_prefix(const String &p_prefix) {
@@ -508,18 +420,6 @@ void ProjectSettings::_get_property_list(List<PropertyInfo> *p_list) const {
 			pi.name = base.name;
 			pi.usage = base.flags;
 			p_list->push_back(pi);
-#ifdef TOOLS_ENABLED
-		} else if (base.name.begins_with(EDITOR_SETTING_OVERRIDE_PREFIX)) {
-			PropertyInfo info(base.type, base.name, PROPERTY_HINT_NONE, "", base.flags);
-
-			const PropertyInfo *pi = editor_settings_info.getptr(base.name.trim_prefix(EDITOR_SETTING_OVERRIDE_PREFIX));
-			if (pi) {
-				info.usage = pi->usage;
-				info.hint = pi->hint;
-				info.hint_string = pi->hint_string;
-			}
-			p_list->push_back(info);
-#endif
 		} else {
 			p_list->push_back(PropertyInfo(base.type, base.name, PROPERTY_HINT_NONE, "", base.flags));
 		}
@@ -1190,56 +1090,10 @@ Error ProjectSettings::_save_custom_bnd(const String &p_file) { // add other par
 	return save_custom(p_file);
 }
 
-#ifdef TOOLS_ENABLED
-bool _csproj_exists(const String &p_root_dir) {
-	Ref<DirAccess> dir = DirAccess::open(p_root_dir);
-	ERR_FAIL_COND_V(dir.is_null(), false);
-
-	dir->list_dir_begin();
-	String file_name = dir->_get_next();
-	while (file_name != "") {
-		if (!dir->current_is_dir() && file_name.get_extension() == "csproj") {
-			return true;
-		}
-		file_name = dir->_get_next();
-	}
-
-	return false;
-}
-#endif // TOOLS_ENABLED
 
 Error ProjectSettings::save_custom(const String &p_path, const CustomMap &p_custom, const Vector<String> &p_custom_features, bool p_merge_with_current) {
 	ERR_FAIL_COND_V_MSG(p_path.is_empty(), ERR_INVALID_PARAMETER, "Project settings save path cannot be empty.");
 
-#ifdef TOOLS_ENABLED
-	PackedStringArray project_features = get_setting("application/config/features");
-	// If there is no feature list currently present, force one to generate.
-	if (project_features.is_empty()) {
-		project_features = ProjectSettings::get_required_features();
-	}
-	// Check the rendering API.
-	const String rendering_api = has_setting("rendering/renderer/rendering_method") ? (String)get_setting("rendering/renderer/rendering_method") : String();
-	if (!rendering_api.is_empty()) {
-		// Add the rendering API as a project feature if it doesn't already exist.
-		if (!project_features.has(rendering_api)) {
-			project_features.append(rendering_api);
-		}
-	}
-	// Check for the existence of a csproj file.
-	if (_csproj_exists(get_resource_path())) {
-		// If there is a csproj file, add the C# feature if it doesn't already exist.
-		if (!project_features.has("C#")) {
-			project_features.append("C#");
-		}
-	} else {
-		// If there isn't a csproj file, remove the C# feature if it exists.
-		if (project_features.has("C#")) {
-			project_features.remove_at(project_features.find("C#"));
-		}
-	}
-	project_features = _trim_to_supported_features(project_features);
-	set_setting("application/config/features", project_features);
-#endif // TOOLS_ENABLED
 
 	RBSet<_VCSort> vclist;
 
@@ -1446,10 +1300,8 @@ TypedArray<Dictionary> ProjectSettings::get_global_class_list() {
 	if (cf->load(get_global_class_list_path()) == OK) {
 		global_class_list = cf->get_value("", "list", Array());
 	} else {
-#ifndef TOOLS_ENABLED
 		// Script classes can't be recreated in exported project, so print an error.
 		ERR_PRINT("Could not load global script cache.");
-#endif
 	}
 
 	// File read succeeded or failed. If it failed, assume everything is still okay.
@@ -1578,25 +1430,6 @@ const HashMap<StringName, HashSet<StringName>> &ProjectSettings::get_scene_group
 	return scene_groups_cache;
 }
 
-#ifdef TOOLS_ENABLED
-void ProjectSettings::get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const {
-	const String pf = p_function;
-	if (p_idx == 0) {
-		if (pf == "has_setting" || pf == "set_setting" || pf == "get_setting" || pf == "get_setting_with_override" ||
-				pf == "set_order" || pf == "get_order" || pf == "set_initial_value" || pf == "set_as_basic" ||
-				pf == "set_as_internal" || pf == "set_restart_if_changed" || pf == "clear") {
-			for (const KeyValue<StringName, VariantContainer> &E : props) {
-				if (E.value.hide_from_editor) {
-					continue;
-				}
-
-				r_options->push_back(String(E.key).quote());
-			}
-		}
-	}
-	Object::get_argument_options(p_function, p_idx, r_options);
-}
-#endif
 
 void ProjectSettings::set_editor_setting_override(const String &p_setting, const Variant &p_value) {
 	set_setting(EDITOR_SETTING_OVERRIDE_PREFIX + p_setting, p_value);
@@ -1649,18 +1482,6 @@ ProjectSettings::ProjectSettings() {
 	CRASH_COND_MSG(singleton != nullptr, "Instantiating a new ProjectSettings singleton is not supported.");
 	singleton = this;
 
-#ifdef TOOLS_ENABLED
-	// Available only at runtime in editor builds. Needs to be processed before anything else to work properly.
-	if (!Engine::get_singleton()->is_editor_hint()) {
-		String editor_features = OS::get_singleton()->get_environment("GODOT_EDITOR_CUSTOM_FEATURES");
-		if (!editor_features.is_empty()) {
-			PackedStringArray feature_list = editor_features.split(",");
-			for (const String &s : feature_list) {
-				custom_features.insert(s);
-			}
-		}
-	}
-#endif
 
 	GLOBAL_DEF_BASIC("application/config/name", "");
 	GLOBAL_DEF(PropertyInfo(Variant::DICTIONARY, "application/config/name_localized", PROPERTY_HINT_LOCALIZABLE_STRING), Dictionary());
@@ -1775,9 +1596,6 @@ ProjectSettings::ProjectSettings() {
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "gui/timers/incremental_search_max_interval_msec", PROPERTY_HINT_RANGE, "0,10000,1,or_greater"), 2000);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "gui/timers/tooltip_delay_sec", PROPERTY_HINT_RANGE, "0,5,0.01,or_greater"), 0.5);
-#ifdef TOOLS_ENABLED
-	GLOBAL_DEF("gui/timers/tooltip_delay_sec.editor_hint", 0.5);
-#endif
 
 	GLOBAL_DEF("gui/common/drag_threshold", 10);
 	GLOBAL_DEF_BASIC("gui/common/snap_controls_to_pixels", true);

@@ -57,15 +57,6 @@ void Callable::callp(const Variant **p_arguments, int p_argcount, Variant &r_ret
 		custom->call(p_arguments, p_argcount, r_return_value, r_call_error);
 	} else {
 		Object *obj = ObjectDB::get_instance(ObjectID(object));
-#ifdef DEBUG_ENABLED
-		if (!obj) {
-			r_call_error.error = CallError::CALL_ERROR_INSTANCE_IS_NULL;
-			r_call_error.argument = 0;
-			r_call_error.expected = 0;
-			r_return_value = Variant();
-			return;
-		}
-#endif
 		r_return_value = obj->callp(method, p_arguments, p_argcount, r_call_error);
 	}
 }
@@ -93,14 +84,6 @@ Error Callable::rpcp(int p_id, const Variant **p_arguments, int p_argcount, Call
 		return ERR_UNCONFIGURED;
 	} else if (!is_custom()) {
 		Object *obj = ObjectDB::get_instance(ObjectID(object));
-#ifdef DEBUG_ENABLED
-		if (!obj || !obj->is_class("Node")) {
-			r_call_error.error = CallError::CALL_ERROR_INSTANCE_IS_NULL;
-			r_call_error.argument = 0;
-			r_call_error.expected = 0;
-			return ERR_UNCONFIGURED;
-		}
-#endif
 
 		int argcount = p_argcount + 2;
 		const Variant **argptrs = (const Variant **)alloca(sizeof(Variant *) * argcount);

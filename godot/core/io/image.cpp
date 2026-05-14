@@ -2751,21 +2751,11 @@ Image::AlphaMode Image::detect_alpha() const {
 
 Error Image::load(const String &p_path) {
 	String path = ResourceUID::ensure_path(p_path);
-#ifdef DEBUG_ENABLED
-	if (path.begins_with("res://") && ResourceLoader::exists(path)) {
-		WARN_PRINT(vformat("Loaded resource as image file, this will not work on export: '%s'. Instead, import the image file as an Image resource and load it normally as a resource.", path));
-	}
-#endif
 	return ImageLoader::load_image(path, this);
 }
 
 Ref<Image> Image::load_from_file(const String &p_path) {
 	String path = ResourceUID::ensure_path(p_path);
-#ifdef DEBUG_ENABLED
-	if (path.begins_with("res://") && ResourceLoader::exists(path)) {
-		WARN_PRINT(vformat("Loaded resource as image file, this will not work on export: '%s'. Instead, import the image file as an Image resource and load it normally as a resource.", path));
-	}
-#endif
 	Ref<Image> image;
 	image.instantiate();
 	Error err = ImageLoader::load_image(path, image);
@@ -3668,10 +3658,6 @@ void Image::_set_color_at_ofs(uint8_t *ptr, uint32_t ofs, const Color &p_color) 
 }
 
 Color Image::get_pixel(int p_x, int p_y) const {
-#ifdef DEBUG_ENABLED
-	ERR_FAIL_INDEX_V(p_x, width, Color());
-	ERR_FAIL_INDEX_V(p_y, height, Color());
-#endif
 
 	uint32_t ofs = p_y * width + p_x;
 	return _get_color_at_ofs(data.ptr(), ofs);
@@ -3682,10 +3668,6 @@ void Image::set_pixelv(const Point2i &p_point, const Color &p_color) {
 }
 
 void Image::set_pixel(int p_x, int p_y, const Color &p_color) {
-#ifdef DEBUG_ENABLED
-	ERR_FAIL_INDEX(p_x, width);
-	ERR_FAIL_INDEX(p_y, height);
-#endif
 
 	uint32_t ofs = p_y * width + p_x;
 	_set_color_at_ofs(data.ptrw(), ofs, p_color);

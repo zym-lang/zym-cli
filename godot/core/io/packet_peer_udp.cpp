@@ -312,11 +312,6 @@ Error PacketPeerUDP::_poll() {
 		}
 
 		err = store_packet(ip, port, recv_buffer, read);
-#ifdef TOOLS_ENABLED
-		if (err != OK) {
-			WARN_PRINT("Buffer full, dropping packets!");
-		}
-#endif
 	}
 
 	return OK;

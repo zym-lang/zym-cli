@@ -208,9 +208,6 @@ Error GDExtensionLibraryLoader::open_library(const String &p_path) {
 }
 
 Error GDExtensionLibraryLoader::initialize(GDExtensionInterfaceGetProcAddress p_get_proc_address, const Ref<GDExtension> &p_extension, GDExtensionInitialization *r_initialization) {
-#ifdef TOOLS_ENABLED
-	p_extension->set_reloadable(is_reloadable && Engine::get_singleton()->is_extension_reloading_enabled());
-#endif
 
 	for (const KeyValue<String, String> &icon : class_icon_paths) {
 		p_extension->class_icon_paths[icon.key] = icon.value;
@@ -247,17 +244,6 @@ bool GDExtensionLibraryLoader::is_library_open() const {
 }
 
 bool GDExtensionLibraryLoader::has_library_changed() const {
-#ifdef TOOLS_ENABLED
-	// Check only that the last modified time is different (rather than checking
-	// that it's newer) since some OS's (namely Windows) will preserve the modified
-	// time by default when copying files.
-	if (FileAccess::get_modified_time(resource_path) != resource_last_modified_time) {
-		return true;
-	}
-	if (FileAccess::get_modified_time(library_path) != library_last_modified_time) {
-		return true;
-	}
-#endif
 	return false;
 }
 
@@ -369,13 +355,6 @@ Error GDExtensionLibraryLoader::parse_gdextension_file(const String &p_path) {
 		library_path = p_path.get_base_dir().path_join(library_path);
 	}
 
-#ifdef TOOLS_ENABLED
-	is_reloadable = config->get_value("configuration", "reloadable", false);
-
-	update_last_modified_time(
-			FileAccess::get_modified_time(resource_path),
-			FileAccess::get_modified_time(library_path));
-#endif
 
 	library_dependencies = find_extension_dependencies(p_path, config, [](const String &p_feature) { return OS::get_singleton()->has_feature(p_feature); });
 

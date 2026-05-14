@@ -8,18 +8,8 @@ import platform_linuxbsd_builders
 common_linuxbsd = [
     "crash_handler_linuxbsd.cpp",
     "os_linuxbsd.cpp",
-    "freedesktop_portal_desktop.cpp",
-    "freedesktop_screensaver.cpp",
-    "freedesktop_at_spi_monitor.cpp",
+    "godot_linuxbsd.cpp",
 ]
-
-if env["library_type"] == "executable":
-    common_linuxbsd += ["godot_linuxbsd.cpp"]
-else:
-    common_linuxbsd += ["libgodot_linuxbsd.cpp"]
-
-if env["use_sowrap"]:
-    common_linuxbsd.append("xkbcommon-so_wrap.c")
 
 # zym: x11/, wayland/, speechd, fontconfig, dbus subdirs and optional
 # UI/input/font/TTS dependencies were removed. The CLI is headless: no

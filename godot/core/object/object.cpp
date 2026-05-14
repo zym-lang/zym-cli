@@ -40,30 +40,9 @@
 #include "core/string/translation_server.h"
 #include "core/variant/typed_array.h"
 
-#ifdef DEBUG_ENABLED
-
-struct _ObjectDebugLock {
-	ObjectID obj_id;
-
-	_ObjectDebugLock(Object *p_obj) {
-		obj_id = p_obj->get_instance_id();
-		p_obj->_lock_index.ref();
-	}
-	~_ObjectDebugLock() {
-		Object *obj_ptr = ObjectDB::get_instance(obj_id);
-		if (likely(obj_ptr)) {
-			obj_ptr->_lock_index.unref();
-		}
-	}
-};
-
-#define OBJ_DEBUG_LOCK _ObjectDebugLock _debug_lock(this);
-
-#else
 
 #define OBJ_DEBUG_LOCK
 
-#endif
 
 struct ObjectSignalLock {
 	Mutex *mutex1 = nullptr;
@@ -310,11 +289,6 @@ bool Object::_predelete() {
 	script_instance = nullptr;
 
 	if (_extension) {
-#ifdef TOOLS_ENABLED
-		if (_extension->untrack_instance) {
-			_extension->untrack_instance(_extension->tracking_userdata, this);
-		}
-#endif
 		if (_extension->free_instance) {
 			_extension->free_instance(_extension->class_userdata, _extension_instance);
 		}
@@ -322,17 +296,6 @@ bool Object::_predelete() {
 		_extension_instance = nullptr;
 		// _gdtype_ptr = nullptr; // The pointer already set to nullptr above, no need to do it again.
 	}
-#ifdef TOOLS_ENABLED
-	else if (_instance_bindings != nullptr) {
-		Engine *engine = Engine::get_singleton();
-		GDExtensionManager *gdextension_manager = GDExtensionManager::get_singleton();
-		if (engine && gdextension_manager && engine->is_extension_reloading_enabled()) {
-			for (uint32_t i = 0; i < _instance_binding_count; i++) {
-				gdextension_manager->untrack_instance_binding(_instance_bindings[i].token, this);
-			}
-		}
-	}
-#endif
 
 	return true;
 }
@@ -355,10 +318,6 @@ void Object::_postinitialize() {
 }
 
 void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid) {
-#ifdef TOOLS_ENABLED
-
-	_edited = true;
-#endif
 
 	if (script_instance) {
 		if (script_instance->set(p_name, p_value)) {
@@ -410,18 +369,6 @@ void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid
 		}
 	}
 
-#ifdef TOOLS_ENABLED
-	if (script_instance) {
-		bool valid;
-		script_instance->property_set_fallback(p_name, p_value, &valid);
-		if (valid) {
-			if (r_valid) {
-				*r_valid = true;
-			}
-			return;
-		}
-	}
-#endif
 
 	// Something inside the object... :|
 	bool success = _setv(p_name, p_value);
@@ -485,18 +432,6 @@ Variant Object::get(const StringName &p_name, bool *r_valid) const {
 		return ret;
 
 	} else {
-#ifdef TOOLS_ENABLED
-		if (script_instance) {
-			bool valid;
-			ret = script_instance->property_get_fallback(p_name, &valid);
-			if (valid) {
-				if (r_valid) {
-					*r_valid = true;
-				}
-				return ret;
-			}
-		}
-#endif
 		// Something inside the object... :|
 		bool success = _getv(p_name, ret);
 		if (success) {
@@ -609,11 +544,6 @@ void Object::get_property_list(List<PropertyInfo> *p_list, bool p_reversed) cons
 			ClassDB::get_property_list(current_extension->class_name, p_list, true, this);
 
 			if (current_extension->get_property_list) {
-#ifdef TOOLS_ENABLED
-				// If this is a placeholder, we can't call into the GDExtension on the parent class,
-				// because we don't have a real instance of the class to give it.
-				if (likely(!_extension->is_placeholder)) {
-#endif
 					uint32_t pcount;
 					const GDExtensionPropertyInfo *pinfo = current_extension->get_property_list(_extension_instance, &pcount);
 					for (uint32_t i = 0; i < pcount; i++) {
@@ -627,9 +557,6 @@ void Object::get_property_list(List<PropertyInfo> *p_list, bool p_reversed) cons
 						current_extension->free_property_list(_extension_instance, pinfo);
 					}
 #endif // DISABLE_DEPRECATED
-#ifdef TOOLS_ENABLED
-				}
-#endif
 			}
 
 			current_extension = current_extension->parent;
@@ -895,24 +822,6 @@ Variant Object::callp(const StringName &p_method, const Variant **p_args, int p_
 
 	if (p_method == CoreStringName(free_)) {
 //free must be here, before anything, always ready
-#ifdef DEBUG_ENABLED
-		if (p_argcount != 0) {
-			r_error.error = Callable::CallError::CALL_ERROR_TOO_MANY_ARGUMENTS;
-			r_error.expected = 0;
-			return Variant();
-		}
-		if (is_ref_counted()) {
-			r_error.error = Callable::CallError::CALL_ERROR_INVALID_METHOD;
-			ERR_FAIL_V_MSG(Variant(), "Can't free a RefCounted object.");
-		}
-
-		if (_lock_index.get() > 1) {
-			r_error.argument = 0;
-			r_error.error = Callable::CallError::CALL_ERROR_INVALID_METHOD;
-			ERR_FAIL_V_MSG(Variant(), "Object is locked and can't be freed.");
-		}
-
-#endif
 		//must be here, must be before everything,
 		memdelete(this);
 		r_error.error = Callable::CallError::CALL_OK;
@@ -1016,14 +925,6 @@ void Object::_gdvirtual_init_method_ptr(uint32_t p_compat_hash, void *&r_fn_ptr,
 		}
 #endif
 	}
-#ifdef TOOLS_ENABLED
-	if (_extension->reloadable) {
-		VirtualMethodTracker *tracker = memnew(VirtualMethodTracker);
-		tracker->method = (void **)&r_fn_ptr;
-		tracker->next = virtual_method_list;
-		virtual_method_list = tracker;
-	}
-#endif
 	if (r_fn_ptr == nullptr) {
 		r_fn_ptr = reinterpret_cast<void *>(_INVALID_GDVIRTUAL_FUNC_ADDR);
 	}
@@ -1319,11 +1220,6 @@ Error Object::emit_signalp(const StringName &p_name, const Variant **p_args, int
 
 		SignalData *s = signal_map.getptr(p_name);
 		if (!s) {
-#ifdef DEBUG_ENABLED
-			bool signal_is_valid = ClassDB::has_signal(get_class_name(), p_name);
-			//check in script
-			ERR_FAIL_COND_V_MSG(!signal_is_valid && script_instance && !script_instance->get_script()->has_script_signal(p_name), ERR_UNAVAILABLE, vformat("Can't emit non-existing signal \"%s\".", p_name));
-#endif
 			//not connected? just return
 			return ERR_UNAVAILABLE;
 		}
@@ -1347,12 +1243,6 @@ Error Object::emit_signalp(const StringName &p_name, const Variant **p_args, int
 	// Disconnect all one-shot connections before emitting to prevent recursion.
 	for (uint32_t i = 0; i < slot_count; ++i) {
 		bool disconnect = slot_flags[i] & CONNECT_ONE_SHOT;
-#ifdef TOOLS_ENABLED
-		if (disconnect && (slot_flags[i] & CONNECT_PERSIST) && Engine::get_singleton()->is_editor_hint()) {
-			// This signal was connected from the editor, and is being edited. Just don't disconnect for now.
-			disconnect = false;
-		}
-#endif
 		if (disconnect) {
 			_disconnect(p_name, slot_callables[i]);
 		}
@@ -1420,15 +1310,6 @@ Error Object::emit_signalp(const StringName &p_name, const Variant **p_args, int
 
 			if (ce.error != Callable::CallError::CALL_OK) {
 				Object *target = callable.get_object();
-#ifdef DEBUG_ENABLED
-				if (target && flags & CONNECT_PERSIST && Engine::get_singleton()->is_editor_hint()) {
-					Ref<Script> other_scr = target->get_script();
-					if (other_scr.is_valid() && !other_scr->is_tool()) {
-						// Trying to call not-tool method in editor, just ignore it.
-						continue;
-					}
-				}
-#endif
 				if (ce.error == Callable::CallError::CALL_ERROR_INVALID_METHOD && target && !ClassDB::class_exists(target->get_class_name())) {
 					// Most likely object is not initialized yet, do not throw error.
 				} else {
@@ -1657,14 +1538,6 @@ Error Object::connect(const StringName &p_signal, const Callable &p_callable, ui
 			if (script_instance->get_script()->has_script_signal(p_signal)) {
 				signal_is_valid = true;
 			}
-#ifdef TOOLS_ENABLED
-			else {
-				//allow connecting signals anyway if script is invalid, see issue #17070
-				if (!script_instance->get_script()->is_valid()) {
-					signal_is_valid = true;
-				}
-			}
-#endif
 		}
 
 		ERR_FAIL_COND_V_MSG(!signal_is_valid, ERR_INVALID_PARAMETER, vformat("In Object of type '%s': Attempt to connect nonexistent signal '%s' to callable '%s'.", String(get_class()), p_signal, p_callable));
@@ -1908,24 +1781,6 @@ void Object::_get_property_list_from_classdb(const StringName &p_class, List<Pro
 	ClassDB::get_property_list(p_class, p_list, p_no_inheritance, p_validator);
 }
 
-#ifdef TOOLS_ENABLED
-void Object::editor_set_section_unfold(const String &p_section, bool p_unfolded, bool p_initializing) {
-	if (!p_initializing) {
-		set_edited(true);
-	}
-
-	if (p_unfolded) {
-		editor_section_folding.insert(p_section);
-	} else {
-		editor_section_folding.erase(p_section);
-	}
-}
-
-bool Object::editor_is_section_unfolded(const String &p_section) {
-	return editor_section_folding.has(p_section);
-}
-
-#endif
 
 void Object::clear_internal_resource_paths() {
 	List<PropertyInfo> pinfo;
@@ -2056,46 +1911,6 @@ void Object::_bind_methods() {
 		BIND_OBJ_CORE_METHOD(mi);
 	}
 
-#ifdef TOOLS_ENABLED
-	{
-		MethodInfo mi("_get");
-		mi.arguments.push_back(PropertyInfo(Variant::STRING_NAME, "property"));
-		mi.return_val.usage |= PROPERTY_USAGE_NIL_IS_VARIANT;
-		BIND_OBJ_CORE_METHOD(mi);
-	}
-
-	{
-		MethodInfo mi("_get_property_list");
-		mi.return_val.type = Variant::ARRAY;
-		mi.return_val.hint = PROPERTY_HINT_ARRAY_TYPE;
-		mi.return_val.hint_string = "Dictionary";
-		BIND_OBJ_CORE_METHOD(mi);
-	}
-
-	BIND_OBJ_CORE_METHOD(MethodInfo(Variant::NIL, "_validate_property", PropertyInfo(Variant::DICTIONARY, "property")));
-
-	BIND_OBJ_CORE_METHOD(MethodInfo(Variant::BOOL, "_property_can_revert", PropertyInfo(Variant::STRING_NAME, "property")));
-
-	{
-		MethodInfo mi("_property_get_revert");
-		mi.arguments.push_back(PropertyInfo(Variant::STRING_NAME, "property"));
-		mi.return_val.usage |= PROPERTY_USAGE_NIL_IS_VARIANT;
-		BIND_OBJ_CORE_METHOD(mi);
-	}
-
-	// These are actually `Variant` methods, but that doesn't matter since scripts can't inherit built-in types.
-
-	BIND_OBJ_CORE_METHOD(MethodInfo(Variant::BOOL, "_iter_init", PropertyInfo(Variant::ARRAY, "iter")));
-
-	BIND_OBJ_CORE_METHOD(MethodInfo(Variant::BOOL, "_iter_next", PropertyInfo(Variant::ARRAY, "iter")));
-
-	{
-		MethodInfo mi("_iter_get");
-		mi.arguments.push_back(PropertyInfo(Variant::NIL, "iter", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_NIL_IS_VARIANT));
-		mi.return_val.usage |= PROPERTY_USAGE_NIL_IS_VARIANT;
-		BIND_OBJ_CORE_METHOD(mi);
-	}
-#endif
 
 	BIND_CONSTANT(NOTIFICATION_POSTINITIALIZE);
 	BIND_CONSTANT(NOTIFICATION_PREDELETE);
@@ -2193,20 +2008,6 @@ bool Object::is_queued_for_deletion() const {
 	return _is_queued_for_deletion;
 }
 
-#ifdef TOOLS_ENABLED
-void Object::set_edited(bool p_edited) {
-	_edited = p_edited;
-	_edited_version++;
-}
-
-bool Object::is_edited() const {
-	return _edited;
-}
-
-uint32_t Object::get_edited_version() const {
-	return _edited_version;
-}
-#endif
 
 const GDType &Object::get_gdtype() const {
 	if (unlikely(!_gdtype_ptr)) {
@@ -2231,14 +2032,6 @@ const StringName &Object::get_class_name() const {
 }
 
 StringName Object::get_class_name_for_extension(const GDExtension *p_library) const {
-#ifdef TOOLS_ENABLED
-	// If this is the library this extension comes from and it's a placeholder, we
-	// have to return the closest native parent's class name, so that it doesn't try to
-	// use this like the real object.
-	if (unlikely(_extension && _extension->library == p_library && _extension->is_placeholder)) {
-		return get_class_name();
-	}
-#endif
 
 	// Only return the class name per the extension if it matches the given p_library.
 	if (_extension && _extension->library == p_library) {
@@ -2301,11 +2094,6 @@ void *Object::get_instance_binding(void *p_token, const GDExtensionInstanceBindi
 		binding = p_callbacks->create_callback(p_token, this);
 		_instance_bindings[_instance_binding_count].binding = binding;
 
-#ifdef TOOLS_ENABLED
-		if (!_extension && Engine::get_singleton()->is_extension_reloading_enabled()) {
-			GDExtensionManager::get_singleton()->track_instance_binding(p_token, this);
-		}
-#endif
 
 		_instance_binding_count++;
 	}
@@ -2349,50 +2137,6 @@ void Object::free_instance_binding(void *p_token) {
 	}
 }
 
-#ifdef TOOLS_ENABLED
-void Object::clear_internal_extension() {
-	ERR_FAIL_NULL(_extension);
-
-	// Free the instance inside the GDExtension.
-	if (_extension->free_instance) {
-		_extension->free_instance(_extension->class_userdata, _extension_instance);
-	}
-	_extension = nullptr;
-	_extension_instance = nullptr;
-	// Reset GDType to internal type.
-	_gdtype_ptr = &_get_typev();
-
-	// Clear the instance bindings.
-	_instance_binding_mutex.lock();
-	if (_instance_bindings) {
-		if (_instance_bindings[0].free_callback) {
-			_instance_bindings[0].free_callback(_instance_bindings[0].token, this, _instance_bindings[0].binding);
-		}
-		_instance_bindings[0].binding = nullptr;
-		_instance_bindings[0].token = nullptr;
-		_instance_bindings[0].free_callback = nullptr;
-		_instance_bindings[0].reference_callback = nullptr;
-	}
-	_instance_binding_mutex.unlock();
-
-	// Clear the virtual methods.
-	while (virtual_method_list) {
-		(*virtual_method_list->method) = nullptr;
-		virtual_method_list = virtual_method_list->next;
-	}
-}
-
-void Object::reset_internal_extension(ObjectGDExtension *p_extension) {
-	ERR_FAIL_COND(_extension != nullptr);
-
-	if (p_extension) {
-		_extension_instance = p_extension->recreate_instance ? p_extension->recreate_instance(p_extension->class_userdata, (GDExtensionObjectPtr)this) : nullptr;
-		ERR_FAIL_NULL_MSG(_extension_instance, "Unable to recreate GDExtension instance - does this extension support hot reloading?");
-		_extension = p_extension;
-		_gdtype_ptr = p_extension->gdtype;
-	}
-}
-#endif
 
 void Object::_construct_object(bool p_reference) {
 	_block_signals = false;
@@ -2407,13 +2151,7 @@ void Object::_construct_object(bool p_reference) {
 
 	_instance_id = ObjectDB::add_instance(this);
 
-#ifdef TOOLS_ENABLED
-	_edited = false;
-#endif
 
-#ifdef DEBUG_ENABLED
-	_lock_index.init(1);
-#endif
 }
 
 Object::Object(bool p_reference) {
@@ -2519,51 +2257,6 @@ void ObjectDB::debug_objects(DebugFunc p_func, void *p_user_data) {
 	spin_lock.unlock();
 }
 
-#ifdef TOOLS_ENABLED
-void Object::get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const {
-	const String pf = p_function;
-	if (p_idx == 0) {
-		if (pf == "connect" || pf == "is_connected" || pf == "disconnect" || pf == "emit_signal" || pf == "has_signal") {
-			List<MethodInfo> signals;
-			get_signal_list(&signals);
-			for (const MethodInfo &E : signals) {
-				r_options->push_back(E.name.quote());
-			}
-		} else if (pf == "call" || pf == "call_deferred" || pf == "callv" || pf == "has_method") {
-			List<MethodInfo> methods;
-			get_method_list(&methods);
-			for (const MethodInfo &E : methods) {
-				if (E.name.begins_with("_") && !(E.flags & METHOD_FLAG_VIRTUAL)) {
-					continue;
-				}
-				r_options->push_back(E.name.quote());
-			}
-		} else if (pf == "set" || pf == "set_deferred" || pf == "get") {
-			List<PropertyInfo> properties;
-			get_property_list(&properties);
-			for (const PropertyInfo &E : properties) {
-				if (E.usage & PROPERTY_USAGE_DEFAULT && !(E.usage & PROPERTY_USAGE_INTERNAL)) {
-					r_options->push_back(E.name.quote());
-				}
-			}
-		} else if (pf == "set_meta" || pf == "get_meta" || pf == "has_meta" || pf == "remove_meta") {
-			for (const KeyValue<StringName, Variant> &K : metadata) {
-				r_options->push_back(String(K.key).quote());
-			}
-		}
-	} else if (p_idx == 2) {
-		if (pf == "connect") {
-			// Ideally, the constants should be inferred by the parameter.
-			// But a parameter's PropertyInfo does not store the enum they come from, so this will do for now.
-			List<StringName> constants;
-			ClassDB::get_enum_constants("Object", "ConnectFlags", &constants);
-			for (const StringName &E : constants) {
-				r_options->push_back(String(E));
-			}
-		}
-	}
-}
-#endif
 
 SpinLock ObjectDB::spin_lock;
 uint32_t ObjectDB::slot_count = 0;
@@ -2625,21 +2318,6 @@ void ObjectDB::remove_instance(Object *p_object) {
 
 	spin_lock.lock();
 
-#ifdef DEBUG_ENABLED
-
-	if (object_slots[slot].object != p_object) {
-		spin_lock.unlock();
-		ERR_FAIL_COND(object_slots[slot].object != p_object);
-	}
-	{
-		uint64_t validator = (t >> OBJECTDB_SLOT_MAX_COUNT_BITS) & OBJECTDB_VALIDATOR_MASK;
-		if (object_slots[slot].validator != validator) {
-			spin_lock.unlock();
-			ERR_FAIL_COND(object_slots[slot].validator != validator);
-		}
-	}
-
-#endif
 	//decrease slot count
 	slot_count--;
 	//set the free slot properly

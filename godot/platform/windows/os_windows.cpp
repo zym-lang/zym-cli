@@ -30,16 +30,13 @@
 
 #include "os_windows.h"
 
-#include "display_server_windows.h"
 #include "lang_table.h"
 #include "windows_terminal_logger.h"
 #include "windows_utils.h"
 
-#include "core/debugger/engine_debugger.h"
-#include "core/debugger/script_debugger.h"
+// zym: core/debugger/* removed (no script/engine debugger in headless CLI).
 #include "core/io/marshalls.h"
 #include "core/os/main_loop.h"
-#include "core/profiling/profiling.h"
 #include "core/version_generated.gen.h"
 #include "drivers/windows/dir_access_windows.h"
 #include "drivers/windows/file_access_windows.h"
@@ -48,9 +45,8 @@
 #include "drivers/windows/net_socket_winsock.h"
 #include "drivers/windows/thread_windows.h"
 #include "main/main.h"
-#include "servers/audio/audio_server.h"
-#include "servers/rendering/rendering_server_default.h"
-#include "servers/text/text_server.h"
+// zym: DisplayServerWindows / AudioServer / RenderingServer / TextServer
+// removed (headless CLI). Mirrors the linuxbsd pruning in os_linuxbsd.cpp.
 
 #include <avrt.h>
 #include <bcrypt.h>
@@ -73,29 +69,8 @@ extern "C" {
 #include <hidsdi.h>
 #endif
 
-#if defined(RD_ENABLED)
-#include "servers/rendering/rendering_device.h"
-#endif
+// zym: RD / GLES3 / Vulkan / D3D12 rendering backends removed (headless CLI).
 
-#if defined(GLES3_ENABLED)
-#include "gl_manager_windows_native.h"
-#endif
-
-#if defined(VULKAN_ENABLED)
-#include "rendering_context_driver_vulkan_windows.h"
-#endif
-#if defined(D3D12_ENABLED)
-#include "drivers/d3d12/rendering_context_driver_d3d12.h"
-#endif
-#if defined(GLES3_ENABLED)
-#include "drivers/gles3/rasterizer_gles3.h"
-#endif
-
-#ifdef DEBUG_ENABLED
-#pragma pack(push, before_imagehlp, 8)
-#include <imagehlp.h>
-#pragma pack(pop, before_imagehlp)
-#endif
 
 extern "C" {
 __declspec(dllexport) DWORD NvOptimusEnablement = 1;
@@ -229,19 +204,9 @@ bool OS_Windows::is_using_con_wrapper() const {
 	return found_conwrap_exe;
 }
 
+// zym: EngineDebugger / ScriptDebugger removed (headless CLI).
 BOOL WINAPI HandlerRoutine(_In_ DWORD dwCtrlType) {
-	if (!EngineDebugger::is_active()) {
-		return FALSE;
-	}
-
-	switch (dwCtrlType) {
-		case CTRL_C_EVENT:
-			EngineDebugger::get_script_debugger()->set_depth(-1);
-			EngineDebugger::get_script_debugger()->set_lines_left(1);
-			return TRUE;
-		default:
-			return FALSE;
-	}
+	return FALSE;
 }
 
 void OS_Windows::alert(const String &p_alert, const String &p_title) {
@@ -292,21 +257,9 @@ void OS_Windows::initialize() {
 	QueryPerformanceFrequency((LARGE_INTEGER *)&ticks_per_second);
 	QueryPerformanceCounter((LARGE_INTEGER *)&ticks_start);
 
-#if WINAPI_FAMILY == WINAPI_FAMILY_DESKTOP_APP
-	// set minimum resolution for periodic timers, otherwise Sleep(n) may wait at least as
-	//  long as the windows scheduler resolution (~16-30ms) even for calls like Sleep(1)
-	TIMECAPS time_caps;
-	if (timeGetDevCaps(&time_caps, sizeof(time_caps)) == MMSYSERR_NOERROR) {
-		delay_resolution = time_caps.wPeriodMin * 1000;
-		timeBeginPeriod(time_caps.wPeriodMin);
-	} else {
-		ERR_PRINT("Unable to detect sleep timer resolution.");
-		delay_resolution = 1000;
-		timeBeginPeriod(1);
-	}
-#else
+	// zym: winmm timeBeginPeriod / TIMECAPS path removed (no <timeapi.h>);
+	// default to 1ms tick resolution like the original #else branch.
 	delay_resolution = 1000;
-#endif
 
 	process_map = memnew((HashMap<ProcessID, ProcessInfo>));
 
@@ -320,25 +273,17 @@ void OS_Windows::initialize() {
 	IPWindows::make_default();
 	main_loop = nullptr;
 
-	HRESULT hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown **>(&dwrite_factory));
-	if (SUCCEEDED(hr)) {
-		hr = dwrite_factory->GetSystemFontCollection(&font_collection, false);
-		if (SUCCEEDED(hr)) {
-			dwrite_init = true;
-			hr = dwrite_factory->QueryInterface(&dwrite_factory2);
-			if (SUCCEEDED(hr)) {
-				hr = dwrite_factory2->GetSystemFontFallback(&system_font_fallback);
-				if (SUCCEEDED(hr)) {
-					dwrite2_init = true;
-				}
-			}
-		}
-	}
-	if (!dwrite_init) {
-		print_verbose("Unable to load IDWriteFactory, system font support is disabled.");
-	} else if (!dwrite2_init) {
-		print_verbose("Unable to load IDWriteFactory2, automatic system font fallback is disabled.");
-	}
+	// zym: DWrite system-font enumeration removed. GetSystemFontCollection()
+	// walks every installed face synchronously on first call (300 ms - 2 s on
+	// real Windows, often much more under Wine because of the fontconfig
+	// bridge), and the headless CLI never reaches get_system_fonts /
+	// get_system_font_path*. Leaving dwrite_factory / font_collection /
+	// system_font_fallback null is safe: every consumer of these pointers
+	// short-circuits on `if (!dwrite_init)`. finalize() Release-on-null
+	// guards already handle the null path. `-ldwrite` is also dropped from
+	// ZYM_PLATFORM_SYSLIBS in the top-level CMakeLists.txt.
+	// (Original block: DWriteCreateFactory + GetSystemFontCollection +
+	//  QueryInterface(IDWriteFactory2) + GetSystemFontFallback.)
 
 	FileAccessWindows::initialize();
 }
@@ -389,9 +334,7 @@ void OS_Windows::finalize_core() {
 
 	FileAccessWindows::finalize();
 
-#if WINAPI_FAMILY == WINAPI_FAMILY_DESKTOP_APP
-	timeEndPeriod(1);
-#endif
+	// zym: timeEndPeriod removed (paired with timeBeginPeriod strip).
 
 	memdelete(process_map);
 	NetSocketWinSock::cleanup();
@@ -407,72 +350,6 @@ Error OS_Windows::get_entropy(uint8_t *r_buffer, int p_bytes) {
 	return OK;
 }
 
-#ifdef DEBUG_ENABLED
-void debug_dynamic_library_check_dependencies(const String &p_path, HashSet<String> &r_checked, HashSet<String> &r_missing) {
-	if (r_checked.has(p_path)) {
-		return;
-	}
-	r_checked.insert(p_path);
-
-	LOADED_IMAGE loaded_image;
-	HANDLE file = CreateFileW((LPCWSTR)p_path.utf16().get_data(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-	if (file != INVALID_HANDLE_VALUE) {
-		HANDLE file_mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY | SEC_COMMIT, 0, 0, nullptr);
-		if (file_mapping != INVALID_HANDLE_VALUE) {
-			PVOID mapping = MapViewOfFile(file_mapping, FILE_MAP_READ, 0, 0, 0);
-			if (mapping) {
-				PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)mapping;
-				PIMAGE_NT_HEADERS nt_header = nullptr;
-				if (dos_header->e_magic == IMAGE_DOS_SIGNATURE) {
-					PCHAR nt_header_ptr;
-					nt_header_ptr = ((PCHAR)mapping) + dos_header->e_lfanew;
-					nt_header = (PIMAGE_NT_HEADERS)nt_header_ptr;
-					if (nt_header->Signature != IMAGE_NT_SIGNATURE) {
-						nt_header = nullptr;
-					}
-				}
-				if (nt_header) {
-					loaded_image.ModuleName = nullptr;
-					loaded_image.hFile = file;
-					loaded_image.MappedAddress = (PUCHAR)mapping;
-					loaded_image.FileHeader = nt_header;
-					loaded_image.Sections = (PIMAGE_SECTION_HEADER)((LPBYTE)&nt_header->OptionalHeader + nt_header->FileHeader.SizeOfOptionalHeader);
-					loaded_image.NumberOfSections = nt_header->FileHeader.NumberOfSections;
-					loaded_image.SizeOfImage = GetFileSize(file, nullptr);
-					loaded_image.Characteristics = nt_header->FileHeader.Characteristics;
-					loaded_image.LastRvaSection = loaded_image.Sections;
-					loaded_image.fSystemImage = false;
-					loaded_image.fDOSImage = false;
-					loaded_image.Links.Flink = &loaded_image.Links;
-					loaded_image.Links.Blink = &loaded_image.Links;
-
-					ULONG size = 0;
-					const IMAGE_IMPORT_DESCRIPTOR *import_desc = (const IMAGE_IMPORT_DESCRIPTOR *)ImageDirectoryEntryToData((HMODULE)loaded_image.MappedAddress, false, IMAGE_DIRECTORY_ENTRY_IMPORT, &size);
-					if (import_desc) {
-						for (; import_desc->Name && import_desc->FirstThunk; import_desc++) {
-							char16_t full_name_wc[32767];
-							const char *name_cs = (const char *)ImageRvaToVa(loaded_image.FileHeader, loaded_image.MappedAddress, import_desc->Name, nullptr);
-							String name = String(name_cs);
-							if (name.begins_with("api-ms-win-")) {
-								r_checked.insert(name);
-							} else if (SearchPathW(nullptr, (LPCWSTR)name.utf16().get_data(), nullptr, 32767, (LPWSTR)full_name_wc, nullptr)) {
-								debug_dynamic_library_check_dependencies(String::utf16(full_name_wc), r_checked, r_missing);
-							} else if (SearchPathW((LPCWSTR)(p_path.get_base_dir().utf16().get_data()), (LPCWSTR)name.utf16().get_data(), nullptr, 32767, (LPWSTR)full_name_wc, nullptr)) {
-								debug_dynamic_library_check_dependencies(String::utf16(full_name_wc), r_checked, r_missing);
-							} else {
-								r_missing.insert(name);
-							}
-						}
-					}
-				}
-				UnmapViewOfFile(mapping);
-			}
-			CloseHandle(file_mapping);
-		}
-		CloseHandle(file);
-	}
-}
-#endif
 
 Error OS_Windows::open_dynamic_library(const String &p_path, void *&p_library_handle, GDExtensionData *p_data) {
 	String path = p_path;
@@ -526,30 +403,9 @@ Error OS_Windows::open_dynamic_library(const String &p_path, void *&p_library_ha
 			DirAccess::remove_absolute(load_path);
 		}
 
-#ifdef DEBUG_ENABLED
-		DWORD err_code = GetLastError();
-
-		HashSet<String> checked_libs;
-		HashSet<String> missing_libs;
-		debug_dynamic_library_check_dependencies(dll_path, checked_libs, missing_libs);
-		if (!missing_libs.is_empty()) {
-			String missing;
-			for (const String &E : missing_libs) {
-				if (!missing.is_empty()) {
-					missing += ", ";
-				}
-				missing += E;
-			}
-			ERR_FAIL_V_MSG(ERR_CANT_OPEN, vformat("Can't open dynamic library: %s. Missing dependencies: %s. Error: %s.", p_path, missing, format_error_message(err_code)));
-		} else {
-			ERR_FAIL_V_MSG(ERR_CANT_OPEN, vformat("Can't open dynamic library: %s. Error: %s.", p_path, format_error_message(err_code)));
-		}
-#endif
 	}
 
-#ifndef DEBUG_ENABLED
 	ERR_FAIL_NULL_V_MSG(p_library_handle, ERR_CANT_OPEN, vformat("Can't open dynamic library: %s. Error: %s.", p_path, format_error_message(GetLastError())));
-#endif
 
 	if (cookie) {
 		RemoveDllDirectory(cookie);
@@ -608,55 +464,12 @@ String OS_Windows::get_distribution_name() const {
 }
 
 String OS_Windows::get_version() const {
-	RtlGetVersionPtr version_ptr = (RtlGetVersionPtr)(void *)GetProcAddress(GetModuleHandle("ntdll.dll"), "RtlGetVersion");
-	if (version_ptr != nullptr) {
-		RTL_OSVERSIONINFOEXW fow;
-		ZeroMemory(&fow, sizeof(fow));
-		fow.dwOSVersionInfoSize = sizeof(fow);
-		if (version_ptr(&fow) == 0x00000000) {
-			return vformat("%d.%d.%d", (int64_t)fow.dwMajorVersion, (int64_t)fow.dwMinorVersion, (int64_t)fow.dwBuildNumber);
-		}
-	}
+	// zym: RtlGetVersionPtr typedef came from removed header; version detection stripped.
 	return "";
 }
 
 String OS_Windows::get_version_alias() const {
-	RtlGetVersionPtr version_ptr = (RtlGetVersionPtr)(void *)GetProcAddress(GetModuleHandle("ntdll.dll"), "RtlGetVersion");
-	if (version_ptr != nullptr) {
-		RTL_OSVERSIONINFOEXW fow;
-		ZeroMemory(&fow, sizeof(fow));
-		fow.dwOSVersionInfoSize = sizeof(fow);
-		if (version_ptr(&fow) == 0x00000000) {
-			String windows_string;
-			if (fow.wProductType != VER_NT_WORKSTATION && fow.dwMajorVersion == 10 && fow.dwBuildNumber >= 26100) {
-				windows_string = "Server 2025";
-			} else if (fow.dwMajorVersion == 10 && fow.dwBuildNumber >= 20348) {
-				// Builds above 20348 correspond to Windows 11 / Windows Server 2022.
-				// Their major version numbers are still 10 though, not 11.
-				if (fow.wProductType != VER_NT_WORKSTATION) {
-					windows_string += "Server 2022";
-				} else {
-					windows_string += "11";
-				}
-			} else if (fow.dwMajorVersion == 10) {
-				if (fow.wProductType != VER_NT_WORKSTATION && fow.dwBuildNumber >= 17763) {
-					windows_string += "Server 2019";
-				} else {
-					if (fow.wProductType != VER_NT_WORKSTATION) {
-						windows_string += "Server 2016";
-					} else {
-						windows_string += "10";
-					}
-				}
-			} else {
-				windows_string += "Unknown";
-			}
-			// Windows versions older than 10 cannot run Godot.
-
-			return vformat("%s (build %d)", windows_string, (int64_t)fow.dwBuildNumber);
-		}
-	}
-
+	// zym: RtlGetVersionPtr typedef came from removed header; version detection stripped.
 	return "";
 }
 
@@ -731,116 +544,25 @@ Vector<String> OS_Windows::_get_video_adapter_driver_info_reg(const String &p_na
 }
 
 Vector<String> OS_Windows::_get_video_adapter_driver_info_wmi(const String &p_name) const {
-	Vector<String> info;
-
-	REFCLSID clsid = CLSID_WbemLocator; // Unmarshaler CLSID
-	REFIID uuid = IID_IWbemLocator; // Interface UUID
-	IWbemLocator *wbemLocator = nullptr; // to get the services
-	IWbemServices *wbemServices = nullptr; // to get the class
-	IEnumWbemClassObject *iter = nullptr;
-	IWbemClassObject *pnpSDriverObject[1]; // contains driver name, version, etc.
-	String driver_name;
-	String driver_version;
-
-	HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, uuid, (LPVOID *)&wbemLocator);
-	if (hr != S_OK) {
-		return Vector<String>();
-	}
-	BSTR resource_name = SysAllocString(L"root\\CIMV2");
-	hr = wbemLocator->ConnectServer(resource_name, nullptr, nullptr, nullptr, 0, nullptr, nullptr, &wbemServices);
-	SysFreeString(resource_name);
-
-	SAFE_RELEASE(wbemLocator) // from now on, use `wbemServices`
-	if (hr != S_OK) {
-		SAFE_RELEASE(wbemServices)
-		return Vector<String>();
-	}
-
-	const String gpu_device_class_query = vformat("SELECT * FROM Win32_PnPSignedDriver WHERE DeviceName = \"%s\"", p_name);
-	BSTR query = SysAllocString((const WCHAR *)gpu_device_class_query.utf16().get_data());
-	BSTR query_lang = SysAllocString(L"WQL");
-	hr = wbemServices->ExecQuery(query_lang, query, WBEM_FLAG_RETURN_IMMEDIATELY | WBEM_FLAG_FORWARD_ONLY, nullptr, &iter);
-	SysFreeString(query_lang);
-	SysFreeString(query);
-	if (hr == S_OK) {
-		ULONG resultCount;
-		hr = iter->Next(5000, 1, pnpSDriverObject, &resultCount); // Get exactly 1. Wait max 5 seconds.
-
-		if (hr == S_OK && resultCount > 0) {
-			VARIANT dn;
-			VariantInit(&dn);
-
-			BSTR object_name = SysAllocString(L"DriverName");
-			hr = pnpSDriverObject[0]->Get(object_name, 0, &dn, nullptr, nullptr);
-			SysFreeString(object_name);
-			if (hr == S_OK && dn.vt == VT_BSTR) {
-				String d_name = String(V_BSTR(&dn));
-				if (d_name.is_empty()) {
-					object_name = SysAllocString(L"DriverProviderName");
-					hr = pnpSDriverObject[0]->Get(object_name, 0, &dn, nullptr, nullptr);
-					SysFreeString(object_name);
-					if (hr == S_OK) {
-						driver_name = String(V_BSTR(&dn));
-					}
-				} else {
-					driver_name = d_name;
-				}
-			} else {
-				object_name = SysAllocString(L"DriverProviderName");
-				hr = pnpSDriverObject[0]->Get(object_name, 0, &dn, nullptr, nullptr);
-				SysFreeString(object_name);
-				if (hr == S_OK && dn.vt == VT_BSTR) {
-					driver_name = String(V_BSTR(&dn));
-				} else {
-					driver_name = "Unknown";
-				}
-			}
-
-			VARIANT dv;
-			VariantInit(&dv);
-			object_name = SysAllocString(L"DriverVersion");
-			hr = pnpSDriverObject[0]->Get(object_name, 0, &dv, nullptr, nullptr);
-			SysFreeString(object_name);
-			if (hr == S_OK && dv.vt == VT_BSTR) {
-				driver_version = String(V_BSTR(&dv));
-			} else {
-				driver_version = "Unknown";
-			}
-			for (ULONG i = 0; i < resultCount; i++) {
-				SAFE_RELEASE(pnpSDriverObject[i])
-			}
-		}
-	}
-
-	SAFE_RELEASE(wbemServices)
-	SAFE_RELEASE(iter)
-
-	info.push_back(driver_name);
-	info.push_back(driver_version);
-
-	return info;
+	// zym: WMI-based driver-info probe stubbed out. The original
+	// implementation called `CoCreateInstance(CLSID_WbemLocator, ...)`
+	// + `SysAllocString` / `VariantInit` / `VariantClear` / `SysFreeString`,
+	// which pulls `ole32.dll` and `oleaut32.dll` into zym.exe's import
+	// table. The only caller of this helper is
+	// `OS_Windows::get_video_adapter_driver_info()`, which itself is
+	// stubbed (`return Vector<String>();`) because the headless CLI has
+	// no RenderingServer. Replacing this body with an empty return drops
+	// the last references to `ole32` / `oleaut32` from the link graph,
+	// so both DLLs disappear from the IAT (see ZYM_PLATFORM_SYSLIBS in
+	// CMakeLists.txt). The original WMI implementation is preserved in
+	// git history.
+	(void)p_name;
+	return Vector<String>();
 }
 
 Vector<String> OS_Windows::get_video_adapter_driver_info() const {
-	if (RenderingServer::get_singleton() == nullptr) {
-		return Vector<String>();
-	}
-
-	static Vector<String> info;
-	if (!info.is_empty()) {
-		return info;
-	}
-
-	const String device_name = RenderingServer::get_singleton()->get_video_adapter_name();
-	if (device_name.is_empty()) {
-		return Vector<String>();
-	}
-
-	info = _get_video_adapter_driver_info_reg(device_name);
-	if (info.is_empty()) {
-		info = _get_video_adapter_driver_info_wmi(device_name);
-	}
-	return info;
+	// zym: RenderingServer removed (headless CLI); no video adapter info.
+	return Vector<String>();
 }
 
 bool OS_Windows::get_user_prefers_integrated_gpu() const {
@@ -1753,9 +1475,7 @@ public:
 		if (IID_IUnknown == riid) {
 			AddRef();
 			*ppvInterface = (IUnknown *)this;
-		} else if (__uuidof(IMMNotificationClient) == riid) {
-			AddRef();
-			*ppvInterface = (IMMNotificationClient *)this;
+		// zym: IMMNotificationClient (WASAPI device-change COM iface) removed.
 		} else {
 			*ppvInterface = nullptr;
 			return E_NOINTERFACE;
@@ -1889,14 +1609,14 @@ DWRITE_FONT_STRETCH OS_Windows::_stretch_to_dw(int p_stretch) const {
 }
 
 Vector<String> OS_Windows::get_system_font_path_for_text(const String &p_font_name, const String &p_text, const String &p_locale, const String &p_script, int p_weight, int p_stretch, bool p_italic) const {
-	// This may be called before TextServerManager has been created, which would cause a crash downstream if we do not check here
-	if (!dwrite2_init || !TextServerManager::get_singleton()) {
+	// zym: TextServerManager / TS removed (headless CLI); rtl detection stubbed false.
+	if (!dwrite2_init) {
 		return Vector<String>();
 	}
 
 	String font_name = _get_default_fontname(p_font_name);
 
-	bool rtl = TS->is_locale_right_to_left(p_locale);
+	bool rtl = false;
 	Char16String text = p_text.utf16();
 	Char16String locale = p_locale.utf16();
 
@@ -2348,9 +2068,7 @@ void OS_Windows::run() {
 	main_loop->initialize();
 
 	while (true) {
-		GodotProfileFrameMark;
-		GodotProfileZone("OS_Windows::run");
-		DisplayServer::get_singleton()->process_events(); // get rid of pending events
+		// zym: DisplayServer removed (headless CLI); no event pumping.
 		if (Main::iteration()) {
 			break;
 		}
@@ -2597,19 +2315,8 @@ String OS_Windows::get_system_ca_certificates() {
 }
 
 void OS_Windows::add_frame_delay(bool p_can_draw, bool p_wake_for_events) {
-	if (p_wake_for_events) {
-		uint64_t delay = get_frame_delay(p_can_draw);
-		if (delay == 0) {
-			return;
-		}
-
-		DisplayServer *ds = DisplayServer::get_singleton();
-		DisplayServerWindows *ds_win = Object::cast_to<DisplayServerWindows>(ds);
-		if (ds_win) {
-			MsgWaitForMultipleObjects(0, nullptr, false, Math::floor(double(delay) / 1000.0), QS_ALLINPUT);
-			return;
-		}
-	}
+	// zym: DisplayServer / DisplayServerWindows removed (headless CLI); wake_for_events path stripped.
+	(void)p_wake_for_events;
 
 	const uint32_t frame_delay = Engine::get_singleton()->get_frame_delay();
 	if (frame_delay) {
@@ -2663,100 +2370,6 @@ void OS_Windows::add_frame_delay(bool p_can_draw, bool p_wake_for_events) {
 	}
 }
 
-#ifdef TOOLS_ENABLED
-bool OS_Windows::_test_create_rendering_device(const String &p_display_driver) const {
-	// Tests Rendering Device creation.
-
-	bool ok = false;
-#if defined(RD_ENABLED)
-	Error err;
-	RenderingContextDriver *rcd = nullptr;
-
-#if defined(VULKAN_ENABLED)
-	rcd = memnew(RenderingContextDriverVulkan);
-#endif
-#ifdef D3D12_ENABLED
-	if (rcd == nullptr) {
-		rcd = memnew(RenderingContextDriverD3D12);
-	}
-#endif
-	if (rcd != nullptr) {
-		err = rcd->initialize();
-		if (err == OK) {
-			RenderingDevice *rd = memnew(RenderingDevice);
-			err = rd->initialize(rcd);
-			memdelete(rd);
-			rd = nullptr;
-			if (err == OK) {
-				ok = true;
-			}
-		}
-		memdelete(rcd);
-		rcd = nullptr;
-	}
-#endif
-
-	return ok;
-}
-
-bool OS_Windows::_test_create_rendering_device_and_gl(const String &p_display_driver) const {
-	// Tests OpenGL context and Rendering Device simultaneous creation. This function is expected to crash on some NVIDIA drivers.
-
-	WNDCLASSEXW wc_probe;
-	memset(&wc_probe, 0, sizeof(WNDCLASSEXW));
-	wc_probe.cbSize = sizeof(WNDCLASSEXW);
-	wc_probe.style = CS_OWNDC | CS_DBLCLKS;
-	wc_probe.lpfnWndProc = (WNDPROC)::DefWindowProcW;
-	wc_probe.cbClsExtra = 0;
-	wc_probe.cbWndExtra = 0;
-	wc_probe.hInstance = GetModuleHandle(nullptr);
-	wc_probe.hIcon = LoadIcon(nullptr, IDI_WINLOGO);
-	wc_probe.hCursor = nullptr;
-	wc_probe.hbrBackground = nullptr;
-	wc_probe.lpszMenuName = nullptr;
-	wc_probe.lpszClassName = L"Engine probe window";
-
-	if (!RegisterClassExW(&wc_probe)) {
-		return false;
-	}
-
-	HWND hWnd = CreateWindowExW(WS_EX_WINDOWEDGE, L"Engine probe window", L"", WS_OVERLAPPEDWINDOW, 0, 0, 800, 600, nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
-	if (!hWnd) {
-		UnregisterClassW(L"Engine probe window", GetModuleHandle(nullptr));
-		return false;
-	}
-
-	bool ok = true;
-#ifdef GLES3_ENABLED
-	GLManagerNative_Windows *test_gl_manager_native = memnew(GLManagerNative_Windows);
-	if (test_gl_manager_native->window_create(DisplayServer::MAIN_WINDOW_ID, hWnd, GetModuleHandle(nullptr), 800, 600) == OK) {
-		RasterizerGLES3::make_current(true);
-	} else {
-		ok = false;
-	}
-#endif
-
-	MSG msg = {};
-	while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-		TranslateMessage(&msg);
-		DispatchMessageW(&msg);
-	}
-
-	if (ok) {
-		ok = _test_create_rendering_device(p_display_driver);
-	}
-
-#ifdef GLES3_ENABLED
-	if (test_gl_manager_native) {
-		memdelete(test_gl_manager_native);
-	}
-#endif
-
-	DestroyWindow(hWnd);
-	UnregisterClassW(L"Engine probe window", GetModuleHandle(nullptr));
-	return ok;
-}
-#endif
 
 #ifdef _MSC_VER
 #define IAT_HOOK_CALL __declspec(guard(nocf))
@@ -2863,8 +2476,29 @@ LPVOID install_iat_hook(const String &p_target, const String &p_module, const St
 OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 	hInstance = _hInstance;
 
-	Original_GetProcAddress = (GetProcAddressType)install_iat_hook("dinput8.dll", "kernel32.dll", "GetProcAddress", (LPVOID)Hook_GetProcAddress);
-	Original_HidD_GetProductString = (HidD_GetProductStringType)install_iat_hook("dinput8.dll", "hid.dll", "HidD_GetProductString", (LPVOID)Hook_HidD_GetProductString);
+	// zym: DirectInput IAT hooks removed. The original code calls
+	// `install_iat_hook("dinput8.dll", ...)` twice, each of which does a
+	// `LoadLibraryA("dinput8.dll")` to patch DirectInput's import table so
+	// that `HidD_GetProductString` short-circuits for non-controller HIDs
+	// (avoids DAC / non-joystick stalls during `IDirectInput8::EnumDevices`).
+	// The headless CLI has no `DisplayServer`, no `Input` singleton, and never
+	// calls into DirectInput / joystick / HID enumeration -- so the hooks
+	// guard nothing. The unconditional `LoadLibraryA("dinput8.dll")` on every
+	// boot is itself a significant startup cost on Wine and on real Windows
+	// (it pulls in dxgi/ole/hid/setupapi dependencies and triggers
+	// DllMain initialization for each), measurable on the order of
+	// hundreds of milliseconds. With the hooks removed, both
+	// `Original_GetProcAddress` and `Original_HidD_GetProductString`
+	// remain null; nothing in the zym link graph ever reaches the call
+	// sites that would dereference them.
+	// (Original block:
+	//   Original_GetProcAddress = (GetProcAddressType)install_iat_hook(
+	//       "dinput8.dll", "kernel32.dll", "GetProcAddress",
+	//       (LPVOID)Hook_GetProcAddress);
+	//   Original_HidD_GetProductString = (HidD_GetProductStringType)install_iat_hook(
+	//       "dinput8.dll", "hid.dll", "HidD_GetProductString",
+	//       (LPVOID)Hook_HidD_GetProductString);
+	// )
 
 	_init_encodings();
 
@@ -2888,7 +2522,17 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 	SetConsoleOutputCP(CP_UTF8);
 	SetConsoleCP(CP_UTF8);
 
-	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	// zym: `CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)` removed.
+	// The headless CLI never creates a COM object on the boot path
+	// (no DisplayServer, no TTS, no WMI driver-info probe -- see
+	// `_get_video_adapter_driver_info_wmi` below, which is also stubbed
+	// out). Initializing a COM apartment here pulls in `ole32.dll` (and
+	// transitively `oleaut32.dll`), runs the OLE32 DllMain, sets up the
+	// OXID resolver thread, and is a measurable boot cost on Windows /
+	// Wine (~30-100 ms cold). With this call gone and the WMI probe
+	// stubbed, both `ole32` and `oleaut32` drop out of zym.exe's import
+	// table entirely (see `ZYM_PLATFORM_SYSLIBS` in CMakeLists.txt).
+	// (Original: CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);)
 
 #ifdef WASAPI_ENABLED
 	AudioDriverManager::add_driver(&driver_wasapi);
@@ -2897,7 +2541,7 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 	AudioDriverManager::add_driver(&driver_xaudio2);
 #endif
 
-	DisplayServerWindows::register_windows_driver();
+	// zym: DisplayServerWindows::register_windows_driver() removed (headless CLI).
 
 	// Enable ANSI escape code support on Windows 10 v1607 (Anniversary Update) and later.
 	// This lets the engine and projects use ANSI escape codes to color text just like on macOS and Linux.
@@ -2919,5 +2563,7 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 }
 
 OS_Windows::~OS_Windows() {
-	CoUninitialize();
+	// zym: `CoUninitialize()` removed -- pairs with the removed
+	// `CoInitializeEx` in the ctor. No COM apartment was initialized
+	// for this thread, so there is nothing to uninitialize.
 }

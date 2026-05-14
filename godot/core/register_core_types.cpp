@@ -39,9 +39,6 @@
 #include "core/extension/gdextension.h"
 #include "core/extension/gdextension_manager.h"
 #include "core/extension/godot_instance.h"
-#include "core/input/input.h"
-#include "core/input/input_map.h"
-#include "core/input/shortcut.h"
 #include "core/io/config_file.h"
 #include "core/io/dir_access.h"
 #include "core/io/dtls_server.h"
@@ -177,24 +174,6 @@ void register_core_types() {
 	GDREGISTER_CLASS(MissingResource);
 	GDREGISTER_CLASS(Image);
 
-	GDREGISTER_CLASS(Shortcut);
-	GDREGISTER_ABSTRACT_CLASS(InputEvent);
-	GDREGISTER_ABSTRACT_CLASS(InputEventFromWindow);
-	GDREGISTER_ABSTRACT_CLASS(InputEventWithModifiers);
-	GDREGISTER_CLASS(InputEventKey);
-	GDREGISTER_CLASS(InputEventShortcut);
-	GDREGISTER_ABSTRACT_CLASS(InputEventMouse);
-	GDREGISTER_CLASS(InputEventMouseButton);
-	GDREGISTER_CLASS(InputEventMouseMotion);
-	GDREGISTER_CLASS(InputEventJoypadButton);
-	GDREGISTER_CLASS(InputEventJoypadMotion);
-	GDREGISTER_CLASS(InputEventScreenDrag);
-	GDREGISTER_CLASS(InputEventScreenTouch);
-	GDREGISTER_CLASS(InputEventAction);
-	GDREGISTER_ABSTRACT_CLASS(InputEventGesture);
-	GDREGISTER_CLASS(InputEventMagnifyGesture);
-	GDREGISTER_CLASS(InputEventPanGesture);
-	GDREGISTER_CLASS(InputEventMIDI);
 
 	// Network
 	GDREGISTER_ABSTRACT_CLASS(StreamPeer);
@@ -312,8 +291,6 @@ void register_core_types() {
 	GDREGISTER_CLASS(CoreBind::Marshalls);
 
 	GDREGISTER_CLASS(TranslationServer);
-	GDREGISTER_ABSTRACT_CLASS(Input);
-	GDREGISTER_CLASS(InputMap);
 	GDREGISTER_CLASS(Expression);
 	GDREGISTER_CLASS(ProjectSettings);
 
@@ -367,8 +344,6 @@ void register_core_singletons() {
 	Engine::get_singleton()->add_singleton(Engine::Singleton("ClassDB", _classdb));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("Marshalls", CoreBind::Marshalls::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("TranslationServer", TranslationServer::get_singleton()));
-	Engine::get_singleton()->add_singleton(Engine::Singleton("Input", Input::get_singleton()));
-	Engine::get_singleton()->add_singleton(Engine::Singleton("InputMap", InputMap::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("GDExtensionManager", GDExtensionManager::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("ResourceUID", ResourceUID::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("WorkerThreadPool", worker_thread_pool));

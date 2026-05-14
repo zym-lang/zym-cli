@@ -41,9 +41,6 @@
 #include <psa/crypto.h>
 #endif
 
-#ifdef TESTS_ENABLED
-#include "tests/test_crypto_mbedtls.h"
-#endif
 
 #ifdef GODOT_MBEDTLS_THREADING_ALT
 extern "C" {
@@ -96,11 +93,6 @@ void initialize_mbedtls_module(ModuleInitializationLevel p_level) {
 	ERR_FAIL_COND_MSG(status != PSA_SUCCESS, "Failed to initialize psa crypto. The mbedTLS modules will not work.");
 #endif
 
-#ifdef DEBUG_ENABLED
-	if (OS::get_singleton()->is_stdout_verbose()) {
-		mbedtls_debug_set_threshold(1);
-	}
-#endif
 
 	godot_mbedtls_initialized = true;
 

@@ -64,38 +64,11 @@ inline constexpr bool is_class_enabled_v = is_class_enabled<T>::value;
 #define DEFVAL(m_defval) (m_defval)
 #define DEFVAL_ARRAY DEFVAL(ClassDB::default_array_arg)
 
-#ifdef DEBUG_ENABLED
-
-struct MethodDefinition {
-	StringName name;
-	Vector<StringName> args;
-	MethodDefinition() {}
-	MethodDefinition(const char *p_name) :
-			name(p_name) {}
-	MethodDefinition(const StringName &p_name) :
-			name(p_name) {}
-};
-
-MethodDefinition D_METHODP(const char *p_name, const char *const **p_args, uint32_t p_argcount);
-
-template <typename... VarArgs>
-MethodDefinition D_METHOD(const char *p_name, const VarArgs... p_args) {
-	const char *args[sizeof...(p_args) + 1] = { p_args..., nullptr }; // +1 makes sure zero sized arrays are also supported.
-	const char *const *argptrs[sizeof...(p_args) + 1];
-	for (uint32_t i = 0; i < sizeof...(p_args); i++) {
-		argptrs[i] = &args[i];
-	}
-
-	return D_METHODP(p_name, sizeof...(p_args) == 0 ? nullptr : (const char *const **)argptrs, sizeof...(p_args));
-}
-
-#else
 
 // When DEBUG_ENABLED is set this will let the engine know
 // the argument names for easier debugging.
 #define D_METHOD(m_c, ...) m_c
 
-#endif // DEBUG_ENABLED
 
 class ClassDB {
 	friend class Object;
@@ -140,19 +113,7 @@ public:
 		List<PropertyInfo> property_list;
 		HashMap<StringName, PropertyInfo> property_map;
 
-#ifdef DEBUG_ENABLED
-		List<StringName> constant_order;
-		List<StringName> method_order;
-		HashSet<StringName> methods_in_properties;
-		List<MethodInfo> virtual_methods;
-		HashMap<StringName, MethodInfo> virtual_methods_map;
-		HashMap<StringName, Vector<Error>> method_error_values;
-		HashMap<StringName, List<StringName>> linked_properties;
-#endif // DEBUG_ENABLED
 
-#ifdef TOOLS_ENABLED
-		List<StringName> dependency_list;
-#endif
 
 		AHashMap<StringName, PropertySetGet> property_setget;
 		HashMap<StringName, Vector<uint32_t>> virtual_methods_compat;
@@ -206,15 +167,8 @@ public:
 	static HashMap<StringName, StringName> resource_base_extensions;
 	static HashMap<StringName, StringName> compat_classes;
 
-#ifdef TOOLS_ENABLED
-	static HashMap<StringName, ObjectGDExtension> placeholder_extensions;
-#endif
 
-#ifdef DEBUG_ENABLED
-	static MethodBind *bind_methodfi(uint32_t p_flags, MethodBind *p_bind, bool p_compatibility, const MethodDefinition &method_name, const Variant **p_defs, int p_defcount);
-#else
 	static MethodBind *bind_methodfi(uint32_t p_flags, MethodBind *p_bind, bool p_compatibility, const char *method_name, const Variant **p_defs, int p_defcount);
-#endif // DEBUG_ENABLED
 
 	static APIType current_api;
 	static HashMap<APIType, uint32_t> api_hashes_cache;
@@ -334,11 +288,6 @@ public:
 	}
 
 	static void get_class_list(LocalVector<StringName> &p_classes);
-#ifdef TOOLS_ENABLED
-	static void get_extensions_class_list(LocalVector<StringName> &p_classes);
-	static void get_extension_class_list(const Ref<GDExtension> &p_extension, List<StringName> *p_classes);
-	static ObjectGDExtension *get_placeholder_extension(const StringName &p_class);
-#endif
 	static const GDType *get_gdtype(const StringName &p_class);
 	static void get_inheriters_from_class(const StringName &p_class, LocalVector<StringName> &p_classes);
 	static void get_direct_inheriters_from_class(const StringName &p_class, List<StringName> *p_classes);
@@ -528,10 +477,6 @@ public:
 	static bool is_class_reloadable(const StringName &p_class);
 	static bool is_class_runtime(const StringName &p_class);
 
-#ifdef TOOLS_ENABLED
-	static void add_class_dependency(const StringName &p_class, const StringName &p_dependency);
-	static void get_class_dependencies(const StringName &p_class, List<StringName> *r_rependencies);
-#endif
 
 	static void add_resource_base_extension(const StringName &p_extension, const StringName &p_class);
 	static void get_resource_base_extensions(List<String> *p_extensions);
@@ -563,16 +508,9 @@ public:
 #define BIND_CONSTANT(m_constant) \
 	::ClassDB::bind_integer_constant(get_class_static(), StringName(), #m_constant, m_constant);
 
-#ifdef DEBUG_ENABLED
-
-#define BIND_METHOD_ERR_RETURN_DOC(m_method, ...) \
-	::ClassDB::set_method_error_return_values(get_class_static(), m_method, Vector<Error>{ __VA_ARGS__ });
-
-#else
 
 #define BIND_METHOD_ERR_RETURN_DOC(m_method, ...)
 
-#endif // DEBUG_ENABLED
 
 #define GDREGISTER_CLASS(m_class)                 \
 	if constexpr (GD_IS_CLASS_ENABLED(m_class)) { \

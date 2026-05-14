@@ -11,6 +11,12 @@ ZymValue nativeBuffer_create(ZymVM* vm);
 // pulling Godot's PackedByteArray header into zym_native.cpp).
 ZymValue makeBufferFromBytes(ZymVM* vm, const char* data, size_t size);
 bool     readBufferBytes(ZymVM* vm, ZymValue v, const char** out_data, size_t* out_size);
+// Mutating write-back: resizes the borrowed `PackedByteArray*` behind
+// the Buffer `v` to `size` bytes and copies `data` into it. Every live
+// script reference to the same Buffer observes the new contents (they
+// all dereference the same heap `PackedByteArray*` via `unwrap`).
+// Returns false if `v` is not a Buffer or the resize failed.
+bool     writeBufferBytes(ZymVM* vm, ZymValue v, const void* data, size_t size);
 ZymValue nativeFile_create(ZymVM* vm);
 ZymValue nativeDir_create(ZymVM* vm);
 ZymValue nativeConsole_create(ZymVM* vm);

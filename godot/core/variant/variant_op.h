@@ -362,13 +362,6 @@ public:
 		const A &a = VariantInternalAccessor<A>::get(&p_left);
 		const B &b = VariantInternalAccessor<B>::get(&p_right);
 
-#if defined(DEBUG_ENABLED)
-		if (b < 0 || a < 0) {
-			*r_ret = "Invalid operands for bit shifting. Only positive operands are supported.";
-			r_valid = false;
-			return;
-		}
-#endif
 		*r_ret = a << b;
 		r_valid = true;
 	}
@@ -388,13 +381,6 @@ public:
 		const A &a = VariantInternalAccessor<A>::get(&p_left);
 		const B &b = VariantInternalAccessor<B>::get(&p_right);
 
-#if defined(DEBUG_ENABLED)
-		if (b < 0 || a < 0) {
-			*r_ret = "Invalid operands for bit shifting. Only positive operands are supported.";
-			r_valid = false;
-			return;
-		}
-#endif
 		*r_ret = a >> b;
 		r_valid = true;
 	}

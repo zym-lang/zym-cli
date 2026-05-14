@@ -50,17 +50,6 @@ class GDExtension : public Resource {
 	struct Extension {
 		ObjectGDExtension gdextension;
 
-#ifdef TOOLS_ENABLED
-		bool is_reloading = false;
-		HashMap<StringName, GDExtensionMethodBind *> methods;
-		HashSet<ObjectID> instances;
-
-		struct InstanceState {
-			List<Pair<String, Variant>> properties;
-			bool is_placeholder = false;
-		};
-		HashMap<ObjectID, InstanceState> instance_state;
-#endif
 	};
 
 	HashMap<StringName, Extension> extension_classes;
@@ -101,22 +90,6 @@ class GDExtension : public Resource {
 	GDExtensionInitialization initialization;
 	int32_t level_initialized = -1;
 
-#ifdef TOOLS_ENABLED
-	bool is_reloading = false;
-	Vector<GDExtensionMethodBind *> invalid_methods;
-	Vector<ObjectID> instance_bindings;
-	GDExtensionEditorGetClassesUsedCallback get_classes_used_callback = nullptr;
-
-	static void _track_instance(void *p_user_data, void *p_instance);
-	static void _untrack_instance(void *p_user_data, void *p_instance);
-
-	void _clear_extension(Extension *p_extension);
-
-	// Only called by GDExtensionManager during the reload process.
-	void prepare_reload();
-	void finish_reload();
-	void clear_instance_bindings();
-#endif
 
 	GDExtensionMainLoopStartupCallback startup_callback = nullptr;
 	GDExtensionMainLoopShutdownCallback shutdown_callback = nullptr;
@@ -156,17 +129,6 @@ protected:
 #endif
 
 public:
-#ifdef TOOLS_ENABLED
-	bool is_reloadable() const { return reloadable; }
-	void set_reloadable(bool p_reloadable) { reloadable = p_reloadable; }
-
-	bool has_library_changed() const;
-
-	void track_instance_binding(Object *p_object);
-	void untrack_instance_binding(Object *p_object);
-
-	PackedStringArray get_classes_used() const;
-#endif
 
 	InitializationLevel get_minimum_library_initialization_level() const;
 	void initialize_library(InitializationLevel p_level);
@@ -192,51 +154,5 @@ public:
 	virtual void get_recognized_extensions(List<String> *p_extensions) const override;
 	virtual bool handles_type(const String &p_type) const override;
 	virtual String get_resource_type(const String &p_path) const override;
-#ifdef TOOLS_ENABLED
-	virtual void get_classes_used(const String &p_path, HashSet<StringName> *r_classes) override;
-#endif // TOOLS_ENABLED
 };
 
-#ifdef TOOLS_ENABLED
-class GDExtensionEditorPlugins {
-private:
-	static inline Vector<StringName> extension_classes;
-
-protected:
-	friend class EditorNode;
-
-	// Since this in core, we can't directly reference EditorNode, so it will
-	// set these function pointers in its constructor.
-	typedef void (*EditorPluginRegisterFunc)(const StringName &p_class_name);
-	static inline EditorPluginRegisterFunc editor_node_add_plugin = nullptr;
-	static inline EditorPluginRegisterFunc editor_node_remove_plugin = nullptr;
-
-public:
-	static void add_extension_class(const StringName &p_class_name);
-	static void remove_extension_class(const StringName &p_class_name);
-
-	static const Vector<StringName> &get_extension_classes() {
-		return extension_classes;
-	}
-};
-
-class GDExtensionEditorHelp {
-protected:
-	friend class EditorHelp;
-
-	// Similarly to EditorNode above, we need to be able to ask EditorHelp to parse
-	// new documentation data. Note though that, differently from EditorHelp, this
-	// is initialized even _before_ it gets instantiated, as we need to rely on
-	// this method while initializing the engine.
-	typedef void (*EditorHelpLoadXmlBufferFunc)(const uint8_t *p_buffer, int p_size);
-	static inline EditorHelpLoadXmlBufferFunc editor_help_load_xml_buffer = nullptr;
-
-	typedef void (*EditorHelpRemoveClassFunc)(const String &p_class);
-	static inline EditorHelpRemoveClassFunc editor_help_remove_class = nullptr;
-
-public:
-	static void load_xml_buffer(const uint8_t *p_buffer, int p_size);
-	static void remove_class(const String &p_class);
-};
-
-#endif // TOOLS_ENABLED

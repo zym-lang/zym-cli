@@ -72,20 +72,10 @@ subject to the following restrictions:
 //#define USE_X86_64_ASM
 // -- GODOT end --
 
-#ifdef DEBUG_ENABLED
-#define CHULL_ASSERT(m_cond)                                     \
-	if constexpr (true) {                                        \
-		if (unlikely(!(m_cond))) {                               \
-			ERR_PRINT("Assertion \"" _STR(m_cond) "\" failed."); \
-		}                                                        \
-	} else                                                       \
-		((void)0)
-#else
 #define CHULL_ASSERT(m_cond) \
 	if constexpr (true) {    \
 	} else                   \
 		((void)0)
-#endif
 
 #if defined(DEBUG_CONVEX_HULL) || defined(SHOW_ITERATIONS)
 #include <cstdio>

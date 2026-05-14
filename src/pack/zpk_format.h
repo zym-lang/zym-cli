@@ -43,8 +43,9 @@ typedef enum {
     ZPK_KIND_ENTRY_SOURCE    = 0x01, // .zym source, compiled-on-load entry
     ZPK_KIND_ENTRY_BYTECODE  = 0x02, // .zbc, used as program entry
     ZPK_KIND_SOURCE_MAP      = 0x03, // optional debug pairing
-    ZPK_KIND_ASSET           = 0x04, // arbitrary bytes by name (no text/blob distinction)
-    // 0x05..0x7E reserved for future Zym use. Custom encoding/sub-kind
+    ZPK_KIND_FILE            = 0x04, // named, path-addressable content (filesystem-ish)
+    ZPK_KIND_BLOB            = 0x05, // opaque bytes by id; no path semantics
+    // 0x06..0x7E reserved for future Zym use. Custom encoding/sub-kind
     // information for an entry is carried in the per-entry `custom`
     // u32 (4 bytes of bitflags / tag space) and `flags` u16, which the
     // writer forwards verbatim. New first-class kinds will only be

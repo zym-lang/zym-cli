@@ -126,30 +126,6 @@ int Script::get_script_method_argument_count(const StringName &p_method, bool *r
 	return mi.arguments.size();
 }
 
-#ifdef TOOLS_ENABLED
-
-PropertyInfo Script::get_class_category() const {
-	String path = get_path();
-	String scr_name;
-
-	if (is_built_in()) {
-		if (get_name().is_empty()) {
-			scr_name = TTR("Built-in script");
-		} else {
-			scr_name = vformat("%s (%s)", get_name(), TTR("Built-in"));
-		}
-	} else {
-		if (get_name().is_empty()) {
-			scr_name = path.get_file();
-		} else {
-			scr_name = get_name();
-		}
-	}
-
-	return PropertyInfo(Variant::NIL, scr_name, PROPERTY_HINT_NONE, path, PROPERTY_USAGE_CATEGORY);
-}
-
-#endif // TOOLS_ENABLED
 
 void Script::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("can_instantiate"), &Script::can_instantiate);
@@ -181,31 +157,7 @@ void Script::_bind_methods() {
 }
 
 void Script::reload_from_file() {
-#ifdef TOOLS_ENABLED
-	// Replicates how the ScriptEditor reloads script resources, which generally handles it.
-	// However, when scripts are to be reloaded but aren't open in the internal editor, we go through here instead.
-	const Ref<Script> rel = ResourceLoader::load(ResourceLoader::path_remap(get_path()), get_class(), ResourceFormatLoader::CACHE_MODE_IGNORE);
-	if (rel.is_null()) {
-		return;
-	}
-
-	set_source_code(rel->get_source_code());
-	set_last_modified_time(rel->get_last_modified_time());
-
-	// Only reload the script when there are no compilation errors to prevent printing the error messages twice.
-	if (rel->is_valid()) {
-		if (Engine::get_singleton()->is_editor_hint() && is_tool()) {
-			get_language()->reload_tool_script(this, true);
-		} else {
-			// It's important to set p_keep_state to true in order to manage reloading scripts
-			// that are currently instantiated.
-			reload(true);
-		}
-	}
-
-#else
 	Resource::reload_from_file();
-#endif
 }
 
 void ScriptServer::set_scripting_enabled(bool p_enabled) {
@@ -790,15 +742,7 @@ bool PlaceHolderScriptInstance::has_method(const StringName &p_method) const {
 
 Variant PlaceHolderScriptInstance::callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
 	r_error.error = Callable::CallError::CALL_ERROR_INVALID_METHOD;
-#if TOOLS_ENABLED
-	if (Engine::get_singleton()->is_editor_hint()) {
-		return String("Attempt to call a method on a placeholder instance. Check if the script is in tool mode.");
-	} else {
-		return String("Attempt to call a method on a placeholder instance. Probably a bug, please report.");
-	}
-#else
 	return Variant();
-#endif // TOOLS_ENABLED
 }
 
 void PlaceHolderScriptInstance::update(const List<PropertyInfo> &p_properties, const HashMap<StringName, Variant> &p_values) {

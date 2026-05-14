@@ -39,11 +39,7 @@
 		break;                                                        \
 	}
 
-#ifdef DEBUG_ENABLED
-#define SORT_ARRAY_VALIDATE_ENABLED true
-#else
 #define SORT_ARRAY_VALIDATE_ENABLED false
-#endif
 
 template <typename T, typename Comparator = Comparator<T>, bool Validate = SORT_ARRAY_VALIDATE_ENABLED>
 class SortArray {

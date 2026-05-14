@@ -161,12 +161,6 @@ public:
 	virtual void set_source_code(const String &p_code) = 0;
 	virtual Error reload(bool p_keep_state = false) = 0;
 
-#ifdef TOOLS_ENABLED
-	virtual StringName get_doc_class_name() const = 0;
-	virtual Vector<DocData::ClassDoc> get_documentation() const = 0;
-	virtual String get_class_icon_path() const = 0;
-	virtual PropertyInfo get_class_category() const;
-#endif // TOOLS_ENABLED
 
 	// TODO: In the next compat breakage rename to `*_script_*` to disambiguate from `Object::has_method()`.
 	virtual bool has_method(const StringName &p_method) const = 0;

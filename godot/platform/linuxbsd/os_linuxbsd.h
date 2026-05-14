@@ -32,29 +32,11 @@
 
 #include "crash_handler_linuxbsd.h"
 
-#include "core/input/input.h"
 #include "drivers/unix/os_unix.h"
-// zym: servers/* and input/sound/rendering drivers removed.
-
-#ifdef FONTCONFIG_ENABLED
-#ifdef SOWRAP_ENABLED
-#include "fontconfig-so_wrap.h"
-#else
-#include <fontconfig/fontconfig.h>
-#endif
-#endif
+// zym: servers/*, input/*, sound/rendering drivers removed.
 
 class OS_LinuxBSD : public OS_Unix {
 	virtual void delete_main_loop() override;
-
-#ifdef FONTCONFIG_ENABLED
-	bool font_config_initialized = false;
-	FcConfig *config = nullptr;
-	FcObjectSet *object_set = nullptr;
-
-	int _weight_to_fc(int p_weight) const;
-	int _stretch_to_fc(int p_stretch) const;
-#endif
 
 	CrashHandler crash_handler;
 
@@ -71,7 +53,7 @@ protected:
 	virtual void initialize() override;
 	virtual void finalize() override;
 
-	virtual void initialize_joypads() override;
+	virtual void initialize_joypads() override {}
 
 	virtual void set_main_loop(MainLoop *p_main_loop) override;
 
@@ -117,10 +99,6 @@ public:
 
 	virtual String get_system_ca_certificates() override;
 
-#ifdef TOOLS_ENABLED
-	virtual bool _test_create_rendering_device_and_gl(const String &p_display_driver) const override;
-	virtual bool _test_create_rendering_device(const String &p_display_driver) const override;
-#endif
 
 	OS_LinuxBSD();
 	~OS_LinuxBSD();

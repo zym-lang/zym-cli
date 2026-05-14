@@ -60,10 +60,6 @@ GDExtensionManager::LoadStatus GDExtensionManager::_load_extension_internal(cons
 }
 
 void GDExtensionManager::_finish_load_extension(const Ref<GDExtension> &p_extension) {
-#ifdef TOOLS_ENABLED
-	// Signals that a new extension is loaded so GDScript can register new class names.
-	emit_signal("extension_loaded", p_extension);
-#endif
 
 	if (startup_callback_called) {
 		// Extension is loading after the startup callback has already been called,
@@ -75,10 +71,6 @@ void GDExtensionManager::_finish_load_extension(const Ref<GDExtension> &p_extens
 }
 
 GDExtensionManager::LoadStatus GDExtensionManager::_unload_extension_internal(const Ref<GDExtension> &p_extension) {
-#ifdef TOOLS_ENABLED
-	// Signals that a new extension is unloading so GDScript can unregister class names.
-	emit_signal("extension_unloading", p_extension);
-#endif
 
 	if (!shutdown_callback_called) {
 		// Extension is unloading before the shutdown callback has been called,
@@ -152,58 +144,7 @@ GDExtensionManager::LoadStatus GDExtensionManager::load_extension_with_loader(co
 }
 
 GDExtensionManager::LoadStatus GDExtensionManager::reload_extension(const String &p_path) {
-#ifndef TOOLS_ENABLED
 	ERR_FAIL_V_MSG(LOAD_STATUS_FAILED, "GDExtensions can only be reloaded in an editor build.");
-#else
-	ERR_FAIL_COND_V_MSG(!Engine::get_singleton()->is_extension_reloading_enabled(), LOAD_STATUS_FAILED, "GDExtension reloading is disabled.");
-
-	if (Engine::get_singleton()->is_recovery_mode_hint()) {
-		return LOAD_STATUS_FAILED;
-	}
-
-	if (!gdextension_map.has(p_path)) {
-		return LOAD_STATUS_NOT_LOADED;
-	}
-
-	Ref<GDExtension> extension = gdextension_map[p_path];
-	ERR_FAIL_COND_V_MSG(!extension->is_reloadable(), LOAD_STATUS_FAILED, vformat("This GDExtension is not marked as 'reloadable' or doesn't support reloading: %s.", p_path));
-
-	LoadStatus status;
-
-	extension->prepare_reload();
-
-	// Unload library if it's open. It may not be open if the developer made a
-	// change that broke loading in a previous hot-reload attempt.
-	if (extension->is_library_open()) {
-		status = _unload_extension_internal(extension);
-		if (status != LOAD_STATUS_OK) {
-			// We need to clear these no matter what.
-			extension->clear_instance_bindings();
-			return status;
-		}
-
-		extension->clear_instance_bindings();
-		extension->close_library();
-	}
-
-	Error err = extension->open_library(p_path, extension->loader);
-	if (err != OK) {
-		return LOAD_STATUS_FAILED;
-	}
-
-	status = _load_extension_internal(extension, false);
-	if (status != LOAD_STATUS_OK) {
-		return status;
-	}
-
-	extension->finish_reload();
-
-	// Needs to come after reload is fully finished, so all objects using
-	// extension classes are in a consistent state.
-	_finish_load_extension(extension);
-
-	return LOAD_STATUS_OK;
-#endif
 }
 
 GDExtensionManager::LoadStatus GDExtensionManager::unload_extension(const String &p_path) {
@@ -286,35 +227,6 @@ void GDExtensionManager::deinitialize_extensions(GDExtension::InitializationLeve
 	level = int32_t(p_level) - 1;
 }
 
-#ifdef TOOLS_ENABLED
-void GDExtensionManager::track_instance_binding(void *p_token, Object *p_object) {
-	for (KeyValue<String, Ref<GDExtension>> &E : gdextension_map) {
-		if (E.value.ptr() == p_token) {
-			if (E.value->is_reloadable()) {
-				E.value->track_instance_binding(p_object);
-				return;
-			}
-		}
-	}
-}
-
-void GDExtensionManager::untrack_instance_binding(void *p_token, Object *p_object) {
-	for (KeyValue<String, Ref<GDExtension>> &E : gdextension_map) {
-		if (E.value.ptr() == p_token) {
-			if (E.value->is_reloadable()) {
-				E.value->untrack_instance_binding(p_object);
-				return;
-			}
-		}
-	}
-}
-
-void GDExtensionManager::_reload_all_scripts() {
-	for (int i = 0; i < ScriptServer::get_language_count(); i++) {
-		ScriptServer::get_language(i)->reload_all_scripts();
-	}
-}
-#endif // TOOLS_ENABLED
 
 void GDExtensionManager::load_extensions() {
 	if (Engine::get_singleton()->is_recovery_mode_hint()) {
@@ -334,29 +246,6 @@ void GDExtensionManager::load_extensions() {
 }
 
 void GDExtensionManager::reload_extensions() {
-#ifdef TOOLS_ENABLED
-	if (Engine::get_singleton()->is_recovery_mode_hint()) {
-		return;
-	}
-	bool reloaded = false;
-	for (const KeyValue<String, Ref<GDExtension>> &E : gdextension_map) {
-		if (!E.value->is_reloadable()) {
-			continue;
-		}
-
-		if (E.value->has_library_changed()) {
-			reloaded = true;
-			reload_extension(E.value->get_path());
-		}
-	}
-
-	if (reloaded) {
-		emit_signal("extensions_reloaded");
-
-		// Reload all scripts to clear out old references.
-		callable_mp_static(&GDExtensionManager::_reload_all_scripts).call_deferred();
-	}
-#endif
 }
 
 bool GDExtensionManager::ensure_extensions_loaded(const HashSet<String> &p_extensions) {
@@ -412,15 +301,6 @@ bool GDExtensionManager::ensure_extensions_loaded(const HashSet<String> &p_exten
 		}
 	}
 
-#ifdef TOOLS_ENABLED
-	if (extensions_added.size() || extensions_removed.size()) {
-		// Emitting extensions_reloaded so EditorNode can reload Inspector and regenerate documentation.
-		emit_signal("extensions_reloaded");
-
-		// Reload all scripts to clear out old references.
-		callable_mp_static(&GDExtensionManager::_reload_all_scripts).call_deferred();
-	}
-#endif
 
 	return needs_restart;
 }

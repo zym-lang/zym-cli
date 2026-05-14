@@ -36,6 +36,7 @@
 #include "core/variant/variant.h"
 
 #include "natives.hpp"
+#include "../boot/register_core.hpp"
 
 extern ZymValue makeBufferInstance(ZymVM* vm, const PackedByteArray& src);
 extern bool zymExtractCryptoKey(ZymVM* vm, ZymValue v, Ref<CryptoKey>* out);
@@ -1065,6 +1066,11 @@ static Ref<TLSOptions> buildClientOpts(ZymVM* vm, ZymValue optsV) {
 }
 
 static ZymValue f_tlsConnect(ZymVM* vm, ZymValue, ZymValue hostV, ZymValue portV, ZymValue* vargs, int vargc) {
+    // Lazy system-CA load: TLS clients without an explicit `trustedRoots`
+    // depend on `default_certs` being populated, or `init_client` returns
+    // `ERR_UNCONFIGURED`. See src/boot/register_core.cpp for why this is
+    // deferred from boot.
+    zym::boot::ensure_default_certificates_loaded();
     String host;  if (!reqStr(vm, hostV, "TLS.connect(host, port, ...)", &host)) return ZYM_ERROR;
     double portD; if (!reqNum(vm, portV, "TLS.connect(host, port, ...)", &portD)) return ZYM_ERROR;
     int64_t timeoutMs = -1;
@@ -1126,6 +1132,7 @@ static ZymValue f_tlsConnect(ZymVM* vm, ZymValue, ZymValue hostV, ZymValue portV
 // server side. Used by server-side TLS code; opts must be a server-side
 // TLSOptions with key + cert. The factory mirrors `TLS.connect` shape.
 static ZymValue f_tlsAccept(ZymVM* vm, ZymValue, ZymValue baseV, ZymValue optsV, ZymValue* vargs, int vargc) {
+    zym::boot::ensure_default_certificates_loaded();
     if (!zym_isMap(baseV)) { zym_runtimeError(vm, "TLS.accept(tcp, opts, ...): tcp must be a TCP socket"); return ZYM_ERROR; }
     ZymValue ctx = zym_mapGet(vm, baseV, "__tcp__");
     if (ctx == ZYM_ERROR) { zym_runtimeError(vm, "TLS.accept(tcp, opts, ...): tcp must be a TCP socket"); return ZYM_ERROR; }
@@ -1414,6 +1421,7 @@ static bool driveDtlsHandshake(Ref<PacketPeerDTLS> dtls, int64_t timeoutMs) {
 // DTLS.connect(host, port, [timeoutMs, opts]) — binds an ephemeral UDP and
 // runs the client-side handshake.
 static ZymValue f_dtlsConnect(ZymVM* vm, ZymValue, ZymValue hostV, ZymValue portV, ZymValue* vargs, int vargc) {
+    zym::boot::ensure_default_certificates_loaded();
     String host;  if (!reqStr(vm, hostV, "DTLS.connect(host, port, ...)", &host)) return ZYM_ERROR;
     double portD; if (!reqNum(vm, portV, "DTLS.connect(host, port, ...)", &portD)) return ZYM_ERROR;
     int64_t timeoutMs = -1;
@@ -1442,6 +1450,7 @@ static ZymValue f_dtlsConnect(ZymVM* vm, ZymValue, ZymValue hostV, ZymValue port
 // (e.g. for source-port pinning, multicast). The supplied UDP must be unbound
 // or only locally bound; we set its destination via connect_to_host.
 static ZymValue f_dtlsConnectFrom(ZymVM* vm, ZymValue, ZymValue udpV, ZymValue hostV, ZymValue portV, ZymValue* vargs, int vargc) {
+    zym::boot::ensure_default_certificates_loaded();
     if (!zym_isMap(udpV)) { zym_runtimeError(vm, "DTLS.connectFrom(udp, host, port, ...): udp must be a UDP socket"); return ZYM_ERROR; }
     ZymValue uctx = zym_mapGet(vm, udpV, "__udp__");
     if (uctx == ZYM_ERROR) { zym_runtimeError(vm, "DTLS.connectFrom: udp must be a UDP socket from UDP.bind / UDP.listen accept"); return ZYM_ERROR; }
@@ -1482,6 +1491,7 @@ static ZymValue f_dtlsConnectFrom(ZymVM* vm, ZymValue, ZymValue udpV, ZymValue h
 //   - returns the first DTLS peer that reaches CONNECTED, or null on timeout.
 // DTLSServer is server-side wrapping plumbing only -- not exposed to scripts.
 static ZymValue f_dtlsAccept(ZymVM* vm, ZymValue, ZymValue srvV, ZymValue optsV, ZymValue* vargs, int vargc) {
+    zym::boot::ensure_default_certificates_loaded();
     if (!zym_isMap(srvV)) { zym_runtimeError(vm, "DTLS.accept(udpServer, opts, ...): udpServer must be a UDP.listen() handle"); return ZYM_ERROR; }
     ZymValue sctx = zym_mapGet(vm, srvV, "__udps__");
     if (sctx == ZYM_ERROR) { zym_runtimeError(vm, "DTLS.accept: first arg must be a UDP server (UDP.listen(host, port))"); return ZYM_ERROR; }

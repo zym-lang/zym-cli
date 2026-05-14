@@ -99,11 +99,7 @@ public:
 			num_items++;
 			return id;
 		}
-#ifdef DEV_ENABLED
-		return -1;
-#else
 		ERR_FAIL_V_MSG(0, "BVH request_item error.");
-#endif
 	}
 };
 

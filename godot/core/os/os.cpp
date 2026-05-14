@@ -34,7 +34,6 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/json.h"
-#include "core/os/midi_driver.h"
 #include "core/version_generated.gen.h"
 
 #include <cstdarg>
@@ -473,37 +472,13 @@ bool OS::has_feature(const String &p_feature) {
 		return _writing_movie;
 	}
 
-#ifdef DEBUG_ENABLED
-	if (p_feature == "debug") {
-		return true;
-	}
-#endif // DEBUG_ENABLED
 
-#ifdef TOOLS_ENABLED
-	if (p_feature == "editor") {
-		return true;
-	}
-	if (p_feature == "editor_hint") {
-		return _in_editor;
-	} else if (p_feature == "editor_runtime") {
-		return !_in_editor;
-	} else if (p_feature == "embedded_in_editor") {
-		return _embedded_in_editor;
-	}
-#else
 	if (p_feature == "template") {
 		return true;
 	}
-#ifdef DEBUG_ENABLED
-	if (p_feature == "template_debug") {
-		return true;
-	}
-#else
 	if (p_feature == "template_release" || p_feature == "release") {
 		return true;
 	}
-#endif // DEBUG_ENABLED
-#endif // TOOLS_ENABLED
 
 #ifdef REAL_T_IS_DOUBLE
 	if (p_feature == "double") {
@@ -658,28 +633,16 @@ List<String> OS::get_restart_on_exit_arguments() const {
 }
 
 PackedStringArray OS::get_connected_midi_inputs() {
-	if (MIDIDriver::get_singleton()) {
-		return MIDIDriver::get_singleton()->get_connected_inputs();
-	}
-
-	PackedStringArray list;
-	ERR_FAIL_V_MSG(list, vformat("MIDI input isn't supported on %s.", OS::get_singleton()->get_name()));
+	// zym: MIDI nuked along with core/input.
+	return PackedStringArray();
 }
 
 void OS::open_midi_inputs() {
-	if (MIDIDriver::get_singleton()) {
-		MIDIDriver::get_singleton()->open();
-	} else {
-		ERR_PRINT(vformat("MIDI input isn't supported on %s.", OS::get_singleton()->get_name()));
-	}
+	// zym: MIDI nuked along with core/input.
 }
 
 void OS::close_midi_inputs() {
-	if (MIDIDriver::get_singleton()) {
-		MIDIDriver::get_singleton()->close();
-	} else {
-		ERR_PRINT(vformat("MIDI input isn't supported on %s.", OS::get_singleton()->get_name()));
-	}
+	// zym: MIDI nuked along with core/input.
 }
 
 uint64_t OS::get_frame_delay(bool p_can_draw) const {
@@ -766,59 +729,11 @@ String OS::get_benchmark_file() {
 }
 
 void OS::benchmark_begin_measure(const String &p_context, const String &p_what) {
-#ifdef TOOLS_ENABLED
-	Pair<String, String> mark_key(p_context, p_what);
-	ERR_FAIL_COND_MSG(benchmark_marks_from.has(mark_key), vformat("Benchmark key '%s:%s' already exists.", p_context, p_what));
-
-	benchmark_marks_from[mark_key] = OS::get_singleton()->get_ticks_usec();
-#endif
 }
 void OS::benchmark_end_measure(const String &p_context, const String &p_what) {
-#ifdef TOOLS_ENABLED
-	Pair<String, String> mark_key(p_context, p_what);
-	ERR_FAIL_COND_MSG(!benchmark_marks_from.has(mark_key), vformat("Benchmark key '%s:%s' doesn't exist.", p_context, p_what));
-
-	uint64_t total = OS::get_singleton()->get_ticks_usec() - benchmark_marks_from[mark_key];
-	double total_f = double(total) / double(1000000);
-	benchmark_marks_final[mark_key] = total_f;
-#endif
 }
 
 void OS::benchmark_dump() {
-#ifdef TOOLS_ENABLED
-	if (!use_benchmark) {
-		return;
-	}
-
-	if (!benchmark_file.is_empty()) {
-		Ref<FileAccess> f = FileAccess::open(benchmark_file, FileAccess::WRITE);
-		if (f.is_valid()) {
-			Dictionary benchmark_marks;
-			for (const KeyValue<Pair<String, String>, double> &E : benchmark_marks_final) {
-				const String mark_key = vformat("[%s] %s", E.key.first, E.key.second);
-				benchmark_marks[mark_key] = E.value;
-			}
-
-			Ref<JSON> json;
-			json.instantiate();
-			f->store_string(json->stringify(benchmark_marks, "\t", false, true));
-		}
-	} else {
-		HashMap<String, String> results;
-		for (const KeyValue<Pair<String, String>, double> &E : benchmark_marks_final) {
-			if (E.key.first == "Startup" && !results.has(E.key.first)) {
-				results.insert(E.key.first, "", true); // Hack to make sure "Startup" always comes first.
-			}
-
-			results[E.key.first] += vformat("\t\t- %s: %.3f msec.\n", E.key.second, (E.value * 1000));
-		}
-
-		print_line("BENCHMARK:");
-		for (const KeyValue<String, String> &E : results) {
-			print_line(vformat("\t[%s]\n%s", E.key, E.value));
-		}
-	}
-#endif
 }
 
 OS::OS() {

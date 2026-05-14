@@ -185,11 +185,6 @@ private:
 
 		while (true) {
 			if (_metadata[meta_idx].hash == EMPTY_HASH) {
-#ifdef DEV_ENABLED
-				if (unlikely(distance > 12)) {
-					WARN_PRINT("Excessive collision count, is the right hash function being used?");
-				}
-#endif
 				_metadata[meta_idx] = metadata;
 				return meta_idx;
 			}

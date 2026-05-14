@@ -39,7 +39,7 @@ whether byte 0 is your payload or the stub's ELF/PE/Mach‑O header.
 +---------------------------------------------------------+
 | Data region                                             |
 |   - program entry (entry_source or entry_bytecode)      |
-|   - assets (arbitrary bytes by name)                    |
+|   - files / blobs (named content or opaque bytes)       |
 |   - source maps (optional, paired by name)              |
 +---------------------------------------------------------+
 | String table (UTF-8, no NUL terminators required)       |
@@ -164,8 +164,9 @@ points at. `kind` and `entry_index` are orthogonal.
 | `0x01` | `ENTRY_SOURCE`   | Raw `.zym` source suitable for use as the program entry point. The runtime loader compiles it on boot and runs the resulting chunk. Module imports are resolved from disk only (not from inside the bundle). Mutually exclusive with `ENTRY_BYTECODE` as the program entry. |
 | `0x02` | `ENTRY_BYTECODE` | A `.zbc` bytecode module suitable for use as the program entry point. Must be the kind of the entry indexed by `entry_index` when the program entry is bytecode. |
 | `0x03` | `SOURCE_MAP`     | Optional debug information paired with a bytecode entry. The pairing is by name (e.g. entry `"foo"` → source map `"foo.map"`); the loader is free to ignore source maps it does not consume. |
-| `0x04` | `ASSET`          | Arbitrary bytes addressable by name. The single asset kind — there is no separate text/blob distinction. Consumers that need to discriminate sub-kinds of assets do so via the per-entry `flags` / `custom` fields, which the writer forwards verbatim. |
-| `0x05 .. 0x7E` | _reserved_ | Reserved for future Zym use. New first-class kinds will only be added here when they need their own on-disk semantics; encoding hints / sub-kind tags for existing kinds belong in the per-entry `custom` u32 (4 bytes of bitflag / tag space) or `flags` u16. |
+| `0x04` | `FILE`           | A named, path-like resource intended to be addressed by name and consumed as a coherent unit — analogous to a file in a filesystem. Names are expected to be normalized paths (forward slashes, no leading `/`, no `..` — see *String table* below). Typical uses: configuration, templates, scripts loaded by name, embedded sub-`.zym` modules, text or binary content that a script looks up via a path-shaped name. |
+| `0x05` | `BLOB`           | Opaque, id-addressed bytes whose meaning is determined by the producer/consumer pair, not by the bundle. No path semantics — the name (if any) is a symbolic identifier rather than a path. Typical uses: binary handoff between cooperating scripts, attached signatures, embedded `.zbc` modules loaded into an in-process VM, ML weights, anything that's "just bytes by id." Encoding / sub-kind discrimination (e.g. `image/png`, `application/octet-stream`) belongs in the per-entry `custom` u32 or `flags` u16. |
+| `0x06 .. 0x7E` | _reserved_ | Reserved for future Zym use. New first-class kinds will only be added here when they need their own on-disk semantics; encoding hints / sub-kind tags for existing kinds belong in the per-entry `custom` u32 (4 bytes of bitflag / tag space) or `flags` u16. |
 | `0x7F .. 0xFF` | `USER_*`   | Free for user/plugin use. The runtime ignores entries with user kinds; scripts may consume them via the `pack.*` API. |
 
 A reader **must not** treat unknown `kind` values as errors — it must
@@ -343,4 +344,4 @@ versions may give them meaning; readers must not interpret them.
 - Manifest entry: bytes `12..15` (`reserved`), `flags` bits `2..15`.
 - Compression values other than `0` and `1` (until activated by a
   later version of this document).
-- Entry kinds `0x05..0x7E`.
+- Entry kinds `0x06..0x7E`.

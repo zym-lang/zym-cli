@@ -26,6 +26,7 @@
 #include "core/templates/vector.h"
 
 #include "natives.hpp"
+#include "../boot/register_core.hpp"
 
 // Provided by buffer.cpp; used to return Buffer instances and to accept
 // Buffer values from script callers.
@@ -393,18 +394,24 @@ static ZymValue makeCryptoInstance(ZymVM* vm, Ref<Crypto> c) {
 // ---- Crypto global (statics) ----
 
 static ZymValue f_create(ZymVM* vm, ZymValue) {
+    // Trigger lazy system-CA load on first Crypto use. See
+    // src/boot/register_core.cpp for the rationale (Windows/Wine
+    // ~0.5-2s startup stall deferred until actually needed).
+    zym::boot::ensure_default_certificates_loaded();
     Ref<Crypto> c = Ref<Crypto>(Crypto::create());
     if (c.is_null()) return zym_newNull();
     return makeCryptoInstance(vm, c);
 }
 
 static ZymValue f_cryptoKey(ZymVM* vm, ZymValue) {
+    zym::boot::ensure_default_certificates_loaded();
     Ref<CryptoKey> k = Ref<CryptoKey>(CryptoKey::create());
     if (k.is_null()) return zym_newNull();
     return makeCryptoKeyInstance(vm, k);
 }
 
 static ZymValue f_x509Certificate(ZymVM* vm, ZymValue) {
+    zym::boot::ensure_default_certificates_loaded();
     Ref<X509Certificate> x = Ref<X509Certificate>(X509Certificate::create());
     if (x.is_null()) return zym_newNull();
     return makeX509Instance(vm, x);

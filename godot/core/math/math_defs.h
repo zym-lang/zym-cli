@@ -53,9 +53,6 @@ inline constexpr double NaN = std::numeric_limits<double>::quiet_NaN();
 #define CMP_NORMALIZE_TOLERANCE 0.000001
 #define CMP_POINT_IN_PLANE_EPSILON 0.00001
 
-#ifdef DEBUG_ENABLED
-#define MATH_CHECKS
-#endif
 
 //this epsilon is for values related to a unit size (scalar or vector len)
 #ifdef PRECISE_MATH_CHECKS

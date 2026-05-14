@@ -44,9 +44,6 @@ class [[nodiscard]] StringName {
 		SafeRefCount refcount;
 		SafeNumeric<uint32_t> static_count;
 		String name;
-#ifdef DEBUG_ENABLED
-		uint32_t debug_references = 0;
-#endif
 
 		uint32_t hash = 0;
 		_Data *prev = nullptr;
@@ -63,15 +60,6 @@ class [[nodiscard]] StringName {
 	static void cleanup();
 	static uint32_t get_empty_hash();
 	static inline bool configured = false;
-#ifdef DEBUG_ENABLED
-	struct DebugSortReferences {
-		bool operator()(const _Data *p_left, const _Data *p_right) const {
-			return p_left->debug_references > p_right->debug_references;
-		}
-	};
-
-	static inline bool debug_stringname = false;
-#endif
 
 	StringName(_Data *p_data) { _data = p_data; }
 
@@ -183,9 +171,6 @@ public:
 		}
 	}
 
-#ifdef DEBUG_ENABLED
-	static void set_debug_stringnames(bool p_enable) { debug_stringname = p_enable; }
-#endif
 };
 
 // Zero-constructing StringName initializes _data to nullptr (and thus empty).

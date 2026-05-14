@@ -28,26 +28,38 @@ This matches the policy used by every other grantable native and by
 // --- assembling bundles ---
 Pack.build(spec) -> bool
 
-// --- the self bundle (the one this process was launched from) ---
-Pack.hasSelf()             -> bool
-Pack.entryName()           -> string | null
-Pack.list()                -> [entryInfo, ...] | null
-Pack.has(name)             -> bool
-Pack.open(arg)             -> Buffer | null    // arg: name string or numeric index
-Pack.info(arg)             -> entryInfo | null // arg: name string or numeric index
-Pack.formatVersion()       -> number | null   // null when no self bundle
-Pack.closeSelf()           -> bool
+// --- diagnostics toggle ---
+Pack.setVerboseOutput(verbose) -> bool
 
 // --- arbitrary bundles ---
 var bundle = Pack.openFile(path)      // open from a filesystem path
 var bundle = Pack.openBuffer(buffer)  // open from an in-memory Buffer
 bundle.list()              -> [entryInfo, ...] | null
 bundle.entryName()         -> string | null
+bundle.entryIndex()        -> number | null
 bundle.has(name)           -> bool
 bundle.open(arg)           -> Buffer | null    // arg: name string or numeric index
 bundle.info(arg)           -> entryInfo | null // arg: name string or numeric index
 bundle.formatVersion()     -> number | null    // null after close()
 bundle.close()             -> bool
+
+// --- editing an existing bundle ---
+var edit = Pack.editFile(path)        // open from disk; commit = atomic rename
+var edit = Pack.editBuffer(buffer)    // open from Buffer; commit mutates in place
+edit.list()                -> [entryInfo, ...]    // staged view
+edit.info(arg)             -> entryInfo | null    // arg: name string or index
+edit.entryIndex()          -> number | null
+edit.add(spec)             -> bool
+edit.remove(arg)           -> bool
+edit.replace(arg, spec)    -> bool                // identity-preserving
+edit.rename(arg, newName)  -> bool
+edit.move(srcArg, dstIdx)  -> bool
+edit.setEntryIndex(arg)    -> bool
+edit.setFlags(arg, flags)  -> bool                // flags: number | map
+edit.setCustom(arg, u32)   -> bool
+edit.setStub(arg)          -> bool                // arg: path | Buffer | null
+edit.commit()              -> bool                // single atomic rewrite
+edit.close()               -> bool
 
 // --- inspecting and splicing native binaries ---
 Pack.inspectBin(path)                            -> { ... } | null
@@ -59,14 +71,8 @@ sits on (`zpk_write_bundle`) is itself batch-shaped, so layering a
 streaming builder on top would only re-buffer the same data on the
 script side.
 
-The read API is split into two surfaces:
+The read API is exposed through bundle handles:
 
-- **`Pack.*` self-bundle methods** read from the running executable
-  (or the `.zpk` passed to `zym run`). The reader is opened lazily on
-  the first method call and cached until `Pack.closeSelf()` releases
-  it; the next method call after a close re-opens it on demand. When
-  the running process has no embedded payload, every self-method
-  returns `null` / `false` cheaply (no open is attempted).
 - **`Pack.openFile(path)`** opens an arbitrary `.zpk` (or stub-wrapped
   binary) and returns a bundle handle. The handle caches the parsed
   reader for its lifetime and frees it on `bundle.close()`. After
@@ -83,11 +89,44 @@ The read API is split into two surfaces:
 
 ### Format version
 
-`Pack.formatVersion()` and `bundle.formatVersion()` report the
-on-disk `format_version` of the bundle as a number, or `null` when
-there is nothing to query (no self bundle, or the handle has been
-closed). Useful for tooling such as `zym pack info` that wants to
-print the format level a bundle was written against.
+`bundle.formatVersion()` reports the on-disk `format_version` of the
+bundle as a number, or `null` when the handle has been closed. Useful
+for tooling such as `zym pack info` that wants to print the format
+level a bundle was written against.
+
+### Verbose diagnostics toggle
+
+`Pack.setVerboseOutput(verbose) -> bool` controls whether `Pack`'s
+**speculative** reader probes (the ones used internally by
+`Pack.build`, `Pack.splice`, and `Pack.inspectBin` to sniff whether
+an input file already carries a `.zpk` payload) print diagnostics on
+stderr.
+
+- Default is **quiet** (`false`). The common case for these probes is
+  a fresh native stub with no payload yet, where the reader would
+  otherwise print messages like `zpk: no .zpk payload found (footer
+  magic missing).` — pure noise, since "no payload" is the expected
+  signal these calls are looking for.
+- Pass `true` to opt in to chatty output, e.g. when debugging a
+  pack/splice that isn't producing what you expect.
+- The setting is module-global and persists until changed again.
+- The returned bool is the new value (i.e. the argument, echoed back).
+- Type/shape mistakes (non-bool argument) raise a runtime error.
+
+This switch only governs the **probe** paths. User-facing opens
+(`Pack.openFile`, `Pack.openBuffer`) keep their normal diagnostics
+regardless of this flag, because the script explicitly asked to open
+that bundle and expects feedback when it isn't a valid `.zpk`.
+
+```
+Pack.setVerboseOutput(true);
+Pack.build({
+    output: "dist/app",
+    stub:   "vendor/zym-runtime",
+    entries: [ { name: "main.zbc", kind: "entry_bytecode", data: bc } ]
+});
+Pack.setVerboseOutput(false);
+```
 
 ### `spec` map
 
@@ -99,7 +138,7 @@ print the format level a bundle was written against.
 | `stub`       | string   | no       | none    | Path to a CLI runtime binary to prepend as the executable stub. Ignored when `output` ends in `.zpk`. **If the stub file already carries a ZPK payload, only its native portion is taken — the existing payload is dropped and replaced with the new one.** This means a stub-wrapped binary can be re-packed in place without ever stacking multiple ZPK regions; `Pack` enforces "exactly one ZPK per executable" by construction. No `mode` flag is needed: append-vs-swap is decided by what the stub file actually contains. |
 | `compression`| bool     | no       | `false` | Bundle-wide compression default (zstd). When `true`, every entry is compressed unless it sets `compression: false`. When `false` (or omitted) entries default to uncompressed and opt in with `compression: true`. |
 | `level`      | number   | no       | `3`     | Default zstd level (`1..22`). Per-entry `level` overrides this. Ignored on entries that resolve to uncompressed. `3` matches zstd's own default; `19+` is the "release-build" sweet spot. |
-| `setExecutable` | bool  | no       | `false` | When `true`, mark the output file as executable after writing. **POSIX (Linux/macOS):** adds execute bits mirrored from the read bits, masked by the process umask (matches `chmod +x` honoring umask). **Windows:** silent no-op — executability there is decided by file extension (`.exe`, `.bat`, …) and the PE header, neither of which `Pack` touches. A `chmod` failure on POSIX warns to stderr but does **not** fail the build (the bundle bytes were written successfully; the user can retry the chmod themselves). |
+| `setExecutable` | bool  | no       | `false` | When `true`, mark the output file as executable after writing. The check is on the **host OS running `Pack.build`**, not on the stub's target OS. **POSIX host (Linux/macOS):** adds execute bits mirrored from the read bits, masked by the process umask (matches `chmod +x` honoring umask). Works for any output, including Linux/macOS stubs *and* Windows `.exe` stubs (the bit is harmless on PE files). **Windows host:** silent no-op — the POSIX mode-bit APIs (`chmod`, `S_IXUSR`, …) aren't compiled into the Windows build of `zym`, so this flag has no effect *even when the output is a Linux ELF stub*. A Windows-host build packing a Linux binary will produce a valid ELF with mode `0644`; the user must `chmod +x` it on the Linux target. A `chmod` failure on POSIX warns to stderr but does **not** fail the build (the bundle bytes were written successfully; the user can retry the chmod themselves). |
 
 ### Entry map
 
@@ -109,8 +148,8 @@ Each element of `entries` is a map:
 | ---      | ---      | ---      | ---     | ---                                                                                  |
 | `name`   | string   | no       | unnamed | Logical name stored in the bundle's string table (e.g. `"main.zbc"`).                |
 | `kind`   | string   | yes      | —       | One of the kind strings below.                                                       |
-| `flags`  | number   | no       | `0`     | Per-entry flag bits (forwarded to the on-disk `flags` field).                        |
-| `custom` | number   | no       | `0`     | Free per-kind 32-bit field, forwarded verbatim.                                      |
+| `flags`  | number   | no       | `0`     | Per-entry flag bits (forwarded to the on-disk `flags` field). **16-bit unsigned**; valid range `0..65535` (`0x0000..0xFFFF`). Scripts that don't want to do bit math can just pass a plain number in that range; values outside it are truncated to `uint16_t`. |
+| `custom` | number   | no       | `0`     | Free per-kind 32-bit field, forwarded verbatim. **32-bit unsigned**; valid range `0..4294967295` (`0x00000000..0xFFFFFFFF`). Treat it as either 32 bitflag/tag slots or a plain numeric tag — `Pack` doesn't interpret it. Values outside the range are truncated to `uint32_t`. |
 | `data`   | Buffer   | one of   | —       | In-memory bytes. Use this when the data already lives in script memory.              |
 | `path`   | string   | one of   | —       | Absolute or relative file path. The writer streams this file from disk; the bytes never round-trip through a script-side `Buffer`. |
 | `compression` | bool | no       | (inherits) | Per-entry override of the bundle-wide `compression`. Always wins over the bundle default. |
@@ -157,7 +196,8 @@ The accepted entry kind strings are:
 | `"entry_source"`    | The program entry point's raw source (`.zym`). The runtime loader compiles it on boot, then runs. Only one of `entry_source` / `entry_bytecode` is permitted per bundle. |
 | `"entry_bytecode"`  | The program entry point's compiled bytecode (`.zbc`). The runtime loader deserializes and runs it directly. |
 | `"source_map"`      | A source map for the entry's bytecode (or any other consumer). The pairing is by name; the runtime loader does not consume source maps itself. |
-| `"asset"`           | Arbitrary bytes addressable by name. The single asset kind: text, binary, audio, images, additional `.zbc` blobs read by name, etc. all use this kind. Scripts that need to distinguish sub-kinds of assets among themselves do so via the per-entry `flags` / `custom` fields (the `custom` u32 alone gives 32 bitflag slots / tags), which are forwarded verbatim. |
+| `"file"`            | A named, path-addressable resource consumed as a coherent unit — analogous to a file in a filesystem. Use this for configuration, templates, scripts loaded by name, text or binary content that a script looks up via a path-shaped name. Names should be normalized paths (forward slashes, no leading `/`, no `..`). |
+| `"blob"`            | Opaque, id-addressed bytes whose meaning is determined by the producer/consumer pair. Use this for binary handoff between cooperating scripts, attached signatures, additional `.zbc` modules loaded by a script into an in-process VM, ML weights — anything that's "just bytes by id." Sub-kind discrimination (encoding, MIME, format tag) goes in the per-entry `custom` u32 (32 bitflag/tag slots) or `flags` u16, which the writer forwards verbatim. |
 
 Strings are used (rather than numeric constants) so scripts don't have
 to know the on-disk byte values.
@@ -213,7 +253,7 @@ the entry is `entry_bytecode`, the chunk was compiled ahead of time
 with all of its imports already inlined, so no runtime resolution
 happens at all. If you need a self-contained, no-disk-required
 bundle, compile to `entry_bytecode`. Additional `.zbc` blobs you
-want to read by name from the bundle should be stored as `asset`
+want to read by name from the bundle should be stored as `blob`
 entries (read explicitly via `open(arg)`); they are **not**
 consulted by any import statement.
 
@@ -228,7 +268,7 @@ source-entry bundles to other users.
 
 ## Examples
 
-### Headless `.zpk` with an entry and a named asset blob
+### Headless `.zpk` with an entry and a named blob
 
 ```
 var bytecodeMain = File.readAllBytes("build/main.zbc");
@@ -238,7 +278,7 @@ var ok = Pack.build({
     output: "dist/app.zpk",
     entries: [
         { name: "main.zbc", kind: "entry_bytecode", data: bytecodeMain },
-        { name: "util.zbc", kind: "asset",          data: bytecodeUtil }
+        { name: "util.zbc", kind: "blob",           data: bytecodeUtil }
     ]
 });
 if (!ok) {
@@ -246,9 +286,9 @@ if (!ok) {
 }
 ```
 
-### Stub-wrapped executable, asset streamed from disk
+### Stub-wrapped executable, files streamed from disk
 
-The asset never enters script memory; the writer reads it directly.
+The file contents never enter script memory; the writer reads them directly.
 
 ```
 var bytecode = File.readAllBytes("build/main.zbc");
@@ -259,8 +299,8 @@ var ok = Pack.build({
     entryIndex: 0,
     entries: [
         { name: "main.zbc", kind: "entry_bytecode", data: bytecode },
-        { name: "level1.bin", kind: "asset", path: "assets/level1.bin" },
-        { name: "credits.txt", kind: "asset", path: "assets/credits.txt" }
+        { name: "assets/level1.bin",  kind: "file", path: "assets/level1.bin" },
+        { name: "assets/credits.txt", kind: "file", path: "assets/credits.txt" }
     ]
 });
 ```
@@ -374,11 +414,11 @@ Pack.splice("vendor/zym-runtime-windows-x86_64.exe", "dist/app.zpk", "dist/app.e
 
 ### `entryInfo` map
 
-`Pack.list` / `Pack.info` (and the same methods on a `Pack.openFile`
-handle) return per-entry maps with **every** field of the underlying
-on-disk entry. Fields unused in v1 (compression byte, reserved slots)
-are still surfaced verbatim so scripts can introspect bundles authored
-by future writers without an API churn.
+`bundle.list` / `bundle.info` (on a handle returned by `Pack.openFile`
+or `Pack.openBuffer`) return per-entry maps with **every** field of
+the underlying on-disk entry. Fields unused in v1 (compression byte,
+reserved slots) are still surfaced verbatim so scripts can introspect
+bundles authored by future writers without an API churn.
 
 | Key                | Type     | Notes                                                                                  |
 | ---                | ---      | ---                                                                                    |
@@ -404,8 +444,8 @@ by future writers without an API churn.
 
 ### `open(arg)` / `info(arg)` — name or numeric index
 
-`Pack.open`, `Pack.info`, `bundle.open`, and `bundle.info` all accept
-either a **string** entry name or a **numeric** manifest index:
+`bundle.open` and `bundle.info` both accept either a **string** entry
+name or a **numeric** manifest index:
 
 - `open("main.zbc")` / `info("main.zbc")` — looks up the first entry
   whose name matches. Returns `null` if no entry has that name.
@@ -415,41 +455,22 @@ either a **string** entry name or a **numeric** manifest index:
 Bundles may legally contain multiple entries that share the same
 name (each manifest slot is independent). When that happens the
 string form resolves to the first match only — use the numeric index
-to address any subsequent entry. `Pack.list()` (and `bundle.list()`)
-return entries in manifest order, so a typical pattern is to walk
-`list()` to find duplicates and then call `open(index)` / `info(index)`
-on the specific entries you care about. The single-arg `verify(arg)`
-on both surfaces follows the same string/number dispatch.
+to address any subsequent entry. `bundle.list()` returns entries in
+manifest order, so a typical pattern is to walk `list()` to find
+duplicates and then call `open(index)` / `info(index)` on the
+specific entries you care about. The single-arg `verify(arg)` on the
+handle follows the same string/number dispatch.
 
-### Self-bundle vs. `openFile` lifecycle
+### Handle lifecycle
 
-- The self-bundle methods (`Pack.hasSelf`, `Pack.entryName`, `Pack.list`,
-  `Pack.has`, `Pack.open`, `Pack.info`) lazily open
-  the running executable's reader on the first call and keep it
-  cached. `Pack.closeSelf()` returns `true` if a cached reader was
-  released (and `false` if there was nothing to close). The very next
-  self-method call after a close will re-open the reader on demand.
-- `Pack.openFile(path)` returns a bundle handle on success and `null`
-  if the file is not a valid bundle. Each handle owns its own reader,
-  cached until `bundle.close()` is called. After close, every method
-  on the handle returns `null` / `false`. Forgetting to call `close()`
-  is not a leak — a GC finalizer closes the reader when the handle is
-  collected — but the explicit `close()` is the recommended pattern
-  because it bounds memory use the moment the script is done.
-
-### Reading the self bundle
-
-```
-if (Pack.hasSelf()) {
-    var entryName = Pack.entryName();
-    var list      = Pack.list();
-    if (Pack.has("config.json")) {
-        var bytes = Pack.open("config.json");
-        // bytes is a Buffer; bytes.toString() decodes as UTF-8.
-    }
-    Pack.closeSelf();
-}
-```
+`Pack.openFile(path)` (and `Pack.openBuffer(buffer)`) returns a bundle
+handle on success and `null` if the input is not a valid bundle. Each
+handle owns its own reader, cached until `bundle.close()` is called.
+After close, every method on the handle returns `null` / `false`.
+Forgetting to call `close()` is not a leak — a GC finalizer closes
+the reader when the handle is collected — but the explicit `close()`
+is the recommended pattern because it bounds memory use the moment
+the script is done.
 
 ### Reading an arbitrary bundle
 
@@ -474,18 +495,18 @@ Every bundle stores three independent CRC-32s — one over the footer,
 one over the manifest table (entries plus the string table), and one
 per entry over its on-disk bytes. The footer CRC is enforced when a
 bundle is opened: a bundle with a bad footer CRC is rejected, so
-`Pack.openFile` returns `null` and `Pack.hasSelf()` returns `false`.
-The manifest CRC and per-entry data CRCs are not enforced at open
-time — they're surfaced through `verify()` so scripts can decide what
-to do on mismatch.
+`Pack.openFile` (and `Pack.openBuffer`) returns `null`. The manifest
+CRC and per-entry data CRCs are not enforced at open time — they're
+surfaced through `verify()` on the bundle handle so scripts can decide
+what to do on mismatch.
 
-Both `Pack` (the self bundle) and a `Pack.openFile` handle expose the
-same two-arity `verify`:
+A `Pack.openFile` / `Pack.openBuffer` handle exposes a two-arity
+`verify`:
 
-### `Pack.verify()` / `bundle.verify() -> map | null`
+### `bundle.verify() -> map | null`
 
 Runs all three CRC checks and returns a structured report. Returns
-`null` when there is no self bundle / when the handle has been closed.
+`null` when the handle has been closed.
 
 ```
 {
@@ -509,7 +530,7 @@ Runs all three CRC checks and returns a structured report. Returns
   manifest); in that case `computed` is reported as `0` and `ok` is
   `false`.
 
-### `Pack.verify(arg)` / `bundle.verify(arg) -> bool`
+### `bundle.verify(arg) -> bool`
 
 Quick per-entry CRC check. `arg` is either a string entry name or a
 numeric manifest index. Returns:
@@ -517,8 +538,8 @@ numeric manifest index. Returns:
 - `true` when the entry exists and its on-disk bytes hash to the
   recorded CRC.
 - `false` when the entry doesn't exist, the index is out of range,
-  the bytes are bounds-busted, the CRC doesn't match, or there is no
-  self bundle / the handle has been closed.
+  the bytes are bounds-busted, the CRC doesn't match, or the handle
+  has been closed.
 
 Use `verify()` when you want a full report; use `verify(arg)` when
 you just want a one-shot bool for a single entry. The full
@@ -552,7 +573,7 @@ operating system tracks about the file:
 - **Filesystem mode bits** — not covered. Toggling the executable bit
   (`chmod +x` / `chmod -x`), changing ownership, or altering ACLs has
   no effect on the CRCs. (`chmod -x` will of course stop the OS from
-  running a stub-wrapped bundle, but `Pack.openFile` / `Pack.verify`
+  running a stub-wrapped bundle, but `Pack.openFile` / `bundle.verify`
   on the same file will still succeed.)
 - **Modification timestamps, extended attributes, etc.** — not
   covered. Same reason.
@@ -572,8 +593,276 @@ What **is** covered:
 
 In practice this means a freshly built bundle can be renamed,
 `chmod`'d, copied between filesystems, or have its stub replaced via
-`Pack.splice`, and `Pack.verify().ok` will still return `true` as
+`Pack.splice`, and `bundle.verify().ok` will still return `true` as
 long as the bundle bytes themselves were not corrupted in transit.
+
+## Editing an existing bundle
+
+`Pack.build` is the from-scratch path: it writes a whole bundle from
+a script-built description. Once a bundle exists, the **edit
+transaction** API lets a script open it, stage an arbitrary number of
+mutations against an in-memory op log, and `commit()` them as a
+**single atomic rewrite**. Use this when you want random-access
+authoring — add an entry, swap one out, rename a few, reorder some,
+point `entry_index` somewhere else — without re-running the whole
+`Pack.build` pipeline.
+
+The shape is a handle with a `commit()` step, on purpose: every
+mutation in a `.zpk` re-emits the strtab + manifest + footer at
+minimum (offsets are chained), so a per-call mutator API would force
+one rewrite per call. The edit handle stages everything in memory and
+commits **once**, no matter how many ops were queued.
+
+> ⚠️  **Concurrent edits are last-writer-wins with no detection.**
+> Zym is single-process, so cross-process races are not on the table,
+> but **two same-process editors of the same path or the same Buffer
+> will race**: whichever calls `commit()` last overwrites the work of
+> any prior commit, silently. There is no advisory lock, no
+> conflict marker, no "you're stale" error. If your script has any
+> chance of running two edits against the same target, serialize them
+> yourself.
+
+### Construction
+
+```
+var edit = Pack.editFile("dist/app.zpk");  // EditHandle | null
+var edit = Pack.editBuffer(buf);           // EditHandle | null
+```
+
+- **`Pack.editFile(path)`** opens an existing `.zpk` (headless or
+  stub-wrapped) from disk. `commit()` writes the new bundle to a
+  sibling temp file, `fsync`s it, mirrors the source's mode bits
+  (so `+x` survives), then atomically renames it over the source
+  path. On failure the temp file is removed and the source is
+  untouched.
+- **`Pack.editBuffer(buffer)`** opens a `.zpk` whose bytes already
+  live in a script `Buffer`. `commit()` builds the new bundle in
+  memory, then **resizes and overwrites the borrowed `Buffer` in
+  place** — every live script reference to the same Buffer (including
+  the caller's local in a function that received it as a parameter)
+  observes the new contents on return.
+
+Both constructors return `null` if the input isn't a valid `.zpk`
+(footer magic missing, footer CRC mismatch, etc.); they don't raise.
+
+### Lifecycle
+
+```
+open → stage many ops → commit() → (optionally stage more) → close()
+```
+
+- Successful `commit()` clears the staged op log and re-opens the
+  reader against the freshly-committed bytes, so further ops chain
+  off the new state.
+- Failed `commit()` (e.g. invalid `entry_index` after staged ops,
+  unreadable stub path, write error) leaves the handle's staged ops
+  intact so the script can fix the problem and retry.
+- `close()` drops staged state without writing. It's idempotent;
+  calling it on a committed handle is fine. A GC finalizer closes
+  the handle if the script forgets.
+- `edit.list()` / `edit.info(arg)` / `edit.entryIndex()` read the
+  **staged view**, not the source — they reflect every queued op. An
+  entry that was staged for `add` or `replace` has `fromSource: false`
+  in its `entryInfo`; unchanged source entries have `fromSource: true`.
+
+### Determinism
+
+`Pack.editFile(p).commit()` with **zero ops** produces a
+byte-identical file. (This falls out of the writer's existing
+determinism guarantee and the zero-copy "borrow from open reader"
+path used for unchanged entries.) Useful when you want a "verify
+and rewrite" pass without ops, e.g. for future format-version
+migrations.
+
+### Entry-argument dispatch
+
+Every op that targets an existing entry (`remove`, `replace`,
+`rename`, `move` source side, `setEntryIndex`, `setFlags`,
+`setCustom`) accepts either:
+
+- a **string** — first-hit match against `view[i].name`, or
+- a **number** — manifest index into the staged view (`0..view.size())`.
+
+Same dispatch as `bundle.open(arg)` / `bundle.info(arg)` /
+`bundle.verify(arg)`. Mixed-type arrays of args work fine.
+
+### Op reference
+
+#### `edit.add(spec) -> bool`
+
+Append (or insert at `spec.index`) a new entry. `spec` mirrors a
+`Pack.build` entry spec exactly:
+
+```
+{
+    name:        "<entry name>",
+    kind:        "file" | "blob" | "entry_source" | "entry_bytecode" | "source_map",
+    data:        <Buffer>,                  // OR
+    path:        "<path on disk>",
+    flags:       <number> | { required, lazy, mask },   // optional
+    compression: "none" | "zstd",                       // optional
+    level:       <number>,                              // optional
+    custom:      <u32>,                                 // optional
+    index:       <number>                               // optional; insertion point
+}
+```
+
+`kind` and exactly one of `data` / `path` are required; other fields
+are optional. `index` out of range (negative or > current view size)
+is rejected at stage time.
+
+#### `edit.remove(arg) -> bool`
+
+Removes the entry resolved by `arg`. If the removed slot was
+`entry_index`, the staged `entry_index` becomes `null` until either
+another `add` shifts in or `setEntryIndex` is staged. The view is
+rebuilt before commit; an `entry_index` of `null` at commit time is
+an error.
+
+#### `edit.replace(arg, spec) -> bool`
+
+Identity-preserving update: the manifest slot index stays the same,
+so a `entry_index` pointing here is preserved. `spec` is partial —
+every field is optional; omitted fields keep their source values.
+Same `spec` shape as `add` (except `index` is ignored).
+
+#### `edit.rename(arg, newName) -> bool`
+
+Pure strtab-side edit. `newName` must be a string; emptiness /
+path-shape validation is the same as the writer's at commit time.
+
+#### `edit.move(srcArg, dstIndex) -> bool`
+
+Reorders the manifest: the entry at `srcArg` moves to `dstIndex`,
+shifting others as needed. `dstIndex` must be in `[0..view.size())`.
+The staged `entry_index` is auto-updated so it keeps pointing at
+the same logical entry.
+
+#### `edit.setEntryIndex(arg) -> bool`
+
+Re-targets the program entry pointer. The kind check (must resolve
+to `ENTRY_SOURCE` or `ENTRY_BYTECODE`) runs at commit time against
+the final staged state, so it's fine to stage `setEntryIndex`
+before the `add` that creates the target.
+
+#### `edit.setFlags(arg, flags) -> bool`
+
+Set the per-entry flags word. `flags` is either a raw `number` (used
+directly as the u16 mask) or a map mirroring the reverse-shape of
+`entryInfo`:
+
+```
+edit.setFlags("main.zbc", { required: true, lazy: false });
+edit.setFlags("main.zbc", { mask: 0x01 });   // raw bits
+```
+
+#### `edit.setCustom(arg, u32) -> bool`
+
+Set the per-entry `custom` field. Truncated to `uint32_t`.
+
+#### `edit.setStub(arg) -> bool`
+
+Replace, attach, or strip the native stub on commit.
+
+- `arg = "<path>"`   — load stub bytes from a file.
+- `arg = <Buffer>`   — use the Buffer's bytes directly. The bytes are
+                       copied into the staged op, so the source Buffer
+                       can be reused or discarded immediately.
+- `arg = null`       — strip the stub; the committed bundle is
+                       headless.
+
+If multiple `setStub` ops are staged, the **last one wins**. With no
+`setStub` op queued, the source bundle's existing stub is preserved
+verbatim.
+
+> **Note.** `Pack.splice(stubPath, zpkPath, outputPath)` and
+> `edit.setStub` overlap in functionality but are separate APIs.
+> `Pack.splice` is a one-shot fast path that swaps the stub on a
+> standalone `.zpk` and writes the result to a new path without
+> opening a transaction. Prefer `Pack.splice` for the pure stub-swap
+> case; use `editFile(...).setStub(...).commit()` when you also want
+> to combine the stub change with other mutations in the same
+> transaction.
+
+#### `edit.commit() -> bool`
+
+Materialize the staged ops as a single rewrite.
+
+- For `editFile`: writes to `<path>.zym-edit.tmp.<pid>`, `fsync`s
+  on POSIX, mirrors source mode bits via `chmod` on POSIX, then
+  atomically renames over the source path. After a successful
+  rename the reader is re-opened from the new file. On any failure
+  before the rename the temp file is removed and the source is
+  untouched.
+- For `editBuffer`: builds the new bundle in memory, then resizes
+  and overwrites the borrowed `PackedByteArray` underlying the
+  source `Buffer`. After write-back, the reader is re-opened
+  against the buffer's new bytes.
+
+On success, the staged op log is cleared and further ops chain off
+the freshly-committed state.
+
+> ⚠️  **Buffer snapshot caveat.** If a script took a sub-view of the
+> source Buffer, or copied bytes out of it into a separate Buffer,
+> **before** `commit()`, that snapshot is independent and will *not*
+> auto-update when the source Buffer is mutated by the commit.
+> Standard mutator caveat; same as any other in-place Buffer write.
+
+#### `edit.close() -> bool`
+
+Drop staged state and close the reader. Idempotent; safe to call on
+a committed handle. A GC finalizer is a safety net but explicit
+`close()` is recommended.
+
+### Examples
+
+#### Add a file and re-target the entry point
+
+```
+var e = Pack.editFile("dist/app.zpk");
+e.add({
+    name: "main.zbc",
+    kind: "entry_bytecode",
+    data: newBc
+});
+e.setEntryIndex("main.zbc");
+e.commit();
+e.close();
+```
+
+#### Replace a config in a stub-wrapped binary, preserving `+x`
+
+```
+var e = Pack.editFile("dist/app");                  // stub-wrapped
+e.replace("config.json", { data: newCfgBytes });
+e.commit();                                         // atomic rename; +x preserved
+e.close();
+```
+
+#### Mutate a Buffer through a function (out-param pattern)
+
+```
+function patchConfig(bundleBuf, newCfg) {
+    var e = Pack.editBuffer(bundleBuf);
+    e.replace("config.json", { data: newCfg });
+    e.commit();                                     // mutates bundleBuf in place
+    e.close();
+}
+
+var buf = File.readAllBytes("dist/app.zpk");
+patchConfig(buf, newCfg);
+// buf now contains the rewritten bundle.
+File.writeAllBytes("dist/app.zpk", buf);
+```
+
+#### Strip a stub, write headless
+
+```
+var e = Pack.editFile("dist/app");                  // stub-wrapped
+e.setStub(null);
+e.commit();                                         // result is now headless
+e.close();
+```
 
 ## See also
 

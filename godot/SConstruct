@@ -42,18 +42,19 @@ def _helper_module(name, path):
         setattr(parent_module, child_name, child_module)
 
 
-_helper_module("gles3_builders", "gles3_builders.py")
-_helper_module("glsl_builders", "glsl_builders.py")
-_helper_module("methods", "methods.py")
+# zym: gles3_builders / glsl_builders removed. The headless CLI links no
+# rendering driver / RD / GLES3 / shader subsystem, no SCsub invokes the
+# RD_GLSL / GLSL_HEADER / GLES3_GLSL env.Builders these modules registered,
+# and no .glsl source is compiled. The companion `gles3_builders.py` /
+# `glsl_builders.py` files at the godot root were deleted in the same pass.
 _helper_module("platform_methods", "platform_methods.py")
+_helper_module("methods", "methods.py")
 _helper_module("version", "version.py")
 _helper_module("core.core_builders", "core/core_builders.py")
 _helper_module("main.main_builders", "main/main_builders.py")
 _helper_module("misc.utility.color", "misc/utility/color.py")
 
 # Local
-import gles3_builders
-import glsl_builders
 import methods
 import scu_builders
 from misc.utility.color import is_stderr_color, print_error, print_info, print_warning
@@ -1063,24 +1064,8 @@ env["SHLIBSUFFIX"] = suffix + env["SHLIBSUFFIX"]
 env["OBJPREFIX"] = env["object_prefix"]
 env["SHOBJPREFIX"] = env["object_prefix"]
 
-GLSL_BUILDERS = {
-    "RD_GLSL": env.Builder(
-        action=env.Run(glsl_builders.build_rd_headers),
-        suffix="glsl.gen.h",
-        src_suffix=".glsl",
-    ),
-    "GLSL_HEADER": env.Builder(
-        action=env.Run(glsl_builders.build_raw_headers),
-        suffix="glsl.gen.h",
-        src_suffix=".glsl",
-    ),
-    "GLES3_GLSL": env.Builder(
-        action=env.Run(gles3_builders.build_gles3_headers),
-        suffix="glsl.gen.h",
-        src_suffix=".glsl",
-    ),
-}
-env.Append(BUILDERS=GLSL_BUILDERS)
+# zym: GLSL / RD / GLES3 .glsl->.gen.h env.Builders removed -- headless CLI
+# compiles no shaders and no remaining SCsub references these builders.
 
 if env["compiledb"]:
     env.Tool("compilation_db")

@@ -35,6 +35,13 @@ typedef struct {
 // the reader and must call `zpk_reader_close` to release it.
 int zpk_reader_open_path(ZpkReader* out, const char* path);
 
+// Same as `zpk_reader_open_path`, but the caller chooses whether the
+// footer-validation path emits diagnostics on stderr. Use `verbose=0`
+// for speculative probes (e.g. `Pack.build`'s stub sniff) where a
+// missing footer is the expected common case and the user has not
+// asked for chatty output.
+int zpk_reader_open_path_verbose(ZpkReader* out, const char* path, int verbose);
+
 // Open a `.zpk` from an in-memory byte buffer. The reader takes its
 // own copy of the bytes (so the caller's buffer is independent and
 // may be freed immediately after this returns). Returns 1 on success,
@@ -70,5 +77,31 @@ int zpk_reader_self_exe_has_payload();
 // On success, `*out_size` is set to the entry's logical (uncompressed)
 // size in bytes.
 char* zpk_reader_read_entry(const ZpkReader* r, uint32_t index, size_t* out_size);
+
+// Borrow accessor — returns a pointer into the reader's owned
+// `file_data` for the on-disk byte slice of the entry at `index`,
+// along with the entry's compression byte, uncompressed size, and
+// data CRC32 as recorded in the manifest. No allocation, no copy,
+// no decompression — the bytes are exactly what is in the file.
+//
+// Used by the writer's borrow-from-reader entry source (see
+// `ZpkEntryInput::source_reader` in zpk_writer.hpp) so that
+// `Pack.editFile` / `Pack.editBuffer` can re-emit untouched entries
+// without round-tripping through decompression + recompression.
+//
+// Lifetime: the returned pointer is valid until `zpk_reader_close`
+// is called on `r`.
+//
+// Returns 1 on success, 0 on failure (out-of-range index, null
+// reader, etc.). On failure all out-params are left untouched.
+//
+// Any of the out-params may be null if the caller is not interested
+// in that field.
+int zpk_reader_get_entry_slice(const ZpkReader* r, uint32_t index,
+                               const uint8_t** out_data,
+                               uint64_t* out_size,
+                               uint8_t* out_compression,
+                               uint64_t* out_uncompressed_size,
+                               uint32_t* out_data_crc32);
 
 #endif // ZYM_PACK_ZPK_READER_HPP

@@ -659,11 +659,7 @@ String OS::get_temp_dir() const {
 }
 
 bool OS::is_debug_build() const {
-#ifdef DEBUG_ENABLED
-	return true;
-#else
 	return false;
-#endif // DEBUG_ENABLED
 }
 
 String OS::get_system_dir(SystemDir p_dir, bool p_shared_storage) const {
@@ -1681,33 +1677,6 @@ bool ClassDB::is_class_enabled(const StringName &p_class) const {
 	return ::ClassDB::is_class_enabled(p_class);
 }
 
-#ifdef TOOLS_ENABLED
-void ClassDB::get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const {
-	const String pf = p_function;
-	bool first_argument_is_class = false;
-	if (p_idx == 0) {
-		first_argument_is_class = (pf == "get_inheriters_from_class" || pf == "get_parent_class" ||
-				pf == "class_exists" || pf == "can_instantiate" || pf == "instantiate" ||
-				pf == "class_has_signal" || pf == "class_get_signal" || pf == "class_get_signal_list" ||
-				pf == "class_get_property_list" || pf == "class_get_property" || pf == "class_set_property" ||
-				pf == "class_has_method" || pf == "class_get_method_list" ||
-				pf == "class_get_integer_constant_list" || pf == "class_has_integer_constant" || pf == "class_get_integer_constant" ||
-				pf == "class_has_enum" || pf == "class_get_enum_list" || pf == "class_get_enum_constants" || pf == "class_get_integer_constant_enum" ||
-				pf == "is_class_enabled" || pf == "is_class_enum_bitfield" || pf == "class_get_api_type");
-	}
-	if (first_argument_is_class || pf == "is_parent_class") {
-		LocalVector<StringName> classes;
-		::ClassDB::get_class_list(classes);
-		for (const StringName &E : classes) {
-			if (::ClassDB::is_class_exposed(E)) {
-				r_options->push_back(E.operator String().quote());
-			}
-		}
-	}
-
-	Object::get_argument_options(p_function, p_idx, r_options);
-}
-#endif
 
 void ClassDB::_bind_methods() {
 	::ClassDB::bind_method(D_METHOD("get_class_list"), &ClassDB::get_class_list);
@@ -1958,17 +1927,6 @@ bool Engine::is_printing_error_messages() const {
 	return ::Engine::get_singleton()->is_printing_error_messages();
 }
 
-#ifdef TOOLS_ENABLED
-void Engine::get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const {
-	const String pf = p_function;
-	if (p_idx == 0 && (pf == "has_singleton" || pf == "get_singleton" || pf == "unregister_singleton")) {
-		for (const String &E : get_singleton_list()) {
-			r_options->push_back(E.quote());
-		}
-	}
-	Object::get_argument_options(p_function, p_idx, r_options);
-}
-#endif
 
 void Engine::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_physics_ticks_per_second", "physics_ticks_per_second"), &Engine::set_physics_ticks_per_second);

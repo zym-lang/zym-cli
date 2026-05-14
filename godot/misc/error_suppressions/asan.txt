@@ -1,5 +1,0 @@
-# Supported suppression types are:
-# - interceptor_name
-# - interceptor_via_fun
-# - interceptor_via_lib
-# - odr_violation

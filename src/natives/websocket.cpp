@@ -24,6 +24,7 @@
 #include "modules/websocket/websocket_peer.h"
 
 #include "natives.hpp"
+#include "../boot/register_core.hpp"
 
 extern bool zymExtractCryptoKey(ZymVM* vm, ZymValue v, Ref<CryptoKey>* out);
 extern bool zymExtractX509(ZymVM* vm, ZymValue v, Ref<X509Certificate>* out);
@@ -412,6 +413,9 @@ static ZymValue ws_close(ZymVM* vm, ZymValue ctx, ZymValue* vargs, int vargc) {
 //   failure (bad URL, build without TLS, etc.) returns `null`.
 static ZymValue f_wsConnect(ZymVM* vm, ZymValue ctx, ZymValue urlV, ZymValue* vargs, int vargc) {
     (void)ctx;
+    // wss:// goes through the same TLS client path as TLS.connect and needs
+    // `default_certs` populated. See src/boot/register_core.cpp.
+    zym::boot::ensure_default_certificates_loaded();
     String url;
     if (!reqStr(vm, urlV, "connect(url, ...)", &url)) return ZYM_ERROR;
 

@@ -327,30 +327,9 @@ Ref<Resource> ResourceLoader::_load(const String &p_path, const String &p_origin
 		print_verbose(vformat("Failed loading resource: %s", p_path));
 	}
 
-#ifdef TOOLS_ENABLED
-	if (Engine::get_singleton()->is_editor_hint()) {
-		if (ResourceFormatImporter::get_singleton()->get_importer_by_file(p_path).is_valid()) {
-			// The format is known to the editor, but the file hasn't been imported
-			// (otherwise, ResourceFormatImporter would have been found as a suitable loader).
-			found = true;
-			if (r_error) {
-				*r_error = ERR_FILE_NOT_FOUND;
-			}
-		}
-	}
-#endif
 
 	ERR_FAIL_COND_V_MSG(found, Ref<Resource>(), vformat("Failed loading resource: %s.", p_path));
 
-#ifdef TOOLS_ENABLED
-	Ref<FileAccess> file_check = FileAccess::create(FileAccess::ACCESS_RESOURCES);
-	if (!file_check->file_exists(p_path)) {
-		if (r_error) {
-			*r_error = ERR_FILE_NOT_FOUND;
-		}
-		ERR_FAIL_V_MSG(Ref<Resource>(), vformat("Resource file not found: %s (expected type: %s)", p_path, !p_type_hint.is_empty() ? p_type_hint : "unknown"));
-	}
-#endif
 
 	if (r_error) {
 		*r_error = ERR_FILE_UNRECOGNIZED;
@@ -456,14 +435,6 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 			load_task.resource->set_as_translation_remapped(true);
 		}
 
-#ifdef TOOLS_ENABLED
-		load_task.resource->set_edited(false);
-		if (timestamp_on_load) {
-			uint64_t mt = FileAccess::get_modified_time(remapped_path);
-			//printf("mt %s: %lli\n",remapped_path.utf8().get_data(),mt);
-			load_task.resource->set_last_modified_time(mt);
-		}
-#endif
 
 		if (_loaded_callback) {
 			_loaded_callback(load_task.resource, load_task.local_path);

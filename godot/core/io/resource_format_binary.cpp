@@ -879,9 +879,6 @@ Error ResourceLoaderBinary::load() {
 			res->set_meta(META_MISSING_RESOURCES, missing_resource_properties);
 		}
 
-#ifdef TOOLS_ENABLED
-		res->set_edited(false);
-#endif
 
 		if (progress) {
 			*progress = (i + 1) / float(internal_resources.size());
@@ -1081,14 +1078,7 @@ void ResourceLoaderBinary::open(Ref<FileAccess> p_f, bool p_no_resources, bool p
 					// If a UID is found and the path is valid, it will be used, otherwise, it falls back to the path.
 					er.path = ResourceUID::get_singleton()->get_id_path(er.uid);
 				} else {
-#ifdef TOOLS_ENABLED
-					// Silence a warning that can happen during the initial filesystem scan due to cache being regenerated.
-					if (ResourceLoader::get_resource_uid(res_path) != er.uid) {
-						WARN_PRINT(vformat("'%s': In external resource #%d, invalid UID: '%s' - using text path instead: '%s'.", res_path, i, ResourceUID::get_singleton()->id_to_text(er.uid), er.path));
-					}
-#else
 					WARN_PRINT(vformat("'%s': In external resource #%d, invalid UID: '%s' - using text path instead: '%s'.", res_path, i, ResourceUID::get_singleton()->id_to_text(er.uid), er.path));
-#endif
 				}
 			}
 		}
@@ -2321,9 +2311,6 @@ Error ResourceFormatSaverBinaryInstance::save(const String &p_path, const Ref<Re
 			if (takeover_paths) {
 				r->set_path(p_path + "::" + r->get_scene_unique_id(), true);
 			}
-#ifdef TOOLS_ENABLED
-			r->set_edited(false);
-#endif
 		} else {
 			save_unicode_string(f, r->get_path()); //actual external
 		}

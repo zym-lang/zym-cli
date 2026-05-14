@@ -31,18 +31,13 @@
 #pragma once
 
 #include "crash_handler_windows.h"
-#include "key_mapping_windows.h"
 
 #include "core/config/project_settings.h"
-#include "core/input/input.h"
 #include "core/os/os.h"
-#include "drivers/wasapi/audio_driver_wasapi.h"
-#include "drivers/winmidi/midi_driver_winmidi.h"
-#include "servers/audio/audio_server.h"
-
-#ifdef XAUDIO2_ENABLED
-#include "drivers/xaudio2/audio_driver_xaudio2.h"
-#endif
+// zym: audio drivers (wasapi/winmidi/xaudio2) and AudioServer removed
+// (headless CLI). WASAPI_ENABLED / WINMIDI_ENABLED / XAUDIO2_ENABLED are
+// never defined; corresponding field members and code paths below compile
+// out via their #ifdef guards.
 
 #if defined(RD_ENABLED)
 #include "servers/rendering/rendering_device.h"
@@ -58,10 +53,6 @@
 #include <windows.h>
 #include <windowsx.h>
 
-#ifdef DEBUG_ENABLED
-// forward error messages to OutputDebugString
-#define WINDOWS_DEBUG_OUTPUT_ENABLED
-#endif
 
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x4
@@ -267,10 +258,6 @@ public:
 
 	void set_main_window(HWND p_main_window) { main_window = p_main_window; }
 
-#ifdef TOOLS_ENABLED
-	virtual bool _test_create_rendering_device_and_gl(const String &p_display_driver) const override;
-	virtual bool _test_create_rendering_device(const String &p_display_driver) const override;
-#endif
 
 	HINSTANCE get_hinstance() { return hInstance; }
 	OS_Windows(HINSTANCE _hInstance);

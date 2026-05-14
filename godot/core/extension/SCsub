@@ -3,16 +3,14 @@ from misc.utility.scons_hints import *
 
 Import("env")
 
-import make_interface_dumper
+# zym: make_interface_dumper.py + gdextension_interface_dump.gen.h removed.
+# Both were consumed only by `gdextension_interface_header_generator.cpp` and
+# `extension_api_dump.cpp`, which are 100% TOOLS_ENABLED-gated and have been
+# deleted from this fork (template_release-only build, no editor).
 import make_interface_header
 import make_wrappers
 
 env.CommandNoCache(["ext_wrappers.gen.inc"], "make_wrappers.py", env.Run(make_wrappers.run))
-env.CommandNoCache(
-    "gdextension_interface_dump.gen.h",
-    ["gdextension_interface.json", "make_interface_dumper.py"],
-    env.Run(make_interface_dumper.run),
-)
 env.CommandNoCache(
     "gdextension_interface.gen.h",
     ["gdextension_interface.json", "make_interface_header.py"],

@@ -1211,34 +1211,17 @@ struct _VariantCall {
 
 	struct ConstantData {
 		HashMap<StringName, int64_t> value;
-#ifdef DEBUG_ENABLED
-		List<StringName> value_ordered;
-#endif // DEBUG_ENABLED
 		HashMap<StringName, Variant> variant_value;
-#ifdef DEBUG_ENABLED
-		List<StringName> variant_value_ordered;
-#endif // DEBUG_ENABLED
 	};
 
 	static ConstantData *constant_data;
 
 	static void add_constant(int p_type, const StringName &p_constant_name, int64_t p_constant_value) {
-#ifdef DEBUG_ENABLED
-		ERR_FAIL_COND(constant_data[p_type].value.has(p_constant_name));
-		ERR_FAIL_COND(enum_data[p_type].value.has(p_constant_name));
-		ERR_FAIL_COND(enum_data[p_type].value_to_enum.has(p_constant_name));
-#endif // DEBUG_ENABLED
 		constant_data[p_type].value[p_constant_name] = p_constant_value;
-#ifdef DEBUG_ENABLED
-		constant_data[p_type].value_ordered.push_back(p_constant_name);
-#endif // DEBUG_ENABLED
 	}
 
 	static void add_variant_constant(int p_type, const StringName &p_constant_name, const Variant &p_constant_value) {
 		constant_data[p_type].variant_value[p_constant_name] = p_constant_value;
-#ifdef DEBUG_ENABLED
-		constant_data[p_type].variant_value_ordered.push_back(p_constant_name);
-#endif // DEBUG_ENABLED
 	}
 
 	struct EnumData {
@@ -1249,11 +1232,6 @@ struct _VariantCall {
 	static EnumData *enum_data;
 
 	static void add_enum_constant(int p_type, const StringName &p_enum_type_name, const StringName &p_enumeration_name, int p_enum_value) {
-#ifdef DEBUG_ENABLED
-		ERR_FAIL_COND(constant_data[p_type].value.has(p_enumeration_name));
-		ERR_FAIL_COND(enum_data[p_type].value.has(p_enumeration_name));
-		ERR_FAIL_COND(enum_data[p_type].value_to_enum.has(p_enumeration_name));
-#endif // DEBUG_ENABLED
 		enum_data[p_type].value[p_enum_type_name][p_enumeration_name] = p_enum_value;
 		enum_data[p_type].value_to_enum[p_enumeration_name] = p_enum_type_name;
 	}
@@ -1313,11 +1291,7 @@ struct VariantBuiltInMethodInfo {
 
 		for (int i = 0; i < argument_count; i++) {
 			PropertyInfo pi;
-#ifdef DEBUG_ENABLED
-			pi.name = argument_names[i];
-#else
 			pi.name = "arg" + itos(i + 1);
-#endif // DEBUG_ENABLED
 			pi.type = (*get_argument_type)(i);
 			if (pi.type == Variant::NIL) {
 				pi.usage |= PROPERTY_USAGE_NIL_IS_VARIANT;
@@ -1383,9 +1357,6 @@ static void register_builtin_method(const Vector<String> &p_argnames, const Vect
 	VariantBuiltInMethodInfo imi;
 	_populate_variant_builtin_method_info<T>(imi, p_argnames, p_def_args);
 
-#ifdef DEBUG_ENABLED
-	ERR_FAIL_COND(!imi.is_vararg && imi.argument_count != imi.argument_names.size());
-#endif // DEBUG_ENABLED
 
 	builtin_method_info[T::get_base_type()].insert(name, imi);
 	builtin_method_names[T::get_base_type()].push_back(name);
@@ -1420,9 +1391,6 @@ void Variant::callp(const StringName &p_method, const Variant **p_args, int p_ar
 			r_error.error = Callable::CallError::CALL_ERROR_INSTANCE_IS_NULL;
 			return;
 		}
-#ifdef DEBUG_ENABLED
-
-#endif // DEBUG_ENABLED
 		r_ret = _get_obj().obj->callp(p_method, p_args, p_argcount, r_error);
 
 	} else {
@@ -1447,9 +1415,6 @@ void Variant::call_const(const StringName &p_method, const Variant **p_args, int
 			r_error.error = Callable::CallError::CALL_ERROR_INSTANCE_IS_NULL;
 			return;
 		}
-#ifdef DEBUG_ENABLED
-
-#endif // DEBUG_ENABLED
 		r_ret = _get_obj().obj->call_const(p_method, p_args, p_argcount, r_error);
 
 		//else if (type==Variant::METHOD) {
@@ -1570,12 +1535,7 @@ String Variant::get_builtin_method_argument_name(Variant::Type p_type, const Str
 	ERR_FAIL_INDEX_V(p_type, Variant::VARIANT_MAX, String());
 	const VariantBuiltInMethodInfo *method = builtin_method_info[p_type].getptr(p_method);
 	ERR_FAIL_NULL_V(method, String());
-#ifdef DEBUG_ENABLED
-	ERR_FAIL_INDEX_V(p_argument, method->argument_count, String());
-	return method->argument_names[p_argument];
-#else
 	return "arg" + itos(p_argument + 1);
-#endif // DEBUG_ENABLED
 }
 
 Vector<Variant> Variant::get_builtin_method_default_arguments(Variant::Type p_type, const StringName &p_method) {
@@ -1673,22 +1633,12 @@ void Variant::get_constants_for_type(Variant::Type p_type, List<StringName> *p_c
 
 	const _VariantCall::ConstantData &cd = _VariantCall::constant_data[p_type];
 
-#ifdef DEBUG_ENABLED
-	for (const List<StringName>::Element *E = cd.value_ordered.front(); E; E = E->next()) {
-		p_constants->push_back(E->get());
-#else
 	for (const KeyValue<StringName, int64_t> &E : cd.value) {
 		p_constants->push_back(E.key);
-#endif // DEBUG_ENABLED
 	}
 
-#ifdef DEBUG_ENABLED
-	for (const List<StringName>::Element *E = cd.variant_value_ordered.front(); E; E = E->next()) {
-		p_constants->push_back(E->get());
-#else
 	for (const KeyValue<StringName, Variant> &E : cd.variant_value) {
 		p_constants->push_back(E.key);
-#endif // DEBUG_ENABLED
 	}
 }
 
@@ -1797,165 +1747,69 @@ StringName Variant::get_enum_for_enumeration(Variant::Type p_type, const StringN
 	return (enum_name == nullptr) ? StringName() : *enum_name;
 }
 
-#ifdef DEBUG_ENABLED
-#define bind_method(m_type, m_method, m_arg_names, m_default_args) \
-	METHOD_CLASS(m_type, m_method, m_method, &m_type::m_method);   \
-	register_builtin_method<Method_##m_type##_##m_method>(m_arg_names, m_default_args);
-#else
 #define bind_method(m_type, m_method, m_arg_names, m_default_args) \
 	METHOD_CLASS(m_type, m_method, m_method, &m_type ::m_method);  \
 	register_builtin_method<Method_##m_type##_##m_method>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_compat_method(m_type, m_exposed_method, m_method, m_arg_names, m_default_args) \
-	METHOD_CLASS(m_type, m_exposed_method, m_method, &m_type::m_method);                    \
-	register_builtin_compat_method<Method_##m_type##_##m_method>(m_arg_names, m_default_args);
-#else
 #define bind_compat_method(m_type, m_exposed_method, m_method, m_arg_names, m_default_args) \
 	METHOD_CLASS(m_type, m_exposed_method, m_method, &m_type ::m_method);                   \
 	register_builtin_compat_method<Method_##m_type##_##m_method>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_convert_method(m_type_from, m_type_to, m_method, m_arg_names, m_default_args) \
-	CONVERT_METHOD_CLASS(m_type_from, m_method, m_method, &m_type_to::m_method);           \
-	register_builtin_method<Method_##m_type_from##_##m_method>(m_arg_names, m_default_args);
-#else
 #define bind_convert_method(m_type_from, m_type_to, m_method, m_arg_names, m_default_args) \
 	CONVERT_METHOD_CLASS(m_type_from, m_method, m_method, &m_type_to ::m_method);          \
 	register_builtin_method<Method_##m_type_from##_##m_method>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_convert_compat_method(m_type_from, m_type_to, m_exposed_method, m_method, m_arg_names, m_default_args) \
-	CONVERT_METHOD_CLASS(m_type_from, m_exposed_method, m_method, &m_type_to::m_method);                            \
-	register_builtin_compat_method<Method_##m_type_from##_##m_method>(m_arg_names, m_default_args);
-#else
 #define bind_convert_compat_method(m_type_from, m_type_to, m_exposed_method, m_method, m_arg_names, m_default_args) \
 	CONVERT_METHOD_CLASS(m_type_from, m_exposed_method, m_method, &m_type_to ::m_method);                           \
 	register_builtin_compat_method<Method_##m_type_from##_##m_method>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_static_method(m_type, m_method, m_arg_names, m_default_args) \
-	STATIC_METHOD_CLASS(m_type, m_method, m_method, m_type::m_method);    \
-	register_builtin_method<Method_##m_type##_##m_method>(m_arg_names, m_default_args);
-#else
 #define bind_static_method(m_type, m_method, m_arg_names, m_default_args) \
 	STATIC_METHOD_CLASS(m_type, m_method, m_method, m_type ::m_method);   \
 	register_builtin_method<Method_##m_type##_##m_method>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_static_compat_method(m_type, m_exposed_method, m_method, m_arg_names, m_default_args) \
-	STATIC_METHOD_CLASS(m_type, m_exposed_method, m_method, m_type::m_method);                     \
-	register_builtin_compat_method<Method_##m_type##_##m_method>(m_arg_names, m_default_args);
-#else
 #define bind_static_compat_method(m_type, m_exposed_method, m_method, m_arg_names, m_default_args) \
 	STATIC_METHOD_CLASS(m_type, m_exposed_method, m_method, m_type ::m_method);                    \
 	register_builtin_compat_method<Method_##m_type##_##m_method>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_static_methodv(m_type, m_name, m_method, m_arg_names, m_default_args) \
-	STATIC_METHOD_CLASS(m_type, m_name, m_name, m_method);                         \
-	register_builtin_method<Method_##m_type##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_static_methodv(m_type, m_name, m_method, m_arg_names, m_default_args) \
 	STATIC_METHOD_CLASS(m_type, m_name, m_name, m_method);                         \
 	register_builtin_method<Method_##m_type##_##m_name>(sarray(), m_default_args);
-#endif
 
-#ifdef DEBUG_ENABLED
-#define bind_static_compat_methodv(m_type, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
-	STATIC_METHOD_CLASS(m_type, m_exposed_name, m_name, m_method);                                        \
-	register_builtin_compat_method<Method_##m_type##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_static_compat_methodv(m_type, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
 	STATIC_METHOD_CLASS(m_type, m_exposed_name, m_name, m_method);                                        \
 	register_builtin_compat_method<Method_##m_type##_##m_name>(sarray(), m_default_args);
-#endif
 
-#ifdef DEBUG_ENABLED
-#define bind_methodv(m_type, m_name, m_method, m_arg_names, m_default_args) \
-	METHOD_CLASS(m_type, m_name, m_name, m_method);                         \
-	register_builtin_method<Method_##m_type##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_methodv(m_type, m_name, m_method, m_arg_names, m_default_args) \
 	METHOD_CLASS(m_type, m_name, m_name, m_method);                         \
 	register_builtin_method<Method_##m_type##_##m_name>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_compat_methodv(m_type, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
-	METHOD_CLASS(m_type, m_exposed_name, m_name, m_method);                                        \
-	register_builtin_compat_method<Method_##m_type##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_compat_methodv(m_type, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
 	METHOD_CLASS(m_type, m_exposed_name, m_name, m_method);                                        \
 	register_builtin_compat_method<Method_##m_type##_##m_name>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_convert_methodv(m_type_from, m_type_to, m_name, m_method, m_arg_names, m_default_args) \
-	CONVERT_METHOD_CLASS(m_type_from, m_name, m_name, m_method);                                    \
-	register_builtin_method<Method_##m_type_from##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_convert_methodv(m_type_from, m_type_to, m_name, m_method, m_arg_names, m_default_args) \
 	CONVERT_METHOD_CLASS(m_type_from, m_name, m_name, m_method);                                    \
 	register_builtin_method<Method_##m_type_from##_##m_name>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_convert_compat_methodv(m_type_from, m_type_to, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
-	CONVERT_METHOD_CLASS(m_type_from, m_exposed_name, m_name, m_method);                                                   \
-	register_builtin_compat_method<Method_##m_type_from##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_convert_compat_methodv(m_type_from, m_type_to, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
 	CONVERT_METHOD_CLASS(m_type_from, m_exposed_name, m_name, m_method);                                                   \
 	register_builtin_compat_method<Method_##m_type_from##_##m_name>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_function(m_type, m_name, m_method, m_arg_names, m_default_args) \
-	FUNCTION_CLASS(m_type, m_name, m_name, m_method, true);                  \
-	register_builtin_method<Method_##m_type##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_function(m_type, m_name, m_method, m_arg_names, m_default_args) \
 	FUNCTION_CLASS(m_type, m_name, m_name, m_method, true);                  \
 	register_builtin_method<Method_##m_type##_##m_name>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_compat_function(m_type, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
-	FUNCTION_CLASS(m_type, m_exposed_name, m_name, m_method, true);                                 \
-	register_builtin_compat_method<Method_##m_type##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_compat_function(m_type, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
 	FUNCTION_CLASS(m_type, m_exposed_name, m_name, m_method, true);                                 \
 	register_builtin_compat_method<Method_##m_type##_##m_name>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_functionnc(m_type, m_name, m_method, m_arg_names, m_default_args) \
-	FUNCTION_CLASS(m_type, m_name, m_name, m_method, false);                   \
-	register_builtin_method<Method_##m_type##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_functionnc(m_type, m_name, m_method, m_arg_names, m_default_args) \
 	FUNCTION_CLASS(m_type, m_name, m_name, m_method, false);                   \
 	register_builtin_method<Method_##m_type##_##m_name>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
-#ifdef DEBUG_ENABLED
-#define bind_compat_functionnc(m_type, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
-	FUNCTION_CLASS(m_type, m_exposed_name, m_name, m_method, false);                                  \
-	register_builtin_compat_method<Method_##m_type##_##m_name>(m_arg_names, m_default_args);
-#else
 #define bind_compat_functionnc(m_type, m_exposed_name, m_name, m_method, m_arg_names, m_default_args) \
 	FUNCTION_CLASS(m_type, m_exposed_name, m_name, m_method, false);                                  \
 	register_builtin_compat_method<Method_##m_type##_##m_name>(sarray(), m_default_args);
-#endif // DEBUG_ENABLED
 
 #define bind_string_method(m_method, m_arg_names, m_default_args) \
 	bind_method(String, m_method, m_arg_names, m_default_args);   \

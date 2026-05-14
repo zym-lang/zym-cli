@@ -49,23 +49,11 @@ private:
 	String library_path;
 	String entry_symbol;
 
-#ifdef TOOLS_ENABLED
-	bool is_reloadable = false;
-#endif
 
 	Vector<SharedObject> library_dependencies;
 
 	HashMap<String, String> class_icon_paths;
 
-#ifdef TOOLS_ENABLED
-	uint64_t resource_last_modified_time = 0;
-	uint64_t library_last_modified_time = 0;
-
-	void update_last_modified_time(uint64_t p_resource_last_modified_time, uint64_t p_library_last_modified_time) {
-		resource_last_modified_time = p_resource_last_modified_time;
-		library_last_modified_time = p_library_last_modified_time;
-	}
-#endif
 
 public:
 	static String find_extension_library(const String &p_path, Ref<ConfigFile> p_config, std::function<bool(String)> p_has_feature, PackedStringArray *r_tags = nullptr);

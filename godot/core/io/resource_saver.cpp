@@ -127,15 +127,6 @@ Error ResourceSaver::save(RequiredParam<Resource> rp_resource, const String &p_p
 		err = saver[i]->save(p_resource, path, p_flags);
 
 		if (err == OK) {
-#ifdef TOOLS_ENABLED
-
-			((Resource *)p_resource.ptr())->set_edited(false);
-			if (timestamp_on_save) {
-				uint64_t mt = FileAccess::get_modified_time(path);
-
-				((Resource *)p_resource.ptr())->set_last_modified_time(mt);
-			}
-#endif
 
 			if (p_flags & FLAG_CHANGE_PATH) {
 				p_resource->set_path(old_path);

@@ -42,6 +42,24 @@ bundle.info(arg)           -> entryInfo | null // arg: name string or numeric in
 bundle.formatVersion()     -> number | null    // null after close()
 bundle.close()             -> bool
 
+// --- editing an existing bundle ---
+var edit = Pack.editFile(path)        // open from disk; commit = atomic rename
+var edit = Pack.editBuffer(buffer)    // open from Buffer; commit mutates in place
+edit.list()                -> [entryInfo, ...]    // staged view
+edit.info(arg)             -> entryInfo | null    // arg: name string or index
+edit.entryIndex()          -> number | null
+edit.add(spec)             -> bool
+edit.remove(arg)           -> bool
+edit.replace(arg, spec)    -> bool                // identity-preserving
+edit.rename(arg, newName)  -> bool
+edit.move(srcArg, dstIdx)  -> bool
+edit.setEntryIndex(arg)    -> bool
+edit.setFlags(arg, flags)  -> bool                // flags: number | map
+edit.setCustom(arg, u32)   -> bool
+edit.setStub(arg)          -> bool                // arg: path | Buffer | null
+edit.commit()              -> bool                // single atomic rewrite
+edit.close()               -> bool
+
 // --- inspecting and splicing native binaries ---
 Pack.inspectBin(path)                            -> { ... } | null
 Pack.splice(stubPath, zpkPath, outputPath)       -> bool
@@ -129,8 +147,8 @@ Each element of `entries` is a map:
 | ---      | ---      | ---      | ---     | ---                                                                                  |
 | `name`   | string   | no       | unnamed | Logical name stored in the bundle's string table (e.g. `"main.zbc"`).                |
 | `kind`   | string   | yes      | —       | One of the kind strings below.                                                       |
-| `flags`  | number   | no       | `0`     | Per-entry flag bits (forwarded to the on-disk `flags` field).                        |
-| `custom` | number   | no       | `0`     | Free per-kind 32-bit field, forwarded verbatim.                                      |
+| `flags`  | number   | no       | `0`     | Per-entry flag bits (forwarded to the on-disk `flags` field). **16-bit unsigned**; valid range `0..65535` (`0x0000..0xFFFF`). Scripts that don't want to do bit math can just pass a plain number in that range; values outside it are truncated to `uint16_t`. |
+| `custom` | number   | no       | `0`     | Free per-kind 32-bit field, forwarded verbatim. **32-bit unsigned**; valid range `0..4294967295` (`0x00000000..0xFFFFFFFF`). Treat it as either 32 bitflag/tag slots or a plain numeric tag — `Pack` doesn't interpret it. Values outside the range are truncated to `uint32_t`. |
 | `data`   | Buffer   | one of   | —       | In-memory bytes. Use this when the data already lives in script memory.              |
 | `path`   | string   | one of   | —       | Absolute or relative file path. The writer streams this file from disk; the bytes never round-trip through a script-side `Buffer`. |
 | `compression` | bool | no       | (inherits) | Per-entry override of the bundle-wide `compression`. Always wins over the bundle default. |
@@ -576,6 +594,274 @@ In practice this means a freshly built bundle can be renamed,
 `chmod`'d, copied between filesystems, or have its stub replaced via
 `Pack.splice`, and `bundle.verify().ok` will still return `true` as
 long as the bundle bytes themselves were not corrupted in transit.
+
+## Editing an existing bundle
+
+`Pack.build` is the from-scratch path: it writes a whole bundle from
+a script-built description. Once a bundle exists, the **edit
+transaction** API lets a script open it, stage an arbitrary number of
+mutations against an in-memory op log, and `commit()` them as a
+**single atomic rewrite**. Use this when you want random-access
+authoring — add an entry, swap one out, rename a few, reorder some,
+point `entry_index` somewhere else — without re-running the whole
+`Pack.build` pipeline.
+
+The shape is a handle with a `commit()` step, on purpose: every
+mutation in a `.zpk` re-emits the strtab + manifest + footer at
+minimum (offsets are chained), so a per-call mutator API would force
+one rewrite per call. The edit handle stages everything in memory and
+commits **once**, no matter how many ops were queued.
+
+> ⚠️  **Concurrent edits are last-writer-wins with no detection.**
+> Zym is single-process, so cross-process races are not on the table,
+> but **two same-process editors of the same path or the same Buffer
+> will race**: whichever calls `commit()` last overwrites the work of
+> any prior commit, silently. There is no advisory lock, no
+> conflict marker, no "you're stale" error. If your script has any
+> chance of running two edits against the same target, serialize them
+> yourself.
+
+### Construction
+
+```
+var edit = Pack.editFile("dist/app.zpk");  // EditHandle | null
+var edit = Pack.editBuffer(buf);           // EditHandle | null
+```
+
+- **`Pack.editFile(path)`** opens an existing `.zpk` (headless or
+  stub-wrapped) from disk. `commit()` writes the new bundle to a
+  sibling temp file, `fsync`s it, mirrors the source's mode bits
+  (so `+x` survives), then atomically renames it over the source
+  path. On failure the temp file is removed and the source is
+  untouched.
+- **`Pack.editBuffer(buffer)`** opens a `.zpk` whose bytes already
+  live in a script `Buffer`. `commit()` builds the new bundle in
+  memory, then **resizes and overwrites the borrowed `Buffer` in
+  place** — every live script reference to the same Buffer (including
+  the caller's local in a function that received it as a parameter)
+  observes the new contents on return.
+
+Both constructors return `null` if the input isn't a valid `.zpk`
+(footer magic missing, footer CRC mismatch, etc.); they don't raise.
+
+### Lifecycle
+
+```
+open → stage many ops → commit() → (optionally stage more) → close()
+```
+
+- Successful `commit()` clears the staged op log and re-opens the
+  reader against the freshly-committed bytes, so further ops chain
+  off the new state.
+- Failed `commit()` (e.g. invalid `entry_index` after staged ops,
+  unreadable stub path, write error) leaves the handle's staged ops
+  intact so the script can fix the problem and retry.
+- `close()` drops staged state without writing. It's idempotent;
+  calling it on a committed handle is fine. A GC finalizer closes
+  the handle if the script forgets.
+- `edit.list()` / `edit.info(arg)` / `edit.entryIndex()` read the
+  **staged view**, not the source — they reflect every queued op. An
+  entry that was staged for `add` or `replace` has `fromSource: false`
+  in its `entryInfo`; unchanged source entries have `fromSource: true`.
+
+### Determinism
+
+`Pack.editFile(p).commit()` with **zero ops** produces a
+byte-identical file. (This falls out of the writer's existing
+determinism guarantee and the zero-copy "borrow from open reader"
+path used for unchanged entries.) Useful when you want a "verify
+and rewrite" pass without ops, e.g. for future format-version
+migrations.
+
+### Entry-argument dispatch
+
+Every op that targets an existing entry (`remove`, `replace`,
+`rename`, `move` source side, `setEntryIndex`, `setFlags`,
+`setCustom`) accepts either:
+
+- a **string** — first-hit match against `view[i].name`, or
+- a **number** — manifest index into the staged view (`0..view.size())`.
+
+Same dispatch as `bundle.open(arg)` / `bundle.info(arg)` /
+`bundle.verify(arg)`. Mixed-type arrays of args work fine.
+
+### Op reference
+
+#### `edit.add(spec) -> bool`
+
+Append (or insert at `spec.index`) a new entry. `spec` mirrors a
+`Pack.build` entry spec exactly:
+
+```
+{
+    name:        "<entry name>",
+    kind:        "file" | "blob" | "entry_source" | "entry_bytecode" | "source_map",
+    data:        <Buffer>,                  // OR
+    path:        "<path on disk>",
+    flags:       <number> | { required, lazy, mask },   // optional
+    compression: "none" | "zstd",                       // optional
+    level:       <number>,                              // optional
+    custom:      <u32>,                                 // optional
+    index:       <number>                               // optional; insertion point
+}
+```
+
+`kind` and exactly one of `data` / `path` are required; other fields
+are optional. `index` out of range (negative or > current view size)
+is rejected at stage time.
+
+#### `edit.remove(arg) -> bool`
+
+Removes the entry resolved by `arg`. If the removed slot was
+`entry_index`, the staged `entry_index` becomes `null` until either
+another `add` shifts in or `setEntryIndex` is staged. The view is
+rebuilt before commit; an `entry_index` of `null` at commit time is
+an error.
+
+#### `edit.replace(arg, spec) -> bool`
+
+Identity-preserving update: the manifest slot index stays the same,
+so a `entry_index` pointing here is preserved. `spec` is partial —
+every field is optional; omitted fields keep their source values.
+Same `spec` shape as `add` (except `index` is ignored).
+
+#### `edit.rename(arg, newName) -> bool`
+
+Pure strtab-side edit. `newName` must be a string; emptiness /
+path-shape validation is the same as the writer's at commit time.
+
+#### `edit.move(srcArg, dstIndex) -> bool`
+
+Reorders the manifest: the entry at `srcArg` moves to `dstIndex`,
+shifting others as needed. `dstIndex` must be in `[0..view.size())`.
+The staged `entry_index` is auto-updated so it keeps pointing at
+the same logical entry.
+
+#### `edit.setEntryIndex(arg) -> bool`
+
+Re-targets the program entry pointer. The kind check (must resolve
+to `ENTRY_SOURCE` or `ENTRY_BYTECODE`) runs at commit time against
+the final staged state, so it's fine to stage `setEntryIndex`
+before the `add` that creates the target.
+
+#### `edit.setFlags(arg, flags) -> bool`
+
+Set the per-entry flags word. `flags` is either a raw `number` (used
+directly as the u16 mask) or a map mirroring the reverse-shape of
+`entryInfo`:
+
+```
+edit.setFlags("main.zbc", { required: true, lazy: false });
+edit.setFlags("main.zbc", { mask: 0x01 });   // raw bits
+```
+
+#### `edit.setCustom(arg, u32) -> bool`
+
+Set the per-entry `custom` field. Truncated to `uint32_t`.
+
+#### `edit.setStub(arg) -> bool`
+
+Replace, attach, or strip the native stub on commit.
+
+- `arg = "<path>"`   — load stub bytes from a file.
+- `arg = <Buffer>`   — use the Buffer's bytes directly. The bytes are
+                       copied into the staged op, so the source Buffer
+                       can be reused or discarded immediately.
+- `arg = null`       — strip the stub; the committed bundle is
+                       headless.
+
+If multiple `setStub` ops are staged, the **last one wins**. With no
+`setStub` op queued, the source bundle's existing stub is preserved
+verbatim.
+
+> **Note.** `Pack.splice(stubPath, zpkPath, outputPath)` and
+> `edit.setStub` overlap in functionality but are separate APIs.
+> `Pack.splice` is a one-shot fast path that swaps the stub on a
+> standalone `.zpk` and writes the result to a new path without
+> opening a transaction. Prefer `Pack.splice` for the pure stub-swap
+> case; use `editFile(...).setStub(...).commit()` when you also want
+> to combine the stub change with other mutations in the same
+> transaction.
+
+#### `edit.commit() -> bool`
+
+Materialize the staged ops as a single rewrite.
+
+- For `editFile`: writes to `<path>.zym-edit.tmp.<pid>`, `fsync`s
+  on POSIX, mirrors source mode bits via `chmod` on POSIX, then
+  atomically renames over the source path. After a successful
+  rename the reader is re-opened from the new file. On any failure
+  before the rename the temp file is removed and the source is
+  untouched.
+- For `editBuffer`: builds the new bundle in memory, then resizes
+  and overwrites the borrowed `PackedByteArray` underlying the
+  source `Buffer`. After write-back, the reader is re-opened
+  against the buffer's new bytes.
+
+On success, the staged op log is cleared and further ops chain off
+the freshly-committed state.
+
+> ⚠️  **Buffer snapshot caveat.** If a script took a sub-view of the
+> source Buffer, or copied bytes out of it into a separate Buffer,
+> **before** `commit()`, that snapshot is independent and will *not*
+> auto-update when the source Buffer is mutated by the commit.
+> Standard mutator caveat; same as any other in-place Buffer write.
+
+#### `edit.close() -> bool`
+
+Drop staged state and close the reader. Idempotent; safe to call on
+a committed handle. A GC finalizer is a safety net but explicit
+`close()` is recommended.
+
+### Examples
+
+#### Add a file and re-target the entry point
+
+```
+var e = Pack.editFile("dist/app.zpk");
+e.add({
+    name: "main.zbc",
+    kind: "entry_bytecode",
+    data: newBc
+});
+e.setEntryIndex("main.zbc");
+e.commit();
+e.close();
+```
+
+#### Replace a config in a stub-wrapped binary, preserving `+x`
+
+```
+var e = Pack.editFile("dist/app");                  // stub-wrapped
+e.replace("config.json", { data: newCfgBytes });
+e.commit();                                         // atomic rename; +x preserved
+e.close();
+```
+
+#### Mutate a Buffer through a function (out-param pattern)
+
+```
+function patchConfig(bundleBuf, newCfg) {
+    var e = Pack.editBuffer(bundleBuf);
+    e.replace("config.json", { data: newCfg });
+    e.commit();                                     // mutates bundleBuf in place
+    e.close();
+}
+
+var buf = File.readAllBytes("dist/app.zpk");
+patchConfig(buf, newCfg);
+// buf now contains the rewritten bundle.
+File.writeAllBytes("dist/app.zpk", buf);
+```
+
+#### Strip a stub, write headless
+
+```
+var e = Pack.editFile("dist/app");                  // stub-wrapped
+e.setStub(null);
+e.commit();                                         // result is now headless
+e.close();
+```
 
 ## See also
 

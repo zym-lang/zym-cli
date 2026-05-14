@@ -36,6 +36,10 @@
 #ifndef _WIN32
 #  include <sys/stat.h>
 #  include <errno.h>
+#  include <unistd.h>
+#endif
+#ifdef _WIN32
+#  include <process.h>  // _getpid
 #endif
 
 // Provided by buffer.cpp — type-clean Buffer reader / builder so we
@@ -252,6 +256,188 @@ double opt_number(ZymVM* vm, ZymValue map, const char* key, double dflt) {
     return zym_asNumber(v);
 }
 
+// ---- shared entry-spec parsing --------------------------------------------
+//
+// Parses a single entry-spec map (the shape used by `Pack.build`'s
+// `spec.entries[i]` and the upcoming `EditHandle.add` / `replace`
+// specs) into a `ZpkEntryInput` plus a side `std::string` for the
+// name.
+//
+// `where`: human-readable prefix for runtime error messages (e.g.
+//   "Pack.build(spec): spec.entries[3]" or "edit.replace(arg, spec)").
+// `require_all`:
+//   - true  (build / add)    : `kind` is required, and exactly one of
+//                              `data` / `path` must be set.
+//   - false (replace)        : every field is optional; at most one of
+//                              `data` / `path` may be set; on absence
+//                              the corresponding `out_info` field is
+//                              left zero-initialised so the caller can
+//                              detect "field not set in this spec".
+// `out_set_*` flags (when non-null) are written to true for any field
+// the spec actually mentioned, letting `replace` distinguish "field
+// omitted" from "field explicitly set to its zero value".
+//
+// `bundle_compress` / `bundle_level` are the bundle-wide defaults
+// (`f_build` reads them from the outer spec; `add`/`replace` pass
+// `false` / `3` since there is no bundle scope at edit time).
+//
+// On success returns true and fills `*out_info` + `*out_name_storage`
+// (the latter's `.data()` is plugged into `out_info->name`).
+// On failure raises a runtime error on `vm` and returns false.
+bool parse_entry_spec(ZymVM* vm, ZymValue e, const char* where,
+                      bool require_all,
+                      bool bundle_compress, int bundle_level,
+                      ZpkEntryInput* out_info,
+                      std::string*   out_name_storage,
+                      bool* out_set_kind = nullptr,
+                      bool* out_set_name = nullptr,
+                      bool* out_set_flags = nullptr,
+                      bool* out_set_custom = nullptr,
+                      bool* out_set_compression = nullptr,
+                      bool* out_set_bytes = nullptr)
+{
+    if (!zym_isMap(e)) {
+        zym_runtimeError(vm, "%s must be a map", where);
+        return false;
+    }
+    std::memset(out_info, 0, sizeof(*out_info));
+
+    // kind
+    ZymValue kindV = zym_mapGet(vm, e, "kind");
+    const bool kind_present = (kindV != ZYM_ERROR) && !zym_isNull(kindV);
+    if (kind_present) {
+        if (!zym_isString(kindV)) {
+            zym_runtimeError(vm, "%s.kind must be a string", where);
+            return false;
+        }
+        uint8_t kind_byte = 0;
+        const char* kind_str = zym_asCString(kindV);
+        if (!kind_from_string(kind_str, &kind_byte)) {
+            zym_runtimeError(vm,
+                "%s.kind '%s' is not a known kind "
+                "(expected 'entry_source', 'entry_bytecode', 'source_map', 'file', or 'blob')",
+                where, kind_str);
+            return false;
+        }
+        out_info->kind = kind_byte;
+        if (out_set_kind) *out_set_kind = true;
+    } else if (require_all) {
+        zym_runtimeError(vm, "%s.kind must be a string", where);
+        return false;
+    }
+
+    // name (optional in both modes)
+    const char* name = opt_string(vm, e, "name");
+    if (name) {
+        out_name_storage->assign(name);
+        out_info->name = out_name_storage->data();
+        out_info->name_length = out_name_storage->size();
+        if (out_set_name) *out_set_name = true;
+    }
+
+    // flags / custom (optional in both modes)
+    {
+        ZymValue fv = zym_mapGet(vm, e, "flags");
+        if (fv != ZYM_ERROR && !zym_isNull(fv)) {
+            if (!zym_isNumber(fv)) {
+                zym_runtimeError(vm, "%s.flags must be a number", where);
+                return false;
+            }
+            out_info->flags = (uint16_t)zym_asNumber(fv);
+            if (out_set_flags) *out_set_flags = true;
+        }
+    }
+    {
+        ZymValue cv = zym_mapGet(vm, e, "custom");
+        if (cv != ZYM_ERROR && !zym_isNull(cv)) {
+            if (!zym_isNumber(cv)) {
+                zym_runtimeError(vm, "%s.custom must be a number", where);
+                return false;
+            }
+            out_info->custom = (uint32_t)zym_asNumber(cv);
+            if (out_set_custom) *out_set_custom = true;
+        }
+    }
+
+    // compression / level (optional; entry overrides bundle default)
+    bool entry_compress = bundle_compress;
+    bool comp_present = false;
+    {
+        ZymValue ecv = zym_mapGet(vm, e, "compression");
+        if (ecv != ZYM_ERROR && !zym_isNull(ecv)) {
+            if (!zym_isBool(ecv)) {
+                zym_runtimeError(vm, "%s.compression must be a bool", where);
+                return false;
+            }
+            entry_compress = zym_asBool(ecv);
+            comp_present = true;
+        }
+    }
+    int entry_level = bundle_level;
+    {
+        ZymValue elv = zym_mapGet(vm, e, "level");
+        if (elv != ZYM_ERROR && !zym_isNull(elv)) {
+            if (!zym_isNumber(elv)) {
+                zym_runtimeError(vm, "%s.level must be a number", where);
+                return false;
+            }
+            double d = zym_asNumber(elv);
+            if (d < 1 || d > 22) {
+                zym_runtimeError(vm, "%s.level must be in 1..22", where);
+                return false;
+            }
+            entry_level = (int)d;
+            comp_present = true;
+        }
+    }
+    if (comp_present || require_all) {
+        out_info->compression = entry_compress ? ZPK_COMPRESSION_ZSTD : ZPK_COMPRESSION_NONE;
+        out_info->level       = entry_compress ? entry_level : 0;
+        if (comp_present && out_set_compression) *out_set_compression = true;
+    }
+
+    // bytes source: in `require_all` mode exactly one of `data` /
+    // `path` must be set; in partial mode at most one may be set
+    // (and either being absent leaves the bytes-source unset).
+    ZymValue dataV = zym_mapGet(vm, e, "data");
+    ZymValue pathV = zym_mapGet(vm, e, "path");
+    const bool data_present = (dataV != ZYM_ERROR) && !zym_isNull(dataV);
+    const bool path_present = (pathV != ZYM_ERROR) && !zym_isNull(pathV);
+
+    if (data_present && path_present) {
+        zym_runtimeError(vm, "%s sets both `data` and `path`; pick exactly one", where);
+        return false;
+    }
+    if (require_all && !data_present && !path_present) {
+        zym_runtimeError(vm,
+            "%s needs exactly one of `data` (Buffer) or `path` (string)", where);
+        return false;
+    }
+    if (data_present) {
+        const char* bytes = nullptr;
+        size_t      sz    = 0;
+        if (!readBufferBytes(vm, dataV, &bytes, &sz)) {
+            zym_runtimeError(vm, "%s.data must be a Buffer", where);
+            return false;
+        }
+        out_info->data      = bytes;
+        out_info->data_size = sz;
+        out_info->file_path = nullptr;
+        if (out_set_bytes) *out_set_bytes = true;
+    } else if (path_present) {
+        if (!zym_isString(pathV)) {
+            zym_runtimeError(vm, "%s.path must be a string", where);
+            return false;
+        }
+        out_info->data      = nullptr;
+        out_info->data_size = 0;
+        out_info->file_path = zym_asCString(pathV);
+        if (out_set_bytes) *out_set_bytes = true;
+    }
+
+    return true;
+}
+
 // ---- the build call -------------------------------------------------------
 
 ZymValue f_setVerboseOutput(ZymVM* vm, ZymValue /*self*/, ZymValue vV) {
@@ -363,111 +549,13 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
 
     for (int i = 0; i < n; i++) {
         ZymValue e = zym_listGet(vm, entriesV, i);
-        if (e == ZYM_ERROR || !zym_isMap(e)) {
-            zym_runtimeError(vm, "Pack.build(spec): spec.entries[%d] must be a map", i);
+        char where[64];
+        std::snprintf(where, sizeof(where), "Pack.build(spec): spec.entries[%d]", i);
+        if (!parse_entry_spec(vm, e, where,
+                              /*require_all=*/true,
+                              bundle_compress, bundle_level,
+                              &infos[i], &name_storage[i])) {
             return ZYM_ERROR;
-        }
-
-        // kind (required)
-        ZymValue kindV = zym_mapGet(vm, e, "kind");
-        if (kindV == ZYM_ERROR || zym_isNull(kindV) || !zym_isString(kindV)) {
-            zym_runtimeError(vm, "Pack.build(spec): spec.entries[%d].kind must be a string", i);
-            return ZYM_ERROR;
-        }
-        uint8_t kind_byte = 0;
-        const char* kind_str = zym_asCString(kindV);
-        if (!kind_from_string(kind_str, &kind_byte)) {
-            zym_runtimeError(vm,
-                "Pack.build(spec): spec.entries[%d].kind '%s' is not a known kind "
-                "(expected 'entry_source', 'entry_bytecode', 'source_map', or 'asset')",
-                i, kind_str);
-            return ZYM_ERROR;
-        }
-
-        // name (optional)
-        const char* name = opt_string(vm, e, "name");
-        if (name) {
-            name_storage[i].assign(name);
-            infos[i].name = name_storage[i].data();
-            infos[i].name_length = name_storage[i].size();
-        }
-
-        // flags / custom (optional)
-        infos[i].kind   = kind_byte;
-        infos[i].flags  = (uint16_t)opt_number(vm, e, "flags",  0.0);
-        infos[i].custom = (uint32_t)opt_number(vm, e, "custom", 0.0);
-
-        // compression (optional bool, overrides bundle default).
-        bool entry_compress = bundle_compress;
-        {
-            ZymValue ecv = zym_mapGet(vm, e, "compression");
-            if (ecv != ZYM_ERROR && !zym_isNull(ecv)) {
-                if (!zym_isBool(ecv)) {
-                    zym_runtimeError(vm,
-                        "Pack.build(spec): spec.entries[%d].compression must be a bool", i);
-                    return ZYM_ERROR;
-                }
-                entry_compress = zym_asBool(ecv);
-            }
-        }
-        int entry_level = bundle_level;
-        {
-            ZymValue elv = zym_mapGet(vm, e, "level");
-            if (elv != ZYM_ERROR && !zym_isNull(elv)) {
-                if (!zym_isNumber(elv)) {
-                    zym_runtimeError(vm,
-                        "Pack.build(spec): spec.entries[%d].level must be a number", i);
-                    return ZYM_ERROR;
-                }
-                double d = zym_asNumber(elv);
-                if (d < 1 || d > 22) {
-                    zym_runtimeError(vm,
-                        "Pack.build(spec): spec.entries[%d].level must be in 1..22", i);
-                    return ZYM_ERROR;
-                }
-                entry_level = (int)d;
-            }
-        }
-        infos[i].compression = entry_compress ? ZPK_COMPRESSION_ZSTD : ZPK_COMPRESSION_NONE;
-        infos[i].level       = entry_compress ? entry_level : 0;
-
-        // bytes source: exactly one of `data` (Buffer) or `path` (string).
-        ZymValue dataV = zym_mapGet(vm, e, "data");
-        ZymValue pathV = zym_mapGet(vm, e, "path");
-        const bool data_present = (dataV != ZYM_ERROR) && !zym_isNull(dataV);
-        const bool path_present = (pathV != ZYM_ERROR) && !zym_isNull(pathV);
-
-        if (data_present && path_present) {
-            zym_runtimeError(vm,
-                "Pack.build(spec): spec.entries[%d] sets both `data` and `path`; pick exactly one", i);
-            return ZYM_ERROR;
-        }
-        if (!data_present && !path_present) {
-            zym_runtimeError(vm,
-                "Pack.build(spec): spec.entries[%d] needs exactly one of `data` (Buffer) or `path` (string)", i);
-            return ZYM_ERROR;
-        }
-
-        if (data_present) {
-            const char* bytes = nullptr;
-            size_t      sz    = 0;
-            if (!readBufferBytes(vm, dataV, &bytes, &sz)) {
-                zym_runtimeError(vm,
-                    "Pack.build(spec): spec.entries[%d].data must be a Buffer", i);
-                return ZYM_ERROR;
-            }
-            infos[i].data      = bytes;
-            infos[i].data_size = sz;
-            infos[i].file_path = nullptr;
-        } else {
-            if (!zym_isString(pathV)) {
-                zym_runtimeError(vm,
-                    "Pack.build(spec): spec.entries[%d].path must be a string", i);
-                return ZYM_ERROR;
-            }
-            infos[i].data      = nullptr;
-            infos[i].data_size = 0;
-            infos[i].file_path = zym_asCString(pathV);
         }
     }
 
@@ -1234,6 +1322,1073 @@ ZymValue f_splice(ZymVM* vm, ZymValue, ZymValue stubPathV, ZymValue zpkPathV, Zy
     return zym_newBool(true);
 }
 
+// ---- edit-transaction handle (Stages 5–6: skeleton + staging ops) --------
+//
+// Per `future/pack_updates_roadmap.md`, `Pack.editFile` / `Pack.editBuffer`
+// open an existing bundle, let the script stage an arbitrary number of
+// mutations against an in-memory op log, and `commit()` them in one
+// atomic rewrite.
+//
+// Stage 5 landed the handle struct, the tagged `StagedOp` shape, the
+// two constructors, and the read-side methods (`list` / `info` /
+// `entryIndex` / `close`) reading directly from the source reader.
+//
+// Stage 6 adds the *mutating ops* (staging only — `commit` lands in
+// Stage 7/8) and projects the staged op log onto the read-side
+// methods so `list` / `info` / `entryIndex` reflect the post-edit
+// view, not the source view. The projection is recomputed on demand
+// (`rebuild_view`) rather than maintained incrementally — simpler,
+// no incremental-correctness bugs, and edit transactions are not
+// hot-path.
+
+enum StagedOpKind : uint8_t {
+    OP_ADD = 1,
+    OP_REMOVE,
+    OP_REPLACE,
+    OP_RENAME,
+    OP_MOVE,
+    OP_SET_ENTRY_INDEX,
+    OP_SET_FLAGS,
+    OP_SET_CUSTOM,
+    OP_SET_STUB,
+};
+
+// Stub source for `setStub`. Resolved at commit time.
+enum StubSourceKind : uint8_t {
+    STUB_SRC_NONE = 0,    // sentinel; setStub not invoked on this op slot
+    STUB_SRC_PATH,        // path string
+    STUB_SRC_BUFFER,      // owned bytes copied from a Buffer
+    STUB_SRC_NULL,        // explicit null → strip stub on commit
+};
+
+struct StagedOp {
+    StagedOpKind kind;
+
+    // Most ops carry a "target" entry identifier resolved against the
+    // *current staged view* at commit time. `target_is_index=true`
+    // means `target_index` is authoritative; otherwise `target_name`
+    // is the first-hit name match. `add` uses neither (it inserts).
+    bool         target_is_index = false;
+    int          target_index    = -1;
+    std::string  target_name;
+
+    // op-specific payloads (only the relevant union member is populated)
+    // ADD / REPLACE: a parsed entry-spec (validated at stage time)
+    ZpkEntryInput spec{};
+    std::string   spec_name;     // backing storage for spec.name
+    std::vector<char> spec_bytes; // owned copy of `data` bytes (so the script-side Buffer can move on)
+    std::string   spec_path;      // owned copy of `file_path` string
+    bool          spec_set_kind = false, spec_set_name = false;
+    bool          spec_set_flags = false, spec_set_custom = false;
+    bool          spec_set_compression = false, spec_set_bytes = false;
+    int           add_insert_index = -1; // ADD only; -1 = append
+
+    // RENAME
+    std::string  new_name;
+
+    // MOVE
+    int          dst_index = -1;
+
+    // SET_ENTRY_INDEX is encoded via target_*; no extra payload.
+
+    // SET_FLAGS
+    uint16_t     flags_value = 0;
+
+    // SET_CUSTOM
+    uint32_t     custom_value = 0;
+
+    // SET_STUB
+    StubSourceKind   stub_source = STUB_SRC_NONE;
+    std::string      stub_path;     // STUB_SRC_PATH
+    std::vector<char> stub_bytes;   // STUB_SRC_BUFFER
+};
+
+// Staged-view entry. Represents one row of the manifest as it would
+// be after applying all staged ops to the source. Used by `list` /
+// `info` / `entryIndex` (read-side) and by every mutating op for
+// validating arg dispatch (string-name first-hit / index bounds)
+// against the post-staging shape.
+struct StagedEntry {
+    // Origin: either an unchanged source row (with optional metadata
+    // overrides), or a brand-new added row (or a source row whose
+    // bytes were replaced).
+    bool        from_source = true;
+    uint32_t    source_index = 0;       // valid iff from_source
+
+    // For non-source rows (added or bytes-replaced), `bytes_op_index`
+    // points at the StagedOp in `EditHandle::ops` that supplied the
+    // bytes (its `spec_bytes` / `spec_path` / `spec.compression`
+    // / `spec.level` / `spec.flags`+`custom` if set). -1 means
+    // "bytes come from the source reader at `source_index`".
+    int         bytes_op_index = -1;
+
+    // Identity / metadata. For source rows these start as a copy of
+    // the source manifest entry; ops mutate them in place.
+    std::string name;
+    uint8_t     kind = 0;
+    uint16_t    flags = 0;
+    uint32_t    custom = 0;
+    uint8_t     compression = 0;
+    uint64_t    uncompressed_size = 0;
+    uint64_t    data_size = 0;
+    uint32_t    data_crc32 = 0;
+};
+
+struct EditHandle {
+    ZpkReader              src{};
+    bool                   open = false;
+    bool                   from_buffer = false;  // true → editBuffer; false → editFile
+    std::string            source_path;          // editFile: original path (for commit's atomic rename)
+    ZymValue               buffer_ref = ZYM_ERROR; // editBuffer: bound Buffer value (for write-back)
+    std::vector<StagedOp>  ops;
+
+    // Staged view: rebuilt on demand via `rebuild_view`. Index is the
+    // post-staging manifest position; `entry_index` is the
+    // post-staging program-entry pointer (UINT32_MAX = none).
+    std::vector<StagedEntry> view;
+    uint32_t                 view_entry_index = UINT32_MAX;
+    bool                     view_dirty = true;
+};
+
+void editFinalizer(ZymVM*, void* data) {
+    auto* h = static_cast<EditHandle*>(data);
+    if (!h) return;
+    if (h->open) {
+        zpk_reader_close(&h->src);
+        h->open = false;
+    }
+    delete h;
+}
+
+EditHandle* unwrap_edit(ZymVM* /*vm*/, ZymValue ctx) {
+    return static_cast<EditHandle*>(zym_getNativeData(ctx));
+}
+
+// Read a source manifest entry's name into a std::string. Source
+// names are not NUL-terminated, so we have to length-copy.
+void source_entry_name(const ZpkReader* r, uint32_t i, std::string* out) {
+    const ZpkEntry& e = r->manifest[i];
+    if (e.name_length > 0 && r->strtab) {
+        out->assign((const char*)(r->strtab + e.name_offset), (size_t)e.name_length);
+    } else {
+        out->clear();
+    }
+}
+
+// Re-project the staged view from `src.manifest` plus `ops` in order.
+// Cheap by construction: O(entries + ops). Called lazily before any
+// op or read that needs the post-staging shape.
+void rebuild_view(EditHandle* h) {
+    if (!h->view_dirty) return;
+    h->view.clear();
+    // Seed from source.
+    const uint32_t n = h->src.footer.entry_count;
+    h->view.reserve(n);
+    for (uint32_t i = 0; i < n; i++) {
+        const ZpkEntry& e = h->src.manifest[i];
+        StagedEntry s;
+        s.from_source = true;
+        s.source_index = i;
+        source_entry_name(&h->src, i, &s.name);
+        s.kind = e.kind;
+        s.flags = e.flags;
+        s.custom = e.custom;
+        s.compression = e.compression;
+        s.uncompressed_size = e.uncompressed_size;
+        s.data_size = e.data_size;
+        s.data_crc32 = e.data_crc32;
+        h->view.push_back(std::move(s));
+    }
+    h->view_entry_index = h->src.footer.entry_index;
+    if (h->view_entry_index >= h->view.size()) h->view_entry_index = UINT32_MAX;
+
+    // Replay ops in order. We use lambdas for arg resolution against
+    // the *current* (mid-replay) view, since some op chains depend
+    // on prior ops (e.g. add then setFlags on the added entry).
+    auto resolve = [&](const StagedOp& op) -> int {
+        if (op.target_is_index) {
+            int idx = op.target_index;
+            if (idx < 0 || idx >= (int)h->view.size()) return -1;
+            return idx;
+        }
+        // first-hit name
+        for (size_t i = 0; i < h->view.size(); i++) {
+            if (h->view[i].name == op.target_name) return (int)i;
+        }
+        return -1;
+    };
+
+    for (size_t op_i = 0; op_i < h->ops.size(); op_i++) {
+        const StagedOp& op = h->ops[op_i];
+        switch (op.kind) {
+            case OP_ADD: {
+                StagedEntry s;
+                s.from_source = false;
+                s.bytes_op_index = (int)op_i;
+                s.name = op.spec_name;
+                s.kind = op.spec.kind;
+                s.flags = op.spec.flags;
+                s.custom = op.spec.custom;
+                s.compression = op.spec.compression;
+                // For added entries we don't know on-disk sizes /
+                // CRCs until commit-time. Report logical size from
+                // staged bytes; commit recomputes everything.
+                s.uncompressed_size = op.spec.data_size;
+                s.data_size = op.spec.data_size;
+                s.data_crc32 = 0;
+                int ins = op.add_insert_index;
+                if (ins < 0 || ins > (int)h->view.size()) ins = (int)h->view.size();
+                h->view.insert(h->view.begin() + ins, std::move(s));
+                if (h->view_entry_index != UINT32_MAX &&
+                    (int)h->view_entry_index >= ins) {
+                    h->view_entry_index++;
+                }
+                break;
+            }
+            case OP_REMOVE: {
+                int idx = resolve(op);
+                if (idx < 0) break; // commit will re-validate; skip in view replay
+                h->view.erase(h->view.begin() + idx);
+                if (h->view_entry_index != UINT32_MAX) {
+                    if ((int)h->view_entry_index == idx) {
+                        h->view_entry_index = UINT32_MAX;
+                    } else if ((int)h->view_entry_index > idx) {
+                        h->view_entry_index--;
+                    }
+                }
+                break;
+            }
+            case OP_REPLACE: {
+                int idx = resolve(op);
+                if (idx < 0) break;
+                StagedEntry& s = h->view[idx];
+                if (op.spec_set_kind)   s.kind = op.spec.kind;
+                if (op.spec_set_flags)  s.flags = op.spec.flags;
+                if (op.spec_set_custom) s.custom = op.spec.custom;
+                if (op.spec_set_compression) s.compression = op.spec.compression;
+                if (op.spec_set_name)   s.name = op.spec_name;
+                if (op.spec_set_bytes) {
+                    s.from_source = false; // body replaced; commit re-emits fresh
+                    s.bytes_op_index = (int)op_i;
+                    s.uncompressed_size = op.spec.data_size;
+                    s.data_size = op.spec.data_size;
+                    s.data_crc32 = 0;
+                }
+                break;
+            }
+            case OP_RENAME: {
+                int idx = resolve(op);
+                if (idx < 0) break;
+                h->view[idx].name = op.new_name;
+                break;
+            }
+            case OP_MOVE: {
+                int idx = resolve(op);
+                if (idx < 0) break;
+                int dst = op.dst_index;
+                if (dst < 0) dst = 0;
+                if (dst >= (int)h->view.size()) dst = (int)h->view.size() - 1;
+                if (dst == idx) break;
+                StagedEntry s = std::move(h->view[idx]);
+                h->view.erase(h->view.begin() + idx);
+                h->view.insert(h->view.begin() + dst, std::move(s));
+                // Update entry_index pointer.
+                if (h->view_entry_index != UINT32_MAX) {
+                    uint32_t ei = h->view_entry_index;
+                    if ((int)ei == idx) {
+                        h->view_entry_index = (uint32_t)dst;
+                    } else {
+                        // moved row vacated idx, occupies dst
+                        int e = (int)ei;
+                        if (idx < dst) {
+                            if (e > idx && e <= dst) e--;
+                        } else {
+                            if (e >= dst && e < idx) e++;
+                        }
+                        h->view_entry_index = (uint32_t)e;
+                    }
+                }
+                break;
+            }
+            case OP_SET_ENTRY_INDEX: {
+                int idx = resolve(op);
+                if (idx < 0) break;
+                h->view_entry_index = (uint32_t)idx;
+                break;
+            }
+            case OP_SET_FLAGS: {
+                int idx = resolve(op);
+                if (idx < 0) break;
+                h->view[idx].flags = op.flags_value;
+                break;
+            }
+            case OP_SET_CUSTOM: {
+                int idx = resolve(op);
+                if (idx < 0) break;
+                h->view[idx].custom = op.custom_value;
+                break;
+            }
+            case OP_SET_STUB:
+                // Affects commit only; no view change.
+                break;
+        }
+    }
+
+    h->view_dirty = false;
+}
+
+// Resolve a script-supplied arg (string name | numeric index) against
+// the current staged view. Returns:
+//   >= 0 : view index
+//   -1   : not found / out of range (caller turns into `false`)
+//   -2   : wrong-type argument (runtime error already raised)
+int resolve_view_arg(ZymVM* vm, EditHandle* h, ZymValue arg, const char* fn_name) {
+    rebuild_view(h);
+    if (zym_isNumber(arg)) {
+        double d = zym_asNumber(arg);
+        if (d < 0 || d >= (double)h->view.size()) return -1;
+        return (int)d;
+    }
+    if (zym_isString(arg)) {
+        const char* s = zym_asCString(arg);
+        for (size_t i = 0; i < h->view.size(); i++) {
+            if (h->view[i].name == s) return (int)i;
+        }
+        return -1;
+    }
+    zym_runtimeError(vm, "%s expects a string entry name or a numeric index", fn_name);
+    return -2;
+}
+
+// Populate a StagedOp's `target_*` from a name-or-index arg without
+// resolving (resolution happens at view-rebuild / commit time so the
+// op can refer to a future entry created by an earlier op). Returns
+// false on wrong-type (runtime error raised).
+bool stage_target(ZymVM* vm, StagedOp* op, ZymValue arg, const char* fn_name) {
+    if (zym_isNumber(arg)) {
+        op->target_is_index = true;
+        op->target_index = (int)zym_asNumber(arg);
+        return true;
+    }
+    if (zym_isString(arg)) {
+        op->target_is_index = false;
+        op->target_name.assign(zym_asCString(arg));
+        return true;
+    }
+    zym_runtimeError(vm, "%s expects a string entry name or a numeric index", fn_name);
+    return false;
+}
+
+// Build an `entryInfo` map from a `StagedEntry` (post-staging view).
+// Mirrors the shape of `make_entry_info` but reports `dataOffset` as
+// 0 / `dataSize` from the staged-size estimate since the on-disk
+// layout is unknown until commit.
+ZymValue make_staged_entry_info(ZymVM* vm, EditHandle* h, uint32_t idx) {
+    const StagedEntry& s = h->view[idx];
+    char user_buf[16];
+    ZymValue m = zym_newMap(vm);
+    zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "index",            zym_newNumber((double)idx));
+    zym_mapSet(vm, m, "name",             zym_newStringN(vm, s.name.data(), (int)s.name.size()));
+    zym_mapSet(vm, m, "kind",             zym_newString(vm, kind_to_string(s.kind, user_buf)));
+    zym_mapSet(vm, m, "kindByte",         zym_newNumber((double)s.kind));
+    zym_mapSet(vm, m, "compression",      zym_newString(vm, compression_to_string(s.compression)));
+    zym_mapSet(vm, m, "compressionByte",  zym_newNumber((double)s.compression));
+    zym_mapSet(vm, m, "flags",            zym_newNumber((double)s.flags));
+    zym_mapSet(vm, m, "required",         zym_newBool((s.flags & ZPK_ENTRY_FLAG_REQUIRED) != 0));
+    zym_mapSet(vm, m, "lazy",             zym_newBool((s.flags & ZPK_ENTRY_FLAG_LAZY) != 0));
+    zym_mapSet(vm, m, "dataOffset",       zym_newNumber(0.0));
+    zym_mapSet(vm, m, "dataSize",         zym_newNumber((double)s.data_size));
+    zym_mapSet(vm, m, "uncompressedSize", zym_newNumber((double)s.uncompressed_size));
+    zym_mapSet(vm, m, "size",             zym_newNumber((double)s.uncompressed_size));
+    zym_mapSet(vm, m, "dataCrc32",        zym_newNumber((double)s.data_crc32));
+    zym_mapSet(vm, m, "custom",           zym_newNumber((double)s.custom));
+    zym_mapSet(vm, m, "isEntry",          zym_newBool(h->view_entry_index == idx));
+    zym_mapSet(vm, m, "fromSource",       zym_newBool(s.from_source));
+    zym_popRoot(vm);
+    return m;
+}
+
+// ---- Stage 6: read-side methods (projected from staged view) -------------
+
+ZymValue e_list(ZymVM* vm, ZymValue self) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newNull();
+    rebuild_view(h);
+    ZymValue list = zym_newList(vm);
+    zym_pushRoot(vm, list);
+    for (uint32_t i = 0; i < h->view.size(); i++) {
+        zym_listAppend(vm, list, make_staged_entry_info(vm, h, i));
+    }
+    zym_popRoot(vm);
+    return list;
+}
+
+ZymValue e_info(ZymVM* vm, ZymValue self, ZymValue arg) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newNull();
+    int idx = resolve_view_arg(vm, h, arg, "edit.info(arg)");
+    if (idx == -2) return ZYM_ERROR;
+    if (idx < 0)   return zym_newNull();
+    return make_staged_entry_info(vm, h, (uint32_t)idx);
+}
+
+ZymValue e_entryIndex(ZymVM* vm, ZymValue self) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newNull();
+    rebuild_view(h);
+    if (h->view_entry_index == UINT32_MAX) return zym_newNull();
+    return zym_newNumber((double)h->view_entry_index);
+}
+
+ZymValue e_close(ZymVM* vm, ZymValue self) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h) return zym_newBool(false);
+    if (!h->open) return zym_newBool(false);
+    zpk_reader_close(&h->src);
+    h->open = false;
+    h->ops.clear();
+    h->view.clear();
+    h->view_dirty = true;
+    return zym_newBool(true);
+}
+
+// ---- Stage 6: mutating ops (staging only — commit lands Stage 7/8) -------
+
+// Mark the view stale and push the staged op. Centralised so any
+// future bookkeeping (op count limits, debug logging, …) has one
+// place to hook.
+void push_op(EditHandle* h, StagedOp&& op) {
+    h->ops.push_back(std::move(op));
+    h->view_dirty = true;
+}
+
+ZymValue e_add(ZymVM* vm, ZymValue self, ZymValue specV) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+
+    // Optional `index:` insertion point; default = append.
+    int insert_index = -1;
+    ZymValue ixV = zym_mapGet(vm, specV, "index");
+    if (ixV != ZYM_ERROR && !zym_isNull(ixV)) {
+        if (!zym_isNumber(ixV)) {
+            zym_runtimeError(vm, "edit.add(spec).index must be a number");
+            return ZYM_ERROR;
+        }
+        rebuild_view(h);
+        double d = zym_asNumber(ixV);
+        if (d < 0 || d > (double)h->view.size()) {
+            zym_runtimeError(vm,
+                "edit.add(spec).index %.0f out of range [0..%zu]",
+                d, h->view.size());
+            return ZYM_ERROR;
+        }
+        insert_index = (int)d;
+    }
+
+    StagedOp op;
+    op.kind = OP_ADD;
+    op.add_insert_index = insert_index;
+    if (!parse_entry_spec(vm, specV, "edit.add(spec)",
+                          /*require_all=*/true,
+                          /*bundle_compress=*/false, /*bundle_level=*/3,
+                          &op.spec, &op.spec_name,
+                          &op.spec_set_kind, &op.spec_set_name,
+                          &op.spec_set_flags, &op.spec_set_custom,
+                          &op.spec_set_compression, &op.spec_set_bytes)) {
+        return ZYM_ERROR;
+    }
+    // Own any borrowed bytes / path so the script-side Buffer / string
+    // can be reused or GC'd before commit.
+    if (op.spec.data && op.spec.data_size > 0) {
+        const char* p = static_cast<const char*>(op.spec.data);
+        op.spec_bytes.assign(p, p + op.spec.data_size);
+        op.spec.data = op.spec_bytes.data();
+    }
+    if (op.spec.file_path) {
+        op.spec_path.assign(op.spec.file_path);
+        op.spec.file_path = op.spec_path.c_str();
+    }
+    // Re-bind name pointer to the owned storage (parse_entry_spec
+    // set spec.name to spec_name->data(), but after `op` was moved
+    // into push_op below the pointer would dangle without re-binding
+    // post-move; defer that to commit-time helpers since we read
+    // from spec_name directly in rebuild_view).
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+ZymValue e_remove(ZymVM* vm, ZymValue self, ZymValue arg) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    StagedOp op;
+    op.kind = OP_REMOVE;
+    if (!stage_target(vm, &op, arg, "edit.remove(arg)")) return ZYM_ERROR;
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+ZymValue e_replace(ZymVM* vm, ZymValue self, ZymValue arg, ZymValue specV) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    StagedOp op;
+    op.kind = OP_REPLACE;
+    if (!stage_target(vm, &op, arg, "edit.replace(arg, spec)")) return ZYM_ERROR;
+    if (!parse_entry_spec(vm, specV, "edit.replace(arg, spec)",
+                          /*require_all=*/false,
+                          /*bundle_compress=*/false, /*bundle_level=*/3,
+                          &op.spec, &op.spec_name,
+                          &op.spec_set_kind, &op.spec_set_name,
+                          &op.spec_set_flags, &op.spec_set_custom,
+                          &op.spec_set_compression, &op.spec_set_bytes)) {
+        return ZYM_ERROR;
+    }
+    if (op.spec_set_bytes && op.spec.data && op.spec.data_size > 0) {
+        const char* p = static_cast<const char*>(op.spec.data);
+        op.spec_bytes.assign(p, p + op.spec.data_size);
+        op.spec.data = op.spec_bytes.data();
+    }
+    if (op.spec_set_bytes && op.spec.file_path) {
+        op.spec_path.assign(op.spec.file_path);
+        op.spec.file_path = op.spec_path.c_str();
+    }
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+ZymValue e_rename(ZymVM* vm, ZymValue self, ZymValue arg, ZymValue newNameV) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    if (!zym_isString(newNameV)) {
+        zym_runtimeError(vm, "edit.rename(arg, newName): newName must be a string");
+        return ZYM_ERROR;
+    }
+    StagedOp op;
+    op.kind = OP_RENAME;
+    if (!stage_target(vm, &op, arg, "edit.rename(arg, newName)")) return ZYM_ERROR;
+    op.new_name.assign(zym_asCString(newNameV));
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+ZymValue e_move(ZymVM* vm, ZymValue self, ZymValue srcArg, ZymValue dstV) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    if (!zym_isNumber(dstV)) {
+        zym_runtimeError(vm, "edit.move(srcArg, dstIndex): dstIndex must be a number");
+        return ZYM_ERROR;
+    }
+    StagedOp op;
+    op.kind = OP_MOVE;
+    if (!stage_target(vm, &op, srcArg, "edit.move(srcArg, dstIndex)")) return ZYM_ERROR;
+    op.dst_index = (int)zym_asNumber(dstV);
+    if (op.dst_index < 0) {
+        zym_runtimeError(vm, "edit.move(srcArg, dstIndex): dstIndex must be >= 0");
+        return ZYM_ERROR;
+    }
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+ZymValue e_setEntryIndex(ZymVM* vm, ZymValue self, ZymValue arg) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    StagedOp op;
+    op.kind = OP_SET_ENTRY_INDEX;
+    if (!stage_target(vm, &op, arg, "edit.setEntryIndex(arg)")) return ZYM_ERROR;
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+ZymValue e_setFlags(ZymVM* vm, ZymValue self, ZymValue arg, ZymValue flagsV) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    StagedOp op;
+    op.kind = OP_SET_FLAGS;
+    if (!stage_target(vm, &op, arg, "edit.setFlags(arg, flags)")) return ZYM_ERROR;
+
+    // `flags` accepts either a numeric mask or a map of {required,
+    // lazy} bools (matching the `make_entry_info` reverse shape).
+    if (zym_isNumber(flagsV)) {
+        op.flags_value = (uint16_t)zym_asNumber(flagsV);
+    } else if (zym_isMap(flagsV)) {
+        uint16_t f = 0;
+        ZymValue rv = zym_mapGet(vm, flagsV, "required");
+        if (rv != ZYM_ERROR && !zym_isNull(rv)) {
+            if (!zym_isBool(rv)) {
+                zym_runtimeError(vm, "edit.setFlags: flags.required must be a bool");
+                return ZYM_ERROR;
+            }
+            if (zym_asBool(rv)) f |= ZPK_ENTRY_FLAG_REQUIRED;
+        }
+        ZymValue lv = zym_mapGet(vm, flagsV, "lazy");
+        if (lv != ZYM_ERROR && !zym_isNull(lv)) {
+            if (!zym_isBool(lv)) {
+                zym_runtimeError(vm, "edit.setFlags: flags.lazy must be a bool");
+                return ZYM_ERROR;
+            }
+            if (zym_asBool(lv)) f |= ZPK_ENTRY_FLAG_LAZY;
+        }
+        ZymValue mv = zym_mapGet(vm, flagsV, "mask");
+        if (mv != ZYM_ERROR && !zym_isNull(mv)) {
+            if (!zym_isNumber(mv)) {
+                zym_runtimeError(vm, "edit.setFlags: flags.mask must be a number");
+                return ZYM_ERROR;
+            }
+            f |= (uint16_t)zym_asNumber(mv);
+        }
+        op.flags_value = f;
+    } else {
+        zym_runtimeError(vm,
+            "edit.setFlags(arg, flags): flags must be a number mask or a map");
+        return ZYM_ERROR;
+    }
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+ZymValue e_setCustom(ZymVM* vm, ZymValue self, ZymValue arg, ZymValue customV) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    if (!zym_isNumber(customV)) {
+        zym_runtimeError(vm, "edit.setCustom(arg, custom): custom must be a number");
+        return ZYM_ERROR;
+    }
+    StagedOp op;
+    op.kind = OP_SET_CUSTOM;
+    if (!stage_target(vm, &op, arg, "edit.setCustom(arg, custom)")) return ZYM_ERROR;
+    op.custom_value = (uint32_t)zym_asNumber(customV);
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+ZymValue e_setStub(ZymVM* vm, ZymValue self, ZymValue arg) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) return zym_newBool(false);
+    StagedOp op;
+    op.kind = OP_SET_STUB;
+    if (zym_isNull(arg)) {
+        op.stub_source = STUB_SRC_NULL;
+    } else if (zym_isString(arg)) {
+        op.stub_source = STUB_SRC_PATH;
+        op.stub_path.assign(zym_asCString(arg));
+    } else {
+        const char* bytes = nullptr;
+        size_t size = 0;
+        if (!readBufferBytes(vm, arg, &bytes, &size)) {
+            zym_runtimeError(vm,
+                "edit.setStub(arg): arg must be a path string, a Buffer, or null");
+            return ZYM_ERROR;
+        }
+        op.stub_source = STUB_SRC_BUFFER;
+        if (size > 0) op.stub_bytes.assign(bytes, bytes + size);
+    }
+    push_op(h, std::move(op));
+    return zym_newBool(true);
+}
+
+// ---- Stage 7: commit() for editFile -------------------------------------
+//
+// Translates the staged view into a `ZpkEntryInput[]` array (using the
+// Stage-1 borrow variant for unchanged source rows and the staged op's
+// owned bytes / path for added or bytes-replaced rows), resolves the
+// stub source (default = preserved verbatim from the source bundle;
+// the most recent `OP_SET_STUB` op overrides), runs final-state
+// invariant checks (`entry_index` -> ENTRY_SOURCE / ENTRY_BYTECODE),
+// writes to `<path>.zym-edit.tmp.<pid>`, `fsync`s, `chmod`s to mirror
+// the source's mode bits (preserves `+x`), then `rename`s atomically.
+//
+// On failure: returns `false`, unlinks the temp, and leaves the source
+// untouched. The handle remains usable with its staged ops preserved
+// so the script can fix and retry.
+//
+// On success: returns `true`. The reader is closed and re-opened from
+// the new file so any further ops chain off the freshly-written
+// bundle; `h->ops` is cleared and `view_dirty` is set so the next
+// read-side method reflects the committed state.
+
+// Compute the size of the leading CLI stub (bytes before the ZPK
+// payload) in an open reader's owned file_data. The payload regions
+// in the footer (manifest_offset, strtab_offset) and the first entry
+// in the manifest are all post-stub, so the smallest of those is the
+// stub boundary. For a bundle with zero entries, `strtab_offset` is
+// authoritative (it is the first non-stub offset).
+size_t compute_source_stub_size(const ZpkReader* r) {
+    uint64_t lo = r->footer.strtab_offset;
+    if (r->footer.manifest_offset < lo) lo = r->footer.manifest_offset;
+    for (uint32_t i = 0; i < r->footer.entry_count; i++) {
+        if (r->manifest[i].data_size > 0 && r->manifest[i].data_offset < lo) {
+            lo = r->manifest[i].data_offset;
+        }
+    }
+    if (lo > r->file_size) lo = r->file_size; // paranoia
+    return (size_t)lo;
+}
+
+// Pre-flight invariant checks against the post-staging view. Returns
+// true if OK; on failure raises a runtime error and returns false.
+bool validate_commit_view(ZymVM* vm, EditHandle* h, const char* fn_name) {
+    rebuild_view(h);
+    if (h->view.size() > UINT32_MAX) {
+        zym_runtimeError(vm, "%s: too many entries (%zu)", fn_name, h->view.size());
+        return false;
+    }
+    if (h->view_entry_index != UINT32_MAX) {
+        if ((size_t)h->view_entry_index >= h->view.size()) {
+            zym_runtimeError(vm,
+                "%s: staged entry_index %u out of range [0..%zu)",
+                fn_name, h->view_entry_index, h->view.size());
+            return false;
+        }
+        uint8_t k = h->view[h->view_entry_index].kind;
+        if (k != ZPK_KIND_ENTRY_SOURCE && k != ZPK_KIND_ENTRY_BYTECODE) {
+            zym_runtimeError(vm,
+                "%s: staged entry_index %u points at kind 0x%02x; must be "
+                "ENTRY_SOURCE (0x01) or ENTRY_BYTECODE (0x02)",
+                fn_name, h->view_entry_index, (unsigned)k);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Locate the latest staged OP_SET_STUB op (if any). Returns its index
+// in `h->ops` or -1 if none.
+int find_latest_setstub(const EditHandle* h) {
+    for (int i = (int)h->ops.size() - 1; i >= 0; i--) {
+        if (h->ops[i].kind == OP_SET_STUB) return i;
+    }
+    return -1;
+}
+
+ZymValue e_commit(ZymVM* vm, ZymValue self) {
+    EditHandle* h = unwrap_edit(vm, self);
+    if (!h || !h->open) {
+        zym_runtimeError(vm, "edit.commit(): handle is closed");
+        return ZYM_ERROR;
+    }
+
+    if (!validate_commit_view(vm, h, "edit.commit()")) return ZYM_ERROR;
+
+    // ---- Resolve the stub source ----
+    // Default = preserve source verbatim. Latest OP_SET_STUB overrides.
+    const void* stub_data  = nullptr;
+    size_t      stub_size  = 0;
+    // Heap buffer if we loaded a stub from disk; freed at function exit.
+    char*       owned_stub = nullptr;
+
+    int set_stub_idx = find_latest_setstub(h);
+    if (set_stub_idx >= 0) {
+        const StagedOp& s = h->ops[set_stub_idx];
+        switch (s.stub_source) {
+            case STUB_SRC_NULL:
+                // headless on commit
+                break;
+            case STUB_SRC_PATH: {
+                owned_stub = slurp_binary(s.stub_path.c_str(), &stub_size);
+                if (!owned_stub) {
+                    zym_runtimeError(vm,
+                        "edit.commit(): failed to read stub from path '%s'",
+                        s.stub_path.c_str());
+                    return ZYM_ERROR;
+                }
+                stub_data = owned_stub;
+                break;
+            }
+            case STUB_SRC_BUFFER:
+                stub_data = s.stub_bytes.empty() ? nullptr : s.stub_bytes.data();
+                stub_size = s.stub_bytes.size();
+                break;
+            case STUB_SRC_NONE:
+                break;
+        }
+    } else {
+        // No setStub; borrow the source bundle's stub verbatim.
+        size_t src_stub = compute_source_stub_size(&h->src);
+        if (src_stub > 0) {
+            stub_data = h->src.file_data;
+            stub_size = src_stub;
+        }
+    }
+
+    // ---- Build ZpkEntryInput[] from the staged view ----
+    std::vector<ZpkEntryInput> inputs(h->view.size());
+    uint32_t entry_index = h->view_entry_index == UINT32_MAX
+                               ? 0u : h->view_entry_index;
+    // If view_entry_index is UINT32_MAX, the writer still needs *some*
+    // entry index; conventional choice = 0. But a v1 bundle with zero
+    // entries can't carry a meaningful entry_index either way; the
+    // writer enforces it points at a valid kind, so a no-entry edit
+    // would only be legal if the source already had zero entries AND
+    // entry_index was zero. We don't try to enable headless-edit-zero
+    // here — error out if there are no entries.
+    if (h->view.empty()) {
+        if (owned_stub) std::free(owned_stub);
+        zym_runtimeError(vm,
+            "edit.commit(): cannot commit a bundle with zero entries");
+        return ZYM_ERROR;
+    }
+
+    for (size_t i = 0; i < h->view.size(); i++) {
+        const StagedEntry& s = h->view[i];
+        ZpkEntryInput& in = inputs[i];
+        // Zero-initialize.
+        in = ZpkEntryInput{};
+        in.name        = s.name.empty() ? nullptr : s.name.data();
+        in.name_length = s.name.size();
+        in.kind        = s.kind;
+        in.flags       = s.flags;
+        in.custom      = s.custom;
+
+        if (s.from_source) {
+            // Borrow the on-disk slice from the open source reader.
+            in.source_reader = &h->src;
+            in.source_index  = s.source_index;
+            // compression/data/file_path are ignored when source_reader
+            // is set (per zpk_writer.hpp contract).
+        } else if (s.bytes_op_index >= 0 &&
+                   s.bytes_op_index < (int)h->ops.size()) {
+            const StagedOp& op = h->ops[s.bytes_op_index];
+            in.compression = op.spec.compression;
+            in.level       = op.spec.level;
+            if (!op.spec_bytes.empty() || op.spec.data) {
+                in.data      = op.spec_bytes.empty() ? op.spec.data
+                                                     : (const void*)op.spec_bytes.data();
+                in.data_size = op.spec_bytes.empty() ? op.spec.data_size
+                                                     : op.spec_bytes.size();
+            } else if (!op.spec_path.empty()) {
+                in.file_path = op.spec_path.c_str();
+            } else if (op.spec.file_path) {
+                in.file_path = op.spec.file_path;
+            }
+        } else {
+            // Should be unreachable: a non-source row without a
+            // bytes-providing op means rebuild_view dropped state.
+            if (owned_stub) std::free(owned_stub);
+            zym_runtimeError(vm,
+                "edit.commit(): internal: staged entry %zu has no bytes source", i);
+            return ZYM_ERROR;
+        }
+    }
+
+    // ---- editBuffer path (Stage 8) ----
+    // Build the new bundle entirely in memory, write it back into the
+    // borrowed PackedByteArray* via writeBufferBytes (so every live
+    // script reference to the source Buffer sees the new contents),
+    // then re-open the reader against the freshly-mutated buffer so
+    // any further staged ops chain off the committed state.
+    if (h->from_buffer) {
+        uint8_t* out_buf = nullptr;
+        size_t   out_size = 0;
+        int ok = zpk_write_bundle_to_memory(&out_buf, &out_size,
+                                            stub_data, stub_size,
+                                            inputs.data(), inputs.size(),
+                                            entry_index);
+        if (!ok) {
+            if (owned_stub) std::free(owned_stub);
+            zym_runtimeError(vm,
+                "edit.commit(): failed to build new bundle in memory");
+            return ZYM_ERROR;
+        }
+        // Write the new bytes into the borrowed PackedByteArray*.
+        // Done while the source reader still holds its private copy
+        // of the *old* bytes (zpk_reader_open_memory copies), so the
+        // borrow sources used by zpk_write_bundle_to_memory above
+        // remain valid through the call. After this point the
+        // Buffer's contents are the new bundle.
+        if (!writeBufferBytes(vm, h->buffer_ref, out_buf, out_size)) {
+            std::free(out_buf);
+            if (owned_stub) std::free(owned_stub);
+            zym_runtimeError(vm,
+                "edit.commit(): failed to write back into Buffer");
+            return ZYM_ERROR;
+        }
+        std::free(out_buf);
+        if (owned_stub) std::free(owned_stub);
+
+        // Re-open the reader against the buffer's new contents. We
+        // re-fetch the bytes via readBufferBytes to get a current
+        // pointer (the resize above may have reallocated).
+        zpk_reader_close(&h->src);
+        const char* new_bytes = nullptr;
+        size_t      new_size  = 0;
+        if (!readBufferBytes(vm, h->buffer_ref, &new_bytes, &new_size) ||
+            zpk_reader_open_memory(&h->src, new_bytes, new_size) != 1) {
+            h->open = false;
+            zym_runtimeError(vm,
+                "edit.commit(): commit succeeded but reopening the Buffer "
+                "failed; handle is now closed");
+            return ZYM_ERROR;
+        }
+        h->ops.clear();
+        h->view.clear();
+        h->view_dirty = true;
+        return zym_newBool(true);
+    }
+
+    // ---- editFile path (Stage 7) ----
+    // Materialize the temp file path.
+    long pid_l =
+#ifdef _WIN32
+        (long)::_getpid();
+#else
+        (long)::getpid();
+#endif
+    char pid_buf[32];
+    std::snprintf(pid_buf, sizeof(pid_buf), ".zym-edit.tmp.%ld", pid_l);
+    std::string temp_path = h->source_path + pid_buf;
+
+    // ---- Write the new bundle to the temp file ----
+    int ok = zpk_write_bundle(temp_path.c_str(),
+                              stub_data, stub_size,
+                              inputs.data(), inputs.size(),
+                              entry_index);
+    if (!ok) {
+        std::remove(temp_path.c_str());
+        if (owned_stub) std::free(owned_stub);
+        zym_runtimeError(vm,
+            "edit.commit(): failed to write temp file '%s'", temp_path.c_str());
+        return ZYM_ERROR;
+    }
+
+    // ---- fsync the temp file (POSIX) ----
+#ifndef _WIN32
+    {
+        FILE* f = std::fopen(temp_path.c_str(), "rb");
+        if (f) {
+            int fd = ::fileno(f);
+            if (fd >= 0) ::fsync(fd);
+            std::fclose(f);
+        }
+    }
+#endif
+
+    // ---- chmod the temp to mirror the source's mode bits ----
+#ifndef _WIN32
+    {
+        struct stat st;
+        if (::stat(h->source_path.c_str(), &st) == 0) {
+            ::chmod(temp_path.c_str(), st.st_mode & 07777);
+        }
+    }
+#endif
+
+    // ---- Atomic rename ----
+    // The source reader owns an mmap-style file_data buffer that is a
+    // private copy of the source bytes (zpk_reader copies on open), so
+    // renaming over the source path is safe with the reader open.
+    // However, we'll re-open the reader from the new file post-rename
+    // so subsequent ops chain off the fresh state.
+    if (std::rename(temp_path.c_str(), h->source_path.c_str()) != 0) {
+        std::remove(temp_path.c_str());
+        if (owned_stub) std::free(owned_stub);
+        zym_runtimeError(vm,
+            "edit.commit(): atomic rename failed (temp='%s', dest='%s')",
+            temp_path.c_str(), h->source_path.c_str());
+        return ZYM_ERROR;
+    }
+
+    if (owned_stub) std::free(owned_stub);
+
+    // ---- Re-open the reader from the freshly-committed file ----
+    // We must close *after* the writer is done (it used h->src as a
+    // borrow source for unchanged entries), which is the case here.
+    zpk_reader_close(&h->src);
+    if (zpk_reader_open_path(&h->src, h->source_path.c_str()) != 1) {
+        // The commit succeeded on-disk; only the in-memory handle is
+        // now stale. Mark the handle closed so further ops fail loudly
+        // rather than reading dangling state.
+        h->open = false;
+        zym_runtimeError(vm,
+            "edit.commit(): commit succeeded but reopening '%s' failed; "
+            "handle is now closed",
+            h->source_path.c_str());
+        return ZYM_ERROR;
+    }
+    h->ops.clear();
+    h->view.clear();
+    h->view_dirty = true;
+    return zym_newBool(true);
+}
+
+ZymValue make_edit_instance(ZymVM* vm, EditHandle* handle) {
+    ZymValue ctxv = zym_createNativeContext(vm, handle, editFinalizer);
+    zym_pushRoot(vm, ctxv);
+
+    ZymValue obj = zym_newMap(vm);
+    zym_pushRoot(vm, obj);
+    zym_mapSet(vm, obj, "__edit__", ctxv);
+
+#define EM(name, sig, fn) do { \
+        ZymValue cl = zym_createNativeClosure(vm, sig, (void*)fn, ctxv); \
+        zym_pushRoot(vm, cl); zym_mapSet(vm, obj, name, cl); zym_popRoot(vm); \
+    } while (0)
+
+    // Read-side (project the staged op log on top of the source).
+    EM("list",          "list()",                       e_list);
+    EM("info",          "info(arg)",                    e_info);
+    EM("entryIndex",    "entryIndex()",                 e_entryIndex);
+    EM("close",         "close()",                      e_close);
+
+    // Mutating ops — Stage 6: staging only; `commit` (Stages 7/8)
+    // is what actually re-emits the bundle.
+    EM("add",           "add(spec)",                    e_add);
+    EM("remove",        "remove(arg)",                  e_remove);
+    EM("replace",       "replace(arg, spec)",           e_replace);
+    EM("rename",        "rename(arg, newName)",         e_rename);
+    EM("move",          "move(srcArg, dstIndex)",       e_move);
+    EM("setEntryIndex", "setEntryIndex(arg)",           e_setEntryIndex);
+    EM("setFlags",      "setFlags(arg, flags)",         e_setFlags);
+    EM("setCustom",     "setCustom(arg, custom)",       e_setCustom);
+    EM("setStub",       "setStub(arg)",                 e_setStub);
+
+    // Finalisers — Stage 7 lands `commit` for editFile; editBuffer
+    // commit (Stage 8) currently returns an error at the top of
+    // `e_commit`.
+    EM("commit",        "commit()",                     e_commit);
+
+#undef EM
+
+    zym_popRoot(vm);
+    zym_popRoot(vm);
+    return obj;
+}
+
+ZymValue f_editFile(ZymVM* vm, ZymValue, ZymValue pathV) {
+    if (!zym_isString(pathV)) {
+        zym_runtimeError(vm, "Pack.editFile(path) expects a string");
+        return ZYM_ERROR;
+    }
+    const char* path = zym_asCString(pathV);
+    auto* h = new EditHandle();
+    if (zpk_reader_open_path(&h->src, path) != 1) {
+        delete h;
+        return zym_newNull();
+    }
+    h->open = true;
+    h->from_buffer = false;
+    h->source_path.assign(path);
+    return make_edit_instance(vm, h);
+}
+
+ZymValue f_editBuffer(ZymVM* vm, ZymValue, ZymValue bufV) {
+    const char* bytes = nullptr;
+    size_t size = 0;
+    if (!readBufferBytes(vm, bufV, &bytes, &size)) {
+        zym_runtimeError(vm, "Pack.editBuffer(buffer) expects a Buffer");
+        return ZYM_ERROR;
+    }
+    auto* h = new EditHandle();
+    if (zpk_reader_open_memory(&h->src, bytes, size) != 1) {
+        delete h;
+        return zym_newNull();
+    }
+    h->open = true;
+    h->from_buffer = true;
+    h->buffer_ref = bufV;
+    return make_edit_instance(vm, h);
+}
+
 } // namespace
 
 // ---- factory --------------------------------------------------------------
@@ -1268,6 +2423,11 @@ ZymValue nativePack_create(ZymVM* vm) {
     // with a trailing ZPK footer, not just ELFs).
     F("inspectBin",    "inspectBin(path)",                            f_inspectBin);
     F("splice",        "splice(stubPath, zpkPath, outputPath)",       f_splice);
+
+    // Edit transaction (Stage 5: constructors + read-side only;
+    // mutating ops and commit land in Stages 6–8).
+    F("editFile",      "editFile(path)",     f_editFile);
+    F("editBuffer",    "editBuffer(buffer)", f_editBuffer);
 
 #undef F
 

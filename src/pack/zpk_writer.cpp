@@ -46,15 +46,17 @@ inline void put(uint8_t*& cursor, const void* src, size_t len) {
 
 } // namespace
 
-int zpk_write_bundle(const char* out_path,
-                     const void* stub_data, size_t stub_size,
-                     const ZpkEntryInput* entries, size_t entry_count,
-                     uint32_t entry_index)
+int zpk_write_bundle_to_memory(uint8_t** out_buf_p, size_t* out_size_p,
+                               const void* stub_data, size_t stub_size,
+                               const ZpkEntryInput* entries, size_t entry_count,
+                               uint32_t entry_index)
 {
-    if (!out_path) {
-        fprintf(stderr, "zpk_write_bundle: out_path is null.\n");
+    if (!out_buf_p || !out_size_p) {
+        fprintf(stderr, "zpk_write_bundle_to_memory: out_buf/out_size is null.\n");
         return 0;
     }
+    *out_buf_p = nullptr;
+    *out_size_p = 0;
     if (entry_count == 0 || !entries) {
         fprintf(stderr, "zpk_write_bundle: at least one entry is required.\n");
         return 0;
@@ -111,16 +113,41 @@ int zpk_write_bundle(const char* out_path,
     }
     for (size_t i = 0; i < entry_count; i++) {
         effective[i] = entries[i];
-        const bool has_data = entries[i].data != nullptr || entries[i].data_size > 0;
-        const bool has_path = entries[i].file_path != nullptr;
-        if (has_data && has_path) {
-            fprintf(stderr, "zpk_write_bundle: entry %zu has both `data` and `file_path` set.\n", i);
+        const bool has_data   = entries[i].data != nullptr || entries[i].data_size > 0;
+        const bool has_path   = entries[i].file_path != nullptr;
+        const bool has_borrow = entries[i].source_reader != nullptr;
+        // At most one of the three bytes-sources may be set.
+        const int source_count = (has_data ? 1 : 0) + (has_path ? 1 : 0) + (has_borrow ? 1 : 0);
+        if (source_count > 1) {
+            fprintf(stderr, "zpk_write_bundle: entry %zu has more than one bytes-source set (data/file_path/source_reader).\n", i);
             for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
             free(loaded_buffers);
             free(effective);
             return 0;
         }
-        if (!has_data && !has_path) {
+        if (has_borrow) {
+            // Borrow the on-disk slice straight from an open reader.
+            // Validation: index in range; the slice's compression byte
+            // and CRC become the new entry's; we do not recompress.
+            const ZpkReader* src = entries[i].source_reader;
+            const uint32_t   si  = entries[i].source_index;
+            if (!src || si >= src->footer.entry_count) {
+                fprintf(stderr, "zpk_write_bundle: entry %zu source_index %u out of range.\n", i, si);
+                for (size_t k = 0; k < entry_count; k++) free(loaded_buffers[k]);
+                free(loaded_buffers);
+                free(effective);
+                return 0;
+            }
+            const ZpkEntry& se = src->manifest[si];
+            effective[i].data        = src->file_data + se.data_offset;
+            effective[i].data_size   = static_cast<size_t>(se.data_size);
+            effective[i].compression = se.compression; // override: source's on-disk byte wins
+            effective[i].file_path   = nullptr;
+            // `effective[i].source_reader` stays set as the sentinel
+            // for the compression / CRC passes below.
+            continue;
+        }
+        if (source_count == 0) {
             // Treat as a legitimate empty in-memory entry: data=null,
             // data_size=0. No file to load.
             effective[i].data = nullptr;
@@ -213,6 +240,16 @@ int zpk_write_bundle(const char* out_path,
         return 0;
     }
     for (size_t i = 0; i < entry_count; i++) {
+        // Borrowed entries arrive already in final on-disk shape; the
+        // source manifest holds the authoritative uncompressed_size,
+        // which we must preserve verbatim (the bytes are not going
+        // through our compression pass).
+        if (effective[i].source_reader != nullptr) {
+            const ZpkEntry& se = effective[i].source_reader->manifest[effective[i].source_index];
+            uncompressed_sizes[i] = se.uncompressed_size;
+            continue;
+        }
+
         uncompressed_sizes[i] = static_cast<uint64_t>(effective[i].data_size);
 
         if (effective[i].compression == ZPK_COMPRESSION_NONE) continue;
@@ -308,7 +345,15 @@ int zpk_write_bundle(const char* out_path,
     uint64_t cursor_off = data_region_offset;
     for (size_t i = 0; i < entry_count; i++) {
         data_offsets[i] = cursor_off;
-        data_crcs[i] = zpk_crc32(0, entries[i].data, entries[i].data_size);
+        if (entries[i].source_reader != nullptr) {
+            // Borrowed: the bytes are bit-identical to the source's
+            // on-disk slice, so inherit the source's `data_crc32`
+            // verbatim. (Recomputing would give the same value but
+            // wastes CPU on large slices.)
+            data_crcs[i] = entries[i].source_reader->manifest[entries[i].source_index].data_crc32;
+        } else {
+            data_crcs[i] = zpk_crc32(0, entries[i].data, entries[i].data_size);
+        }
         cursor_off += entries[i].data_size;
     }
 
@@ -471,17 +516,39 @@ int zpk_write_bundle(const char* out_path,
     free(loaded_buffers);
     free(effective);
 
+    // Hand the assembled buffer to the caller. They free it.
+    *out_buf_p  = out_buf;
+    *out_size_p = static_cast<size_t>(total_size);
+    return 1;
+}
+
+int zpk_write_bundle(const char* out_path,
+                     const void* stub_data, size_t stub_size,
+                     const ZpkEntryInput* entries, size_t entry_count,
+                     uint32_t entry_index)
+{
+    if (!out_path) {
+        fprintf(stderr, "zpk_write_bundle: out_path is null.\n");
+        return 0;
+    }
+    uint8_t* out_buf = nullptr;
+    size_t   out_size = 0;
+    if (!zpk_write_bundle_to_memory(&out_buf, &out_size,
+                                    stub_data, stub_size,
+                                    entries, entry_count, entry_index)) {
+        return 0;
+    }
     FILE* f = fopen(out_path, "wb");
     if (!f) {
         fprintf(stderr, "zpk_write_bundle: could not create file \"%s\".\n", out_path);
         free(out_buf);
         return 0;
     }
-    size_t written = fwrite(out_buf, 1, static_cast<size_t>(total_size), f);
+    size_t written = fwrite(out_buf, 1, out_size, f);
     fclose(f);
     free(out_buf);
 
-    if (written != total_size) {
+    if (written != out_size) {
         fprintf(stderr, "zpk_write_bundle: short write to \"%s\".\n", out_path);
         return 0;
     }

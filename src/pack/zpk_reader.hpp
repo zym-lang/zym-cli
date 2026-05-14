@@ -78,4 +78,30 @@ int zpk_reader_self_exe_has_payload();
 // size in bytes.
 char* zpk_reader_read_entry(const ZpkReader* r, uint32_t index, size_t* out_size);
 
+// Borrow accessor — returns a pointer into the reader's owned
+// `file_data` for the on-disk byte slice of the entry at `index`,
+// along with the entry's compression byte, uncompressed size, and
+// data CRC32 as recorded in the manifest. No allocation, no copy,
+// no decompression — the bytes are exactly what is in the file.
+//
+// Used by the writer's borrow-from-reader entry source (see
+// `ZpkEntryInput::source_reader` in zpk_writer.hpp) so that
+// `Pack.editFile` / `Pack.editBuffer` can re-emit untouched entries
+// without round-tripping through decompression + recompression.
+//
+// Lifetime: the returned pointer is valid until `zpk_reader_close`
+// is called on `r`.
+//
+// Returns 1 on success, 0 on failure (out-of-range index, null
+// reader, etc.). On failure all out-params are left untouched.
+//
+// Any of the out-params may be null if the caller is not interested
+// in that field.
+int zpk_reader_get_entry_slice(const ZpkReader* r, uint32_t index,
+                               const uint8_t** out_data,
+                               uint64_t* out_size,
+                               uint8_t* out_compression,
+                               uint64_t* out_uncompressed_size,
+                               uint32_t* out_data_crc32);
+
 #endif // ZYM_PACK_ZPK_READER_HPP

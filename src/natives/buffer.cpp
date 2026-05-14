@@ -79,6 +79,22 @@ bool readBufferBytes(ZymVM* vm, ZymValue v, const char** out_data, size_t* out_s
     return true;
 }
 
+// Mirror of `readBufferBytes` for the write direction. Used by
+// `Pack.editBuffer`'s commit path: rewrites the borrowed
+// PackedByteArray in place so every live script reference to the
+// same Buffer observes the new contents (out-param / mutator style).
+bool writeBufferBytes(ZymVM* vm, ZymValue v, const void* data, size_t size) {
+    if (!zym_isMap(v)) return false;
+    ZymValue ctx = zym_mapGet(vm, v, "__pba__");
+    if (ctx == ZYM_ERROR) return false;
+    void* nd = zym_getNativeData(ctx);
+    if (!nd) return false;
+    auto* pba = static_cast<PackedByteArray*>(nd);
+    if (pba->resize((int)size) != 0) return false;
+    if (size > 0 && data) memcpy(pba->ptrw(), data, size);
+    return true;
+}
+
 static bool reqBuffer(ZymVM* vm, ZymValue v, const char* where, PackedByteArray** out) {
     if (zym_isMap(v)) {
         ZymValue ctx = zym_mapGet(vm, v, "__pba__");

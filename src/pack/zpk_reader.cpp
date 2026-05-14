@@ -338,3 +338,36 @@ char* zpk_reader_read_entry(const ZpkReader* r, uint32_t index, size_t* out_size
             index, (unsigned)e.compression);
     return nullptr;
 }
+
+int zpk_reader_get_entry_slice(const ZpkReader* r, uint32_t index,
+                               const uint8_t** out_data,
+                               uint64_t* out_size,
+                               uint8_t* out_compression,
+                               uint64_t* out_uncompressed_size,
+                               uint32_t* out_data_crc32)
+{
+    if (!r || !r->file_data || !r->manifest) return 0;
+    if (index >= r->footer.entry_count) {
+        fprintf(stderr, "zpk: entry index %u out of range (entry_count=%u).\n",
+                index, r->footer.entry_count);
+        return 0;
+    }
+
+    const ZpkEntry& e = r->manifest[index];
+
+    // Bounds-check the slice against the file's payload region (the
+    // bytes preceding the footer). A manifest that points past this
+    // is corrupt; refuse to hand out a pointer.
+    const uint64_t payload_end = static_cast<uint64_t>(r->file_size) - ZPK_FOOTER_SIZE;
+    if (e.data_offset > payload_end || e.data_size > payload_end - e.data_offset) {
+        fprintf(stderr, "zpk: entry %u data extends beyond footer.\n", index);
+        return 0;
+    }
+
+    if (out_data)              *out_data              = r->file_data + e.data_offset;
+    if (out_size)              *out_size              = e.data_size;
+    if (out_compression)       *out_compression       = e.compression;
+    if (out_uncompressed_size) *out_uncompressed_size = e.uncompressed_size;
+    if (out_data_crc32)        *out_data_crc32        = e.data_crc32;
+    return 1;
+}

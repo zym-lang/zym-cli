@@ -959,6 +959,16 @@ ZymValue b_entryName(ZymVM* vm, ZymValue self) {
     return zym_newStringN(vm, (const char*)(h->reader.strtab + e.name_offset), (int)e.name_length);
 }
 
+// bundle.entryIndex() -> number | null
+//   The manifest index of the program entry-point entry (the one
+//   `entryName()` resolves to). Returns `null` after the handle has been
+//   closed. Mirrors `edit.entryIndex()` on the edit-handle side.
+ZymValue b_entryIndex(ZymVM* vm, ZymValue self) {
+    BundleHandle* h = unwrap_bundle_with_vm(vm, self);
+    if (!h || !h->open) return zym_newNull();
+    return zym_newNumber((double)h->reader.footer.entry_index);
+}
+
 ZymValue b_has(ZymVM* vm, ZymValue self, ZymValue nameV) {
     if (!zym_isString(nameV)) {
         zym_runtimeError(vm, "bundle.has(name) expects a string");
@@ -1047,6 +1057,7 @@ ZymValue make_bundle_instance(ZymVM* vm, BundleHandle* handle) {
 
     M("list",          "list()",          b_list);
     M("entryName",     "entryName()",     b_entryName);
+    M("entryIndex",    "entryIndex()",    b_entryIndex);
     M("has",           "has(name)",       b_has);
     M("open",          "open(arg)",       b_open);
     M("info",          "info(arg)",       b_info);

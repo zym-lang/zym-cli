@@ -36,6 +36,7 @@ var bundle = Pack.openFile(path)      // open from a filesystem path
 var bundle = Pack.openBuffer(buffer)  // open from an in-memory Buffer
 bundle.list()              -> [entryInfo, ...] | null
 bundle.entryName()         -> string | null
+bundle.entryIndex()        -> number | null
 bundle.has(name)           -> bool
 bundle.open(arg)           -> Buffer | null    // arg: name string or numeric index
 bundle.info(arg)           -> entryInfo | null // arg: name string or numeric index

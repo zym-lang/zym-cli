@@ -28,15 +28,8 @@ This matches the policy used by every other grantable native and by
 // --- assembling bundles ---
 Pack.build(spec) -> bool
 
-// --- the self bundle (the one this process was launched from) ---
-Pack.hasSelf()             -> bool
-Pack.entryName()           -> string | null
-Pack.list()                -> [entryInfo, ...] | null
-Pack.has(name)             -> bool
-Pack.open(arg)             -> Buffer | null    // arg: name string or numeric index
-Pack.info(arg)             -> entryInfo | null // arg: name string or numeric index
-Pack.formatVersion()       -> number | null   // null when no self bundle
-Pack.closeSelf()           -> bool
+// --- diagnostics toggle ---
+Pack.setVerboseOutput(verbose) -> bool
 
 // --- arbitrary bundles ---
 var bundle = Pack.openFile(path)      // open from a filesystem path
@@ -59,14 +52,8 @@ sits on (`zpk_write_bundle`) is itself batch-shaped, so layering a
 streaming builder on top would only re-buffer the same data on the
 script side.
 
-The read API is split into two surfaces:
+The read API is exposed through bundle handles:
 
-- **`Pack.*` self-bundle methods** read from the running executable
-  (or the `.zpk` passed to `zym run`). The reader is opened lazily on
-  the first method call and cached until `Pack.closeSelf()` releases
-  it; the next method call after a close re-opens it on demand. When
-  the running process has no embedded payload, every self-method
-  returns `null` / `false` cheaply (no open is attempted).
 - **`Pack.openFile(path)`** opens an arbitrary `.zpk` (or stub-wrapped
   binary) and returns a bundle handle. The handle caches the parsed
   reader for its lifetime and frees it on `bundle.close()`. After
@@ -83,11 +70,44 @@ The read API is split into two surfaces:
 
 ### Format version
 
-`Pack.formatVersion()` and `bundle.formatVersion()` report the
-on-disk `format_version` of the bundle as a number, or `null` when
-there is nothing to query (no self bundle, or the handle has been
-closed). Useful for tooling such as `zym pack info` that wants to
-print the format level a bundle was written against.
+`bundle.formatVersion()` reports the on-disk `format_version` of the
+bundle as a number, or `null` when the handle has been closed. Useful
+for tooling such as `zym pack info` that wants to print the format
+level a bundle was written against.
+
+### Verbose diagnostics toggle
+
+`Pack.setVerboseOutput(verbose) -> bool` controls whether `Pack`'s
+**speculative** reader probes (the ones used internally by
+`Pack.build`, `Pack.splice`, and `Pack.inspectBin` to sniff whether
+an input file already carries a `.zpk` payload) print diagnostics on
+stderr.
+
+- Default is **quiet** (`false`). The common case for these probes is
+  a fresh native stub with no payload yet, where the reader would
+  otherwise print messages like `zpk: no .zpk payload found (footer
+  magic missing).` — pure noise, since "no payload" is the expected
+  signal these calls are looking for.
+- Pass `true` to opt in to chatty output, e.g. when debugging a
+  pack/splice that isn't producing what you expect.
+- The setting is module-global and persists until changed again.
+- The returned bool is the new value (i.e. the argument, echoed back).
+- Type/shape mistakes (non-bool argument) raise a runtime error.
+
+This switch only governs the **probe** paths. User-facing opens
+(`Pack.openFile`, `Pack.openBuffer`) keep their normal diagnostics
+regardless of this flag, because the script explicitly asked to open
+that bundle and expects feedback when it isn't a valid `.zpk`.
+
+```
+Pack.setVerboseOutput(true);
+Pack.build({
+    output: "dist/app",
+    stub:   "vendor/zym-runtime",
+    entries: [ { name: "main.zbc", kind: "entry_bytecode", data: bc } ]
+});
+Pack.setVerboseOutput(false);
+```
 
 ### `spec` map
 
@@ -157,7 +177,8 @@ The accepted entry kind strings are:
 | `"entry_source"`    | The program entry point's raw source (`.zym`). The runtime loader compiles it on boot, then runs. Only one of `entry_source` / `entry_bytecode` is permitted per bundle. |
 | `"entry_bytecode"`  | The program entry point's compiled bytecode (`.zbc`). The runtime loader deserializes and runs it directly. |
 | `"source_map"`      | A source map for the entry's bytecode (or any other consumer). The pairing is by name; the runtime loader does not consume source maps itself. |
-| `"asset"`           | Arbitrary bytes addressable by name. The single asset kind: text, binary, audio, images, additional `.zbc` blobs read by name, etc. all use this kind. Scripts that need to distinguish sub-kinds of assets among themselves do so via the per-entry `flags` / `custom` fields (the `custom` u32 alone gives 32 bitflag slots / tags), which are forwarded verbatim. |
+| `"file"`            | A named, path-addressable resource consumed as a coherent unit — analogous to a file in a filesystem. Use this for configuration, templates, scripts loaded by name, text or binary content that a script looks up via a path-shaped name. Names should be normalized paths (forward slashes, no leading `/`, no `..`). |
+| `"blob"`            | Opaque, id-addressed bytes whose meaning is determined by the producer/consumer pair. Use this for binary handoff between cooperating scripts, attached signatures, additional `.zbc` modules loaded by a script into an in-process VM, ML weights — anything that's "just bytes by id." Sub-kind discrimination (encoding, MIME, format tag) goes in the per-entry `custom` u32 (32 bitflag/tag slots) or `flags` u16, which the writer forwards verbatim. |
 
 Strings are used (rather than numeric constants) so scripts don't have
 to know the on-disk byte values.
@@ -213,7 +234,7 @@ the entry is `entry_bytecode`, the chunk was compiled ahead of time
 with all of its imports already inlined, so no runtime resolution
 happens at all. If you need a self-contained, no-disk-required
 bundle, compile to `entry_bytecode`. Additional `.zbc` blobs you
-want to read by name from the bundle should be stored as `asset`
+want to read by name from the bundle should be stored as `blob`
 entries (read explicitly via `open(arg)`); they are **not**
 consulted by any import statement.
 
@@ -228,7 +249,7 @@ source-entry bundles to other users.
 
 ## Examples
 
-### Headless `.zpk` with an entry and a named asset blob
+### Headless `.zpk` with an entry and a named blob
 
 ```
 var bytecodeMain = File.readAllBytes("build/main.zbc");
@@ -238,7 +259,7 @@ var ok = Pack.build({
     output: "dist/app.zpk",
     entries: [
         { name: "main.zbc", kind: "entry_bytecode", data: bytecodeMain },
-        { name: "util.zbc", kind: "asset",          data: bytecodeUtil }
+        { name: "util.zbc", kind: "blob",           data: bytecodeUtil }
     ]
 });
 if (!ok) {
@@ -246,9 +267,9 @@ if (!ok) {
 }
 ```
 
-### Stub-wrapped executable, asset streamed from disk
+### Stub-wrapped executable, files streamed from disk
 
-The asset never enters script memory; the writer reads it directly.
+The file contents never enter script memory; the writer reads them directly.
 
 ```
 var bytecode = File.readAllBytes("build/main.zbc");
@@ -259,8 +280,8 @@ var ok = Pack.build({
     entryIndex: 0,
     entries: [
         { name: "main.zbc", kind: "entry_bytecode", data: bytecode },
-        { name: "level1.bin", kind: "asset", path: "assets/level1.bin" },
-        { name: "credits.txt", kind: "asset", path: "assets/credits.txt" }
+        { name: "assets/level1.bin",  kind: "file", path: "assets/level1.bin" },
+        { name: "assets/credits.txt", kind: "file", path: "assets/credits.txt" }
     ]
 });
 ```
@@ -374,11 +395,11 @@ Pack.splice("vendor/zym-runtime-windows-x86_64.exe", "dist/app.zpk", "dist/app.e
 
 ### `entryInfo` map
 
-`Pack.list` / `Pack.info` (and the same methods on a `Pack.openFile`
-handle) return per-entry maps with **every** field of the underlying
-on-disk entry. Fields unused in v1 (compression byte, reserved slots)
-are still surfaced verbatim so scripts can introspect bundles authored
-by future writers without an API churn.
+`bundle.list` / `bundle.info` (on a handle returned by `Pack.openFile`
+or `Pack.openBuffer`) return per-entry maps with **every** field of
+the underlying on-disk entry. Fields unused in v1 (compression byte,
+reserved slots) are still surfaced verbatim so scripts can introspect
+bundles authored by future writers without an API churn.
 
 | Key                | Type     | Notes                                                                                  |
 | ---                | ---      | ---                                                                                    |
@@ -404,8 +425,8 @@ by future writers without an API churn.
 
 ### `open(arg)` / `info(arg)` — name or numeric index
 
-`Pack.open`, `Pack.info`, `bundle.open`, and `bundle.info` all accept
-either a **string** entry name or a **numeric** manifest index:
+`bundle.open` and `bundle.info` both accept either a **string** entry
+name or a **numeric** manifest index:
 
 - `open("main.zbc")` / `info("main.zbc")` — looks up the first entry
   whose name matches. Returns `null` if no entry has that name.
@@ -415,41 +436,22 @@ either a **string** entry name or a **numeric** manifest index:
 Bundles may legally contain multiple entries that share the same
 name (each manifest slot is independent). When that happens the
 string form resolves to the first match only — use the numeric index
-to address any subsequent entry. `Pack.list()` (and `bundle.list()`)
-return entries in manifest order, so a typical pattern is to walk
-`list()` to find duplicates and then call `open(index)` / `info(index)`
-on the specific entries you care about. The single-arg `verify(arg)`
-on both surfaces follows the same string/number dispatch.
+to address any subsequent entry. `bundle.list()` returns entries in
+manifest order, so a typical pattern is to walk `list()` to find
+duplicates and then call `open(index)` / `info(index)` on the
+specific entries you care about. The single-arg `verify(arg)` on the
+handle follows the same string/number dispatch.
 
-### Self-bundle vs. `openFile` lifecycle
+### Handle lifecycle
 
-- The self-bundle methods (`Pack.hasSelf`, `Pack.entryName`, `Pack.list`,
-  `Pack.has`, `Pack.open`, `Pack.info`) lazily open
-  the running executable's reader on the first call and keep it
-  cached. `Pack.closeSelf()` returns `true` if a cached reader was
-  released (and `false` if there was nothing to close). The very next
-  self-method call after a close will re-open the reader on demand.
-- `Pack.openFile(path)` returns a bundle handle on success and `null`
-  if the file is not a valid bundle. Each handle owns its own reader,
-  cached until `bundle.close()` is called. After close, every method
-  on the handle returns `null` / `false`. Forgetting to call `close()`
-  is not a leak — a GC finalizer closes the reader when the handle is
-  collected — but the explicit `close()` is the recommended pattern
-  because it bounds memory use the moment the script is done.
-
-### Reading the self bundle
-
-```
-if (Pack.hasSelf()) {
-    var entryName = Pack.entryName();
-    var list      = Pack.list();
-    if (Pack.has("config.json")) {
-        var bytes = Pack.open("config.json");
-        // bytes is a Buffer; bytes.toString() decodes as UTF-8.
-    }
-    Pack.closeSelf();
-}
-```
+`Pack.openFile(path)` (and `Pack.openBuffer(buffer)`) returns a bundle
+handle on success and `null` if the input is not a valid bundle. Each
+handle owns its own reader, cached until `bundle.close()` is called.
+After close, every method on the handle returns `null` / `false`.
+Forgetting to call `close()` is not a leak — a GC finalizer closes
+the reader when the handle is collected — but the explicit `close()`
+is the recommended pattern because it bounds memory use the moment
+the script is done.
 
 ### Reading an arbitrary bundle
 
@@ -474,18 +476,18 @@ Every bundle stores three independent CRC-32s — one over the footer,
 one over the manifest table (entries plus the string table), and one
 per entry over its on-disk bytes. The footer CRC is enforced when a
 bundle is opened: a bundle with a bad footer CRC is rejected, so
-`Pack.openFile` returns `null` and `Pack.hasSelf()` returns `false`.
-The manifest CRC and per-entry data CRCs are not enforced at open
-time — they're surfaced through `verify()` so scripts can decide what
-to do on mismatch.
+`Pack.openFile` (and `Pack.openBuffer`) returns `null`. The manifest
+CRC and per-entry data CRCs are not enforced at open time — they're
+surfaced through `verify()` on the bundle handle so scripts can decide
+what to do on mismatch.
 
-Both `Pack` (the self bundle) and a `Pack.openFile` handle expose the
-same two-arity `verify`:
+A `Pack.openFile` / `Pack.openBuffer` handle exposes a two-arity
+`verify`:
 
-### `Pack.verify()` / `bundle.verify() -> map | null`
+### `bundle.verify() -> map | null`
 
 Runs all three CRC checks and returns a structured report. Returns
-`null` when there is no self bundle / when the handle has been closed.
+`null` when the handle has been closed.
 
 ```
 {
@@ -509,7 +511,7 @@ Runs all three CRC checks and returns a structured report. Returns
   manifest); in that case `computed` is reported as `0` and `ok` is
   `false`.
 
-### `Pack.verify(arg)` / `bundle.verify(arg) -> bool`
+### `bundle.verify(arg) -> bool`
 
 Quick per-entry CRC check. `arg` is either a string entry name or a
 numeric manifest index. Returns:
@@ -517,8 +519,8 @@ numeric manifest index. Returns:
 - `true` when the entry exists and its on-disk bytes hash to the
   recorded CRC.
 - `false` when the entry doesn't exist, the index is out of range,
-  the bytes are bounds-busted, the CRC doesn't match, or there is no
-  self bundle / the handle has been closed.
+  the bytes are bounds-busted, the CRC doesn't match, or the handle
+  has been closed.
 
 Use `verify()` when you want a full report; use `verify(arg)` when
 you just want a one-shot bool for a single entry. The full
@@ -552,7 +554,7 @@ operating system tracks about the file:
 - **Filesystem mode bits** — not covered. Toggling the executable bit
   (`chmod +x` / `chmod -x`), changing ownership, or altering ACLs has
   no effect on the CRCs. (`chmod -x` will of course stop the OS from
-  running a stub-wrapped bundle, but `Pack.openFile` / `Pack.verify`
+  running a stub-wrapped bundle, but `Pack.openFile` / `bundle.verify`
   on the same file will still succeed.)
 - **Modification timestamps, extended attributes, etc.** — not
   covered. Same reason.
@@ -572,7 +574,7 @@ What **is** covered:
 
 In practice this means a freshly built bundle can be renamed,
 `chmod`'d, copied between filesystems, or have its stub replaced via
-`Pack.splice`, and `Pack.verify().ok` will still return `true` as
+`Pack.splice`, and `bundle.verify().ok` will still return `true` as
 long as the bundle bytes themselves were not corrupted in transit.
 
 ## See also

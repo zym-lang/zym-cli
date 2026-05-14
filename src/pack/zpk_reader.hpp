@@ -35,6 +35,13 @@ typedef struct {
 // the reader and must call `zpk_reader_close` to release it.
 int zpk_reader_open_path(ZpkReader* out, const char* path);
 
+// Same as `zpk_reader_open_path`, but the caller chooses whether the
+// footer-validation path emits diagnostics on stderr. Use `verbose=0`
+// for speculative probes (e.g. `Pack.build`'s stub sniff) where a
+// missing footer is the expected common case and the user has not
+// asked for chatty output.
+int zpk_reader_open_path_verbose(ZpkReader* out, const char* path, int verbose);
+
 // Open a `.zpk` from an in-memory byte buffer. The reader takes its
 // own copy of the bytes (so the caller's buffer is independent and
 // may be freed immediately after this returns). Returns 1 on success,

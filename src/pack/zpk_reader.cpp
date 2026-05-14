@@ -135,9 +135,9 @@ int validate_footer(const uint8_t* file_data, size_t file_size,
 // buffer is freed and 0 is returned. `label` is used in diagnostic
 // messages to identify the source of the bytes.
 int finalize_open(ZpkReader* out, uint8_t* file_data, size_t file_size,
-                  const char* label) {
+                  const char* label, bool verbose) {
     ZpkFooter footer;
-    if (!validate_footer(file_data, file_size, &footer, /*verbose=*/true)) {
+    if (!validate_footer(file_data, file_size, &footer, verbose)) {
         free(file_data);
         return 0;
     }
@@ -155,7 +155,7 @@ int finalize_open(ZpkReader* out, uint8_t* file_data, size_t file_size,
         if (footer.strtab_size > 0) {
             crc = zpk_crc32(crc, strtab, static_cast<size_t>(footer.strtab_size));
         }
-        if (crc != footer.manifest_crc32) {
+        if (crc != footer.manifest_crc32 && verbose) {
             // Per docs/formats/zpk.md: warn-only in v1.
             fprintf(stderr, "zpk: warning: manifest CRC mismatch in \"%s\" "
                             "(file=%08x computed=%08x). Continuing.\n",
@@ -167,14 +167,14 @@ int finalize_open(ZpkReader* out, uint8_t* file_data, size_t file_size,
     // The runtime loader dispatches on the entry's kind: ENTRY_BYTECODE
     // is deserialized + run; ENTRY_SOURCE is compiled-on-load + run.
     if (footer.entry_count == 0) {
-        fprintf(stderr, "zpk: bundle has no entries.\n");
+        if (verbose) fprintf(stderr, "zpk: bundle has no entries.\n");
         free(file_data);
         return 0;
     }
     {
         const uint8_t k = manifest[footer.entry_index].kind;
         if (k != ZPK_KIND_ENTRY_BYTECODE && k != ZPK_KIND_ENTRY_SOURCE) {
-            fprintf(stderr, "zpk: entry-point entry must have kind ENTRY_BYTECODE or ENTRY_SOURCE.\n");
+            if (verbose) fprintf(stderr, "zpk: entry-point entry must have kind ENTRY_BYTECODE or ENTRY_SOURCE.\n");
             free(file_data);
             return 0;
         }
@@ -190,18 +190,26 @@ int finalize_open(ZpkReader* out, uint8_t* file_data, size_t file_size,
 
 } // namespace
 
-int zpk_reader_open_path(ZpkReader* out, const char* path) {
+static int open_path_impl(ZpkReader* out, const char* path, bool verbose) {
     if (!out || !path) return 0;
     memset(out, 0, sizeof(*out));
 
     size_t file_size = 0;
     uint8_t* file_data = slurp(path, &file_size);
     if (!file_data) {
-        fprintf(stderr, "zpk: could not read \"%s\".\n", path);
+        if (verbose) fprintf(stderr, "zpk: could not read \"%s\".\n", path);
         return 0;
     }
 
-    return finalize_open(out, file_data, file_size, path);
+    return finalize_open(out, file_data, file_size, path, verbose);
+}
+
+int zpk_reader_open_path(ZpkReader* out, const char* path) {
+    return open_path_impl(out, path, /*verbose=*/true);
+}
+
+int zpk_reader_open_path_verbose(ZpkReader* out, const char* path, int verbose) {
+    return open_path_impl(out, path, verbose != 0);
 }
 
 int zpk_reader_open_memory(ZpkReader* out, const void* bytes, size_t size) {
@@ -217,7 +225,7 @@ int zpk_reader_open_memory(ZpkReader* out, const void* bytes, size_t size) {
         return 0;
     }
     memcpy(copy, bytes, size);
-    return finalize_open(out, copy, size, "<memory>");
+    return finalize_open(out, copy, size, "<memory>", /*verbose=*/true);
 }
 
 int zpk_reader_open_self_exe(ZpkReader* out) {

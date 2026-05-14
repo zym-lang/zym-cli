@@ -46,6 +46,20 @@ extern bool readBufferBytes(ZymVM* vm, ZymValue v, const char** out_data, size_t
 
 namespace {
 
+// Module-wide verbosity flag for `Pack`'s speculative reader probes
+// (currently `sniff_payload_geometry`, used by `Pack.build` /
+// `Pack.splice` / `Pack.inspectBin`). Defaults to quiet because the
+// common case for these probes is a clean stub with no payload — the
+// reader's "no .zpk payload found" diagnostic is noise on that path.
+// Scripts opt in via `Pack.setVerboseOutput(true)` when they want
+// the reader chatter for debugging.
+//
+// This only governs the *probe* paths. User-facing opens
+// (`Pack.openFile`, `Pack.openBuffer`) keep their normal diagnostics
+// regardless, since the user explicitly asked to open the bundle and
+// expects feedback when it's not a valid `.zpk`.
+bool g_pack_verbose = false;
+
 // ---- helpers --------------------------------------------------------------
 
 // Read a binary file fully into a malloc'd buffer. Returns nullptr on
@@ -176,7 +190,7 @@ struct PayloadGeometry {
 // `manifest_offset` if strtab is empty) is the correct boundary.
 bool sniff_payload_geometry(const char* path, PayloadGeometry* out) {
     ZpkReader r{};
-    if (zpk_reader_open_path(&r, path) != 1) return false;
+    if (zpk_reader_open_path_verbose(&r, path, g_pack_verbose ? 1 : 0) != 1) return false;
 
     uint64_t stub_end = r.footer.strtab_offset;
     if (r.footer.strtab_size == 0) {
@@ -210,7 +224,8 @@ bool kind_from_string(const char* s, uint8_t* out) {
     if (std::strcmp(s, "entry_source")    == 0) { *out = ZPK_KIND_ENTRY_SOURCE;    return true; }
     if (std::strcmp(s, "entry_bytecode")  == 0) { *out = ZPK_KIND_ENTRY_BYTECODE;  return true; }
     if (std::strcmp(s, "source_map")      == 0) { *out = ZPK_KIND_SOURCE_MAP;      return true; }
-    if (std::strcmp(s, "asset")           == 0) { *out = ZPK_KIND_ASSET;           return true; }
+    if (std::strcmp(s, "file")            == 0) { *out = ZPK_KIND_FILE;            return true; }
+    if (std::strcmp(s, "blob")            == 0) { *out = ZPK_KIND_BLOB;            return true; }
     return false;
 }
 
@@ -238,6 +253,15 @@ double opt_number(ZymVM* vm, ZymValue map, const char* key, double dflt) {
 }
 
 // ---- the build call -------------------------------------------------------
+
+ZymValue f_setVerboseOutput(ZymVM* vm, ZymValue /*self*/, ZymValue vV) {
+    if (!zym_isBool(vV)) {
+        zym_runtimeError(vm, "Pack.setVerboseOutput(verbose) expects a bool");
+        return ZYM_ERROR;
+    }
+    g_pack_verbose = zym_asBool(vV);
+    return zym_newBool(g_pack_verbose);
+}
 
 ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
     if (!zym_isMap(specV)) {
@@ -572,9 +596,10 @@ const char* kind_to_string(uint8_t k, char* user_buf /*>=16 bytes*/) {
         case ZPK_KIND_ENTRY_SOURCE:    return "entry_source";
         case ZPK_KIND_ENTRY_BYTECODE:  return "entry_bytecode";
         case ZPK_KIND_SOURCE_MAP:      return "source_map";
-        case ZPK_KIND_ASSET:           return "asset";
+        case ZPK_KIND_FILE:            return "file";
+        case ZPK_KIND_BLOB:            return "blob";
         default:
-            // 0x05..0x7E reserved; 0x7F..0xFF user range.
+            // 0x06..0x7E reserved; 0x7F..0xFF user range.
             if (k >= ZPK_KIND_USER_MIN) {
                 std::snprintf(user_buf, 16, "user:0x%02X", (unsigned)k);
                 return user_buf;
@@ -1226,6 +1251,12 @@ ZymValue nativePack_create(ZymVM* vm) {
     } while (0)
 
     F("build",         "build(spec)",       f_build);
+
+    // Toggle whether the reader's speculative probes (used by
+    // `Pack.build` / `Pack.splice` / `Pack.inspectBin` to sniff an
+    // existing payload) emit diagnostics on stderr. Defaults to
+    // quiet; returns the new value.
+    F("setVerboseOutput", "setVerboseOutput(verbose)", f_setVerboseOutput);
 
     // Bundle handles. `openFile` works uniformly on headless `.zpk`
     // files and on stub-wrapped executables; the host (CLI launcher

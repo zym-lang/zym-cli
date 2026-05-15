@@ -127,6 +127,8 @@ they raise `no such native`.
 | `cv.hasFunction(name, arity)` | `bool` | True iff the child has a top-level function `name` with exactly the given fixed arity. Strict slot probe. |
 | `cv.hasFunc(name [, arity])` | `bool` | Existence probe with an optional arity. With one argument, returns `true` if **any** callable named `name` exists at any arity (fixed *or* variadic). With two arguments, returns `true` if calling `name` with exactly `arity` args can dispatch — i.e., either an exact fixed-arity match or a variadic with `arity >= fixed-prefix`. Useful for entry-point discovery (`if (vm.hasFunc("main")) ...`) before any `cv.call`. Not intended for hot paths. |
 | `cv.diagnostics()` | `[map]` | Drains the child's diagnostic sink. Each entry is `{ severity, file, fileId, line, column, startByte, length, message }`. `severity` is one of `"error"`, `"warning"`, `"info"`, `"hint"`. After this call the child's sink is empty. |
+| `cv.moduleLoader.getCaller()` | `string` or `null` | Resolved module path of the **immediate parent** of the module whose `read_callback` is currently running. `null` when the *entry* module is being loaded (it has no caller). **Raises a runtime error if called outside of an active `loadModules` `read_callback` invocation.** See [Module loader context](#module-loader-context). |
+| `cv.moduleLoader.getStack()` | `[string]` | The full chain of in-flight `read_callback` invocations on this VM. `stack[0]` is the entry module, `stack[stack.length - 1]` equals the `path` the current callback was invoked with. `getCaller()` is equivalent to `stack[stack.length - 2]` (or `null` at the entry). **Raises a runtime error if called outside of an active `read_callback` invocation.** |
 
 ### Pipeline
 
@@ -139,7 +141,7 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.registerSourceFile(path, source)` | `int` (fileId) | Registers a buffer with the child's file registry. The returned `fileId` is what `preprocess` and diagnostics use to refer to this source. |
 | `cv.preprocess(source, sourceMap, fileId)` | `{ source, status }` | Runs the preprocessor. On success, `source` is the expanded buffer and `status == Zym.STATUS.OK`; on failure `source` is `null` and the status is non-`OK` (drain via `diagnostics()`). |
 | `cv.compile(source, chunk, sourceMap, entryFile, opts)` | `int` (status) | Compiles `source` into `chunk`. `sourceMap` may be `null` for raw text. `opts.includeLineInfo` (default `true`) controls whether line info is embedded. **Flips the child into execution phase.** |
-| `cv.loadModules(source, sourceMap, entryFile, callback, opts)` | `{ status, combinedSource, combinedSourceMap, modulePaths }` or `{ status, error }` | Multi-file compile. The parent `callback(path)` mirrors the C `readAndPreprocessCallback`: it must return `{ source, sourceMap, fileId }` for each imported module (the per-module `sourceMap` is the one produced by `preprocess` for *that module's raw source*), or `null` to signal a missing file. The native trampoline deep-clones the per-module SourceMap into the child VM so the parent wrapper retains ownership safely. On success, returns the combined preprocessed source together with the **combined** `SourceMap` (`combinedSourceMap`) — that's the map that must be passed to `compile`, not the entry-only map. |
+| `cv.loadModules(source, sourceMap, entryFile, callback, opts)` | `{ status, combinedSource, combinedSourceMap, modulePaths }` or `{ status, error }` | Multi-file compile. The parent `callback(path)` mirrors the C `readAndPreprocessCallback`: it must return `{ source, sourceMap, fileId }` for each imported module (the per-module `sourceMap` is the one produced by `preprocess` for *that module's raw source*), or `null` to signal a missing file. The native trampoline deep-clones the per-module SourceMap into the child VM so the parent wrapper retains ownership safely. On success, returns the combined preprocessed source together with the **combined** `SourceMap` (`combinedSourceMap`) — that's the map that must be passed to `compile`, not the entry-only map. `opts.resolveCallback` (optional closure `func(path) -> string \| null`) installs a resolver hook that runs **before** the loader's cycle detector and module cache: returning a non-null string overrides the canonical key the loader uses for cycle detection, caching, and the subsequent `read_callback(path)` argument; returning `null` (or omitting the option) keeps the loader's default root-relative resolution byte-identical to today. See [Resolve callback](#resolve-callback). |
 | `cv.serializeChunk(chunk, opts)` | `{ status, bytes }` | Serializes a compiled chunk to a `Buffer` of `.zbc` bytes. `opts.includeLineInfo` mirrors compile. |
 | `cv.deserializeChunk(chunk, bytes)` | `int` (status) | Loads `.zbc` bytes (a `Buffer`) into a freshly-allocated chunk. **Flips the child into execution phase.** |
 | `cv.runChunk(chunk)` | `int` (status) | Runs a compiled or deserialized chunk on the child. Auto-loops on `YIELD`. **Flips the child into execution phase.** |
@@ -371,6 +373,237 @@ Notes:
   automatically when its wrapper is collected, or you can call
   `loaded.combinedSourceMap.free()` explicitly. When `loadModules`
   fails (`status != OK`), `combinedSourceMap` is absent.
+
+### Module loader context
+
+`read_callback(path)` keeps its single-argument shape — that's the 99%
+case (resolve `path` against `SCRIPT_PATH`, read the file, return its
+preprocessed source) and it's also the shape an MCU / runtime-only build
+needs. For the cases where the callback needs to know *who* is asking
+— typically because a previously-resolved module lives outside the
+entry script's directory and now wants to do sibling imports — the
+child VM handle exposes a small query surface:
+
+- `vm.moduleLoader.getCaller()` — resolved path of the module that
+  issued the `import("...")` that triggered this callback. `null` for
+  the entry module.
+- `vm.moduleLoader.getStack()` — `[entry, ..., currently-loading]`.
+  Always non-empty inside a callback; the last element equals the
+  `path` argument the callback was invoked with.
+
+#### Scope of validity
+
+Both methods are **only meaningful inside an active `read_callback`
+invocation** on `vm`. Calling them at any other time — including from
+a closure captured during a callback and invoked later, from a
+coroutine resumed outside the loader, or from a different VM's
+callback — raises a runtime error of the form:
+
+```
+vm.moduleLoader.getCaller(): not valid outside of a read_callback
+invocation. This method is only meaningful while the module loader is
+actively resolving an import.
+```
+
+The handle itself is fine to write down (`var ml = vm.moduleLoader`),
+but the methods enforce the scope at call time. There is no silent
+"return stale data" mode — misuse is always loud.
+
+#### Caching semantics
+
+`getStack()` reflects the chain that triggered the *load* of the
+currently-resolving module, not the chain of every subsequent `import`
+that resolves to the same module (those are served from the loader's
+internal cache and never call back). Don't rely on per-import-site
+chains; they are not well-defined when caching is in play, which is
+the same constraint Node / esbuild / Deno loader hooks all operate
+under.
+
+#### Example: routing bare names to a data directory
+
+A common case: `script.zym` writes `import("pie")` and expects the
+loader to look in `System.dataDir()/zym/modules`, but `pie.zym` (which
+lives in that data directory) writes `import("something.zym")` and
+expects that to resolve relative to **itself**, not relative to
+`script.zym`. The path passed to `read_callback` cannot distinguish
+those two cases on its own — both come through as `"something.zym"`
+keyed to root-relative space. `getCaller()` is what closes the gap.
+
+```zym
+var MODULE_PATH = Path.join(System.dataDir(), "zym", "modules")
+var dataDirModules = {}            // resolved path -> true
+var SCRIPT_PATH = Path.dirname(entryPath)
+
+func readAndPreprocessCallback(path)
+{
+    var caller = vm.moduleLoader.getCaller()  // null for the entry hop
+
+    var resolved
+    if (caller != null && dataDirModules[caller]) {
+        // Sibling import inside a data-dir module — resolve relative
+        // to MODULE_PATH so `something.zym` next to `pie.zym` is found.
+        resolved = Path.normalize(Path.join(MODULE_PATH, path))
+        dataDirModules[path] = true
+    } else if (Path.extension(path) == "") {
+        // Bare name from the entry tree → data dir lookup.
+        resolved = Path.normalize(Path.join(MODULE_PATH, path + ".zym"))
+        dataDirModules[path] = true
+    } else {
+        resolved = Path.normalize(Path.join(SCRIPT_PATH, path))
+    }
+
+    var source = readFile(resolved)
+    if (!source) { return null }
+
+    var sm  = vm.newSourceMap()
+    var fid = vm.registerSourceFile(path, source)
+    var ps  = vm.preprocess(source, sm, fid)
+    return { source: ps.source, sourceMap: sm, fileId: fid }
+}
+```
+
+`getStack()` is the same information in chain form — use it when you
+want diagnostics ("module `a` → `b` → `c` failed to resolve") or
+policy decisions ("only `trusted/*` modules may import `user:*`")
+without maintaining your own parents map.
+
+### Resolve callback
+
+`getCaller()` / `getStack()` are sufficient for a callback that just
+needs to know *who asked* in order to decide *what file to read*. They
+are **not** sufficient when two physically-distinct modules would
+otherwise collide on the same key in the C loader's cycle detector
+and module cache.
+
+Concretely, given `script -> m1 -> (dataDir)m2 -> (dataDir)m1`, the C
+loader resolves `("m2", "m1")` to the string `"m1"` — the same key
+that's already on its `ImportStack` from the first hop. It then fires
+a false-positive `Circular import detected: m1 -> m2 -> m1` *before*
+the read callback ever runs, so no amount of script-side bookkeeping
+inside `read_callback` can rescue the situation. Symmetrically, two
+parallel imports of `"m1"` — one meant to come from the data dir, one
+meant to come from a local sibling — silently alias into a single
+cache slot because the loader cannot tell them apart.
+
+`opts.resolveCallback` plugs in at exactly the seam where this
+matters: the loader calls it on the result of its built-in resolver
+**before** the `stack_contains` / `loaded_modules` lookup. The string
+the resolver returns (if any) becomes the canonical key for cycle
+detection, caching, the `read_callback` `path` argument, and the
+`base_path` used when scanning the loaded module's transitive
+imports. Returning `null` (or the same string the loader passed in)
+means "keep the loader default" — there is zero behavioral or
+performance impact for callers that don't install a resolver.
+
+`vm.moduleLoader.getCaller()` and `getStack()` are valid inside the
+resolve callback too, with the same semantics: `getCaller()` is the
+*requester* of the import currently being resolved, `getStack()[len-1]`
+is the requester (since the about-to-be-resolved module has not yet
+been pushed onto the loader's stack).
+
+#### Example: namespaced keys for a data-dir module system
+
+This extends the previous example. The read callback alone could
+route `script -> m1` and `m1 -> (dataDir)m2` correctly using
+`getCaller()` — but the moment a data-dir module imports something
+that happens to share a name with anything already on the import
+stack (a sibling, an ancestor, even itself transitively), the C-side
+cycle detector trips on a key collision the script cannot intervene
+in. The fix is to canonicalize data-dir modules under a `"data:"`
+prefix *before* the loader commits to a key:
+
+```zym
+var MODULE_PATH = Path.join(System.dataDir(), "zym", "modules")
+var dataDirModules = {}            // canonical key -> true
+var SCRIPT_PATH = Path.dirname(entryPath)
+
+func startsWith(s, p) { return Path.startsWith(s, p) }
+
+// Decide the canonical key *before* the loader does its cycle/cache
+// check. Returning null means "use loader default" (root-relative).
+func resolveCallback(path)
+{
+    var caller = vm.moduleLoader.getCaller()  // requester of this import
+
+    // Sibling import inside an already-known data-dir module: keep it
+    // in the data-dir namespace so its key cannot collide with a
+    // local module of the same name.
+    if (caller != null && startsWith(caller, "data:")) {
+        return "data:" + path
+    }
+
+    // Bare name from the entry tree → route to data dir.
+    if (Path.extension(path) == "") {
+        return "data:" + path
+    }
+
+    return null   // keep loader default for ordinary local imports
+}
+
+func readAndPreprocessCallback(path)
+{
+    // `path` is whatever resolveCallback canonicalized to (or the
+    // loader default if resolveCallback returned null).
+    var resolved
+    if (startsWith(path, "data:")) {
+        var rel = Path.slice(path, length("data:"), length(path))
+        resolved = Path.normalize(Path.join(MODULE_PATH, rel + ".zym"))
+        dataDirModules[path] = true
+    } else {
+        resolved = Path.normalize(Path.join(SCRIPT_PATH, path))
+    }
+
+    var source = readFile(resolved)
+    if (!source) { return null }
+
+    var sm  = vm.newSourceMap()
+    var fid = vm.registerSourceFile(path, source)
+    var ps  = vm.preprocess(source, sm, fid)
+    return { source: ps.source, sourceMap: sm, fileId: fid }
+}
+
+var loaded = vm.loadModules(
+    pre.source, sm, "entry.zym",
+    readAndPreprocessCallback,
+    {
+        debugNames: true,
+        resolveCallback: resolveCallback,
+    }
+)
+```
+
+With this in place, `script -> m1 -> (dataDir)m2 -> (dataDir)m1`
+appears to the C loader as `["m1", "data:m2", "data:m1"]` — no
+collision with the entry-tree `m1`, no false cycle, and a genuine
+`data:m1 -> data:m2 -> data:m1` would still trip the cycle detector
+correctly. `loaded.modulePaths` and any diagnostics that bubble up
+also become self-documenting: the `"data:"` prefix tells you at a
+glance which side of the namespace boundary a given module came from.
+
+Notes:
+
+- `resolveCallback` is optional and must be either a closure or
+  absent/`null`; anything else raises a runtime error from
+  `loadModules`. When absent, the C loader takes its
+  byte-identical-to-before path — no resolver trampoline is invoked
+  and there is no per-import marshalling cost.
+- The string the resolver returns is **borrowed** at the C boundary
+  (the loader copies it internally on return). Scripts don't need to
+  reason about lifetime; just return the string.
+- The resolver is invoked once per import edge — including for
+  imports that ultimately hit the module cache. That's the whole
+  point: it has to run before the cache lookup in order to influence
+  which slot is consulted.
+
+#### MCU / runtime-only builds
+
+Scripts that never read `vm.moduleLoader.*` pay no cost: the
+trampoline does not allocate or marshal any extra parent-VM values
+per import, and the loader handle itself is a thin proxy. The fields
+that back these accessors are zeroed on VM init and only ever
+written during `load_module_recursive`, so a binary that never calls
+`loadModules` carries the cost of two pointer-sized fields on `VM`
+and nothing else.
 
 ### Probing for a function before calling it
 

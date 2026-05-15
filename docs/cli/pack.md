@@ -134,7 +134,7 @@ Pack.setVerboseOutput(false);
 | ---          | ---      | ---      | ---     | ---                                                                                                |
 | `output`     | string   | yes      | —       | Destination path. When it ends in `.zpk` a **headless** bundle is produced and `stub` is ignored.  |
 | `entries`    | list     | yes      | —       | Non-empty list of entry maps (see below).                                                          |
-| `entryIndex` | number   | no       | `0`     | Index into `entries` of the program entry point. Must reference an entry whose `kind` is `entry_bytecode` or `entry_source`. A bundle may contain at most **one** entry-kind entry. |
+| `entryIndex` | number   | no       | auto    | Index into `entries` of the program entry point. **Optional.** If the bundle contains exactly one `entry_source` / `entry_bytecode` entry, `entryIndex` auto-resolves to that entry's index — you only need to set it to disambiguate or to mark a non-entry-kind entry as significant in a general archive. If a bundle contains **no** entry-kind entry it is treated as a *general archive*: not runnable, and the on-disk footer carries the `ZPK_NO_ENTRY` sentinel (`0xFFFFFFFF`). A bundle may contain at most **one** entry-kind entry. When supplied alongside exactly one entry-kind entry, `entryIndex` must point at *that* entry. |
 | `stub`       | string   | no       | none    | Path to a CLI runtime binary to prepend as the executable stub. Ignored when `output` ends in `.zpk`. **If the stub file already carries a ZPK payload, only its native portion is taken — the existing payload is dropped and replaced with the new one.** This means a stub-wrapped binary can be re-packed in place without ever stacking multiple ZPK regions; `Pack` enforces "exactly one ZPK per executable" by construction. No `mode` flag is needed: append-vs-swap is decided by what the stub file actually contains. |
 | `compression`| bool     | no       | `false` | Bundle-wide compression default (zstd). When `true`, every entry is compressed unless it sets `compression: false`. When `false` (or omitted) entries default to uncompressed and opt in with `compression: true`. |
 | `level`      | number   | no       | `3`     | Default zstd level (`1..22`). Per-entry `level` overrides this. Ignored on entries that resolve to uncompressed. `3` matches zstd's own default; `19+` is the "release-build" sweet spot. |
@@ -223,8 +223,11 @@ to know the on-disk byte values.
   - an entry's `kind` not a recognized string
   - an entry that sets both `data` and `path`, or neither
   - an entry whose `data` is not a `Buffer`
-  - `entryIndex` out of range or referencing an entry whose `kind` is
-    not `entry_source` or `entry_bytecode`
+  - `entryIndex` out of range
+  - `entryIndex` supplied alongside exactly one entry-kind entry but
+    pointing somewhere else (either omit `entryIndex` so it
+    auto-resolves, or set it to the index of the
+    `entry_source` / `entry_bytecode` entry)
   - more than one entry has an entry-kind (`entry_source` /
     `entry_bytecode`) in the same bundle
 - **Recoverable failures** (file not openable, short read, short
@@ -342,11 +345,19 @@ ZPK payload. Cheap; does not iterate entry payloads.
     payloadSize:   <number>,   // bytes stubSize..fileSize are the ZPK payload
     formatVersion: <number>,   // ZPK format version recorded in the footer
     entryCount:    <number>,
-    entryIndex:    <number>,
+    entryIndex:    <number>,   // `ZPK_NO_ENTRY` (`0xFFFFFFFF`) for a general archive
+    hasEntry:      <bool>,     // false for general archives (no runnable entry point)
     isHeadless:    <bool>,     // stubSize == 0 (a plain `.zpk`)
     hasStub:       <bool>      // !isHeadless
 }
 ```
+
+A bundle reports `hasEntry: false` when its footer carries the
+`ZPK_NO_ENTRY` sentinel — i.e. it was produced as a general archive
+(no `entry_source` / `entry_bytecode` entry). The runtime loader
+refuses to execute such a bundle; script-side surfaces
+(`Pack.openFile`, `Pack.openBuffer`, the edit handle) still open it
+normally and let you read or rewrite its entries.
 
 Returns **`null`** when the file does not contain a valid trailing
 ZPK payload (no magic, bad CRC, truncated footer, file unreadable),

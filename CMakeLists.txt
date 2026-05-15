@@ -39,7 +39,7 @@ set(CMAKE_BUILD_TYPE Release)
 set(USE_COMPRESSION ON)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
-set(RUNTIME_ONLY OFF)
+set(RUNTIME_ONLY ON)
 # USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
 # on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
 # binary so engine-level error and warning output is suppressed at startup

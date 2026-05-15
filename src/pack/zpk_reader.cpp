@@ -120,7 +120,9 @@ int validate_footer(const uint8_t* file_data, size_t file_size,
         if (verbose) fprintf(stderr, "zpk: string table extends beyond footer.\n");
         return 0;
     }
-    if (f.entry_count > 0 && f.entry_index >= f.entry_count) {
+    if (f.entry_count > 0 &&
+        f.entry_index != ZPK_NO_ENTRY &&
+        f.entry_index >= f.entry_count) {
         if (verbose) fprintf(stderr, "zpk: entry_index %u out of range (entry_count=%u).\n",
                              f.entry_index, f.entry_count);
         return 0;
@@ -163,15 +165,21 @@ int finalize_open(ZpkReader* out, uint8_t* file_data, size_t file_size,
         }
     }
 
-    // Validate the entry-point entry up front so callers can rely on it.
-    // The runtime loader dispatches on the entry's kind: ENTRY_BYTECODE
-    // is deserialized + run; ENTRY_SOURCE is compiled-on-load + run.
+    // Validate the entry-point entry up front so callers can rely on
+    // it. The runtime loader dispatches on the entry's kind:
+    // ENTRY_BYTECODE is deserialized + run; ENTRY_SOURCE is
+    // compiled-on-load + run. A bundle carrying the `ZPK_NO_ENTRY`
+    // sentinel is a general archive (no runnable entry point) and is
+    // allowed through here so script-side surfaces like
+    // `Pack.openBuffer` / `Pack.inspectBin` can read it; the
+    // runtime-loader path (`runtime_main`) is what refuses to *run*
+    // a sentinel-carrying bundle.
     if (footer.entry_count == 0) {
         if (verbose) fprintf(stderr, "zpk: bundle has no entries.\n");
         free(file_data);
         return 0;
     }
-    {
+    if (footer.entry_index != ZPK_NO_ENTRY) {
         const uint8_t k = manifest[footer.entry_index].kind;
         if (k != ZPK_KIND_ENTRY_BYTECODE && k != ZPK_KIND_ENTRY_SOURCE) {
             if (verbose) fprintf(stderr, "zpk: entry-point entry must have kind ENTRY_BYTECODE or ENTRY_SOURCE.\n");

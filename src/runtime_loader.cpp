@@ -209,6 +209,11 @@ int runtime_main(int argc, char** argv, ZymAllocator* allocator) {
     }
 
     const uint32_t idx = reader.footer.entry_index;
+    if (idx == ZPK_NO_ENTRY) {
+        fprintf(stderr, "Error: Bundle is a general archive (no entry point); nothing to run.\n");
+        zpk_reader_close(&reader);
+        return 1;
+    }
     if (idx >= reader.footer.entry_count) {
         fprintf(stderr, "Error: Bundle entry_index out of range.\n");
         zpk_reader_close(&reader);

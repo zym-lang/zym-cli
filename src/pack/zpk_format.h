@@ -33,6 +33,19 @@ extern "C" {
 // Current writer's format version. Readers accept this value.
 #define ZPK_FORMAT_VERSION 1
 
+// Sentinel `entry_index` value meaning "this bundle has no program
+// entry point" — i.e. it's a general archive (a container of `file`
+// / `blob` / `source_map` entries) rather than a runnable program.
+//
+// Chosen as `0xFFFFFFFF` so it's unambiguous (no valid `entry_count`
+// can reach this value: the manifest entries alone would be 192 GiB)
+// and survives reorderings that mutate manifest indices — e.g. an
+// edit handle adding/removing/swapping entries can leave the sentinel
+// in place without recomputing it. The writer emits this value when
+// no `ENTRY_SOURCE` / `ENTRY_BYTECODE` entry is present; the runtime
+// loader rejects bundles carrying it ("not runnable").
+#define ZPK_NO_ENTRY 0xFFFFFFFFu
+
 // Entry kinds. See docs/formats/zpk.md "Entry kinds".
 //
 // `kind` is descriptive: it tells consumers what an entry *is*. The
@@ -94,7 +107,7 @@ typedef struct {
     uint32_t flags;                 // ZPK_FOOTER_FLAG_*
     uint64_t manifest_offset;       // absolute
     uint32_t entry_count;
-    uint32_t entry_index;           // < entry_count; entry must be ENTRY_BYTECODE
+    uint32_t entry_index;           // < entry_count and points at an ENTRY_SOURCE/ENTRY_BYTECODE entry, OR == ZPK_NO_ENTRY for a general archive (non-runnable)
     uint64_t strtab_offset;         // absolute
     uint64_t strtab_size;
     uint32_t manifest_crc32;        // CRC32 over (manifest entries || strtab)

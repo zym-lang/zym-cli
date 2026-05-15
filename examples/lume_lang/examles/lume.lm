@@ -1,0 +1,1201 @@
+var NodeKind = { PROGRAM: 1, BLOCK: 2, VAR: 3, SET: 4, FN: 5, RETURN: 6, IF: 7, WHILE: 8, EXPR: 9, NUM: 10, STR: 11, BOOL: 12, NULL_NODE: 13, ID: 14, UNARY: 15, BIN: 16, CALL: 17, ARRAY: 18, INDEX_GET: 19, INDEX_SET: 20, FOR: 21, MAP: 22 }
+var TokKind = { NUM: 1, STR: 2, KW: 3, ID: 4, OP: 5, EOF: 6 }
+var OpKind = { ADD: 1, SUB: 2, MUL: 3, DIV: 4, MOD: 5, LT: 6, GT: 7, LTE: 8, GTE: 9, EQ: 10, NEQ: 11, AND: 12, OR: 13, NOT: 14, NEG: 15 }
+var ValKind = { CLOSURE: 1, BUILTIN: 2, LUME_NULL: 3 }
+
+var Tok = fn(t, v, line, col) return { t: t, v: v, line: line, col: col } end
+var NullVal = fn() return { k: ValKind.LUME_NULL } end
+
+var NumNode = fn(v) return { k: NodeKind.NUM, v: v } end
+var StrNode = fn(v) return { k: NodeKind.STR, v: v } end
+var BoolNode = fn(v) return { k: NodeKind.BOOL, v: v } end
+var NullNode = fn() return { k: NodeKind.NULL_NODE } end
+var IdNode = fn(v, line, col) return { k: NodeKind.ID, v: v, depth: null, slot: null, line: line, col: col } end
+var UnaryNode = fn(op, val) return { k: NodeKind.UNARY, op: op, val: val } end
+var BinNode = fn(op, l, r, line, col) return { k: NodeKind.BIN, op: op, l: l, r: r, line: line, col: col } end
+var CallNode = fn(nodeFunc, args, line, col) return { k: NodeKind.CALL, nodeFunc: nodeFunc, args: args, line: line, col: col } end
+var ExprNode = fn(val) return { k: NodeKind.EXPR, val: val } end
+var VarNode = fn(id, val) return { k: NodeKind.VAR, id: id, val: val, depth: null, slot: null } end
+var SetNode = fn(id, val, line, col) return { k: NodeKind.SET, id: id, val: val, depth: null, slot: null, line: line, col: col } end
+var FnNode = fn(name, params, body) return { k: NodeKind.FN, name: name, params: params, body: body, depth: null, slot: null } end
+var ReturnNode = fn(val) return { k: NodeKind.RETURN, val: val } end
+var IfNode = fn(cond, body, alt) return { k: NodeKind.IF, cond: cond, body: body, alt: alt } end
+var WhileNode = fn(cond, body, line, col) return { k: NodeKind.WHILE, cond: cond, body: body, line: line, col: col } end
+var BlockNode = fn(body) return { k: NodeKind.BLOCK, body: body } end
+var ProgramNode = fn(body) return { k: NodeKind.PROGRAM, body: body } end
+var ArrayNode = fn(elements) return { k: NodeKind.ARRAY, elements: elements } end
+var IndexGetNode = fn(target, index, line, col) return { k: NodeKind.INDEX_GET, target: target, index: index, line: line, col: col } end
+var IndexSetNode = fn(id, index, val, line, col) return { k: NodeKind.INDEX_SET, id: id, index: index, val: val, depth: null, slot: null, line: line, col: col } end
+var ForNode = fn(id, iterable, body, line, col) return { k: NodeKind.FOR, id: id, iterable: iterable, body: body, depth: null, slot: null, line: line, col: col } end
+var MapNode = fn(keys, vals) return { k: NodeKind.MAP, keys: keys, vals: vals } end
+
+var ClosureVal = fn(params, body, env) return { k: ValKind.CLOSURE, params: params, body: body, env: env } end
+var Env = fn(vars, parent) return { vars: vars, parent: parent } end
+var Ctx = fn() return { returned: false, val: NullVal(), error: false } end
+
+var envStoreVal = fn(v)
+    if v == null return NullVal() end
+    return v
+end
+
+var strToOp = fn(s)
+    if s == "+" return OpKind.ADD end
+    if s == "-" return OpKind.SUB end
+    if s == "*" return OpKind.MUL end
+    if s == "/" return OpKind.DIV end
+    if s == "%" return OpKind.MOD end
+    if s == "<" return OpKind.LT end
+    if s == ">" return OpKind.GT end
+    if s == "<=" return OpKind.LTE end
+    if s == ">=" return OpKind.GTE end
+    if s == "==" return OpKind.EQ end
+    if s == "!=" return OpKind.NEQ end
+    if s == "&&" return OpKind.AND end
+    if s == "||" return OpKind.OR end
+    if s == "!" return OpKind.NOT end
+    return OpKind.NEG
+end
+
+var tokenize = fn(src)
+    var tokens = []
+    var i = 0
+    var len = length(src)
+    var lexError = false
+    
+    var last_idx = 0
+    var last_line = 1
+    var last_col = 1
+    
+    var getLineCol = fn(index)
+        var l = last_line
+        var c = last_col
+        for j in range(last_idx, index)
+            if charAt(src, j) == "\n"
+                l = l + 1
+                c = 1
+            else
+                c = c + 1
+            end
+        end
+        last_idx = index
+        last_line = l
+        last_col = c
+        return [l, c]
+    end
+
+    var singleOps = "+-*/%<>().,!=[]{}:"
+    var ops2 = ["==", "!=", "<=", ">=", "&&", "||"]
+    var kw = ["var", "if", "else", "while", "for", "in", "fn", "return", "true", "false", "null", "end"]
+
+    while i < len && !lexError
+        var c = charAt(src, i)
+        var code = charCodeAt(src, i)
+        
+        if c == " " || c == "\n" || code == 9 || code == 13 || c == ";"
+            i = i + 1
+        else if c == "#"
+            while i < len && charAt(src, i) != "\n"
+                i = i + 1
+            end
+        else if c == "/" && i + 1 < len && charAt(src, i+1) == "/"
+            while i < len && charAt(src, i) != "\n"
+                i = i + 1
+            end
+        else
+            var pos = getLineCol(i)
+            var line = pos[0]
+            var col = pos[1]
+            var matched = false
+
+            if code >= 48 && code <= 57
+                var n = ""
+                var parsingNum = true
+                while i < len && parsingNum
+                    var n_code = charCodeAt(src, i)
+                    if (n_code >= 48 && n_code <= 57) || n_code == 46
+                        n = n + charAt(src, i)
+                        i = i + 1
+                    else
+                        parsingNum = false
+                    end
+                end
+                push(tokens, Tok(TokKind.NUM, num(n), line, col))
+                matched = true
+            end
+
+            if !matched && (c == "\"" || c == "'")
+                var q = c
+                i = i + 1
+                var s = ""
+                var parsingStr = true
+                
+                while i < len && parsingStr
+                    var currChar = charAt(src, i)
+                    
+                    if currChar == q
+                        parsingStr = false
+                        
+                    else if currChar == "\\" && i + 1 < len
+                        var nextChar = charAt(src, i+1)
+                        if nextChar == "n"
+                            s = s + "\n"
+                        else if nextChar == "t"
+                            s = s + "\t"
+                        else if nextChar == "r"
+                            s = s + "\r"
+                        else if nextChar == q
+                            s = s + q
+                        else if nextChar == "\\"
+                            s = s + "\\"
+                        else
+                            print("LEXER ERROR at line " + str(line) + ", col " + str(col) + ": Unknown escape sequence: \\" + nextChar)
+                            lexError = true
+                            parsingStr = false
+                        end
+                        i = i + 2
+                    else
+                        s = s + currChar
+                        i = i + 1
+                    end
+                end
+                
+                i = i + 1
+                push(tokens, Tok(TokKind.STR, s, line, col))
+                matched = true
+            end
+
+            var isAlpha = (code >= 97 && code <= 122) || (code >= 65 && code <= 90) || code == 95
+            if !matched && isAlpha
+                var w = ""
+                var parsingAlpha = true
+                while i < len && parsingAlpha
+                    var ch_code = charCodeAt(src, i)
+                    var isAlnum = (ch_code >= 97 && ch_code <= 122) || (ch_code >= 65 && ch_code <= 90) || (ch_code >= 48 && ch_code <= 57) || ch_code == 95
+                    if isAlnum
+                        w = w + charAt(src, i)
+                        i = i + 1
+                    else
+                        parsingAlpha = false
+                    end
+                end
+                
+                var isKW = false
+                for ki in range(0, length(kw))
+                    if kw[ki] == w
+                        isKW = true
+                    end
+                end
+                
+                var tKind = TokKind.ID
+                if isKW
+                    tKind = TokKind.KW
+                end
+                push(tokens, Tok(tKind, w, line, col))
+                matched = true
+            end
+
+            if !matched
+                var twoChar = ""
+                if i + 1 < len
+                    twoChar = slice(src, i, i + 2)
+                end
+                var isTwoChar = false
+                for oi in range(0, length(ops2))
+                    if ops2[oi] == twoChar
+                        isTwoChar = true
+                    end
+                end
+                if isTwoChar
+                    push(tokens, Tok(TokKind.OP, twoChar, line, col))
+                    i = i + 2
+                    matched = true
+                end
+            end
+
+            if !matched && contains(singleOps, c)
+                push(tokens, Tok(TokKind.OP, c, line, col))
+                i = i + 1
+                matched = true
+            end
+
+            if !matched
+                print("LEXER ERROR at line " + str(line) + ", col " + str(col) + ": Unknown character: " + str(c))
+                lexError = true
+            end
+        end
+    end
+
+    if lexError return null end
+
+    var endPos = getLineCol(i)
+    push(tokens, Tok(TokKind.EOF, null, endPos[0], endPos[1]))
+    return tokens
+end
+
+var parse = fn(tokens)
+    var pos = 0
+    var parseError = false
+    
+    var peek = fn() return tokens[pos] end
+    
+    var check = fn(t, v)
+        var tok = peek()
+        if tok == null return false end
+        if v == null return tok.t == t end
+        return tok.t == t && tok.v == v
+    end
+
+    var eat = fn(t, v)
+        var tok = tokens[pos]
+        if t != null && tok.t != t
+            print("PARSE ERROR at line " + str(tok.line) + ": Expected " + str(t) + ", got " + str(tok.t))
+            parseError = true
+            return Tok(t, "", tok.line, tok.col)
+        end
+        if v != null && tok.v != v
+            print("PARSE ERROR at line " + str(tok.line) + ": Expected '" + str(v) + "', got '" + str(tok.v) + "'")
+            parseError = true
+            return Tok(t, "", tok.line, tok.col)
+        end
+        pos = pos + 1
+        return tok
+    end
+
+    var parseExpr = null
+    var parseBlock = null
+    var parseStmt = null
+
+    parseBlock = fn()
+        var stmts = []
+        while !check(TokKind.KW, "end") && !check(TokKind.KW, "else") && !check(TokKind.EOF, null) && !parseError
+            push(stmts, parseStmt())
+        end
+        return BlockNode(stmts)
+    end
+
+    parseStmt = fn()
+        var t = peek()
+        if t.t == TokKind.KW && t.v == "var"
+            eat(TokKind.KW, "var")
+            var id = eat(TokKind.ID, null).v
+            eat(TokKind.OP, "=")
+            return VarNode(id, parseExpr())
+        end
+        
+        if t.t == TokKind.ID && tokens[pos+1] != null && tokens[pos+1].t == TokKind.OP && tokens[pos+1].v == "="
+            var id = eat(TokKind.ID, null).v
+            eat(TokKind.OP, "=")
+            return SetNode(id, parseExpr(), t.line, t.col)
+        end
+        
+        if t.t == TokKind.ID && tokens[pos+1] != null && tokens[pos+1].v == "["
+            var id = eat(TokKind.ID, null).v
+            eat(TokKind.OP, "[")
+            var index = parseExpr()
+            eat(TokKind.OP, "]")
+            eat(TokKind.OP, "=")
+            return IndexSetNode(id, index, parseExpr(), t.line, t.col)
+        end
+        
+        if t.t == TokKind.ID && tokens[pos+1] != null && tokens[pos+1].v == "."
+            var id = eat(TokKind.ID, null).v
+            eat(TokKind.OP, ".")
+            var propName = eat(TokKind.ID, null).v
+            eat(TokKind.OP, "=")
+            return IndexSetNode(id, StrNode(propName), parseExpr(), t.line, t.col)
+        end
+        
+        if t.t == TokKind.KW && t.v == "if"
+            eat(TokKind.KW, "if")
+            var cond = parseExpr()
+            var body = parseBlock()
+            var alt = null
+            if check(TokKind.KW, "else")
+                eat(TokKind.KW, "else")
+                if check(TokKind.KW, "if")
+                    alt = parseStmt()
+                else
+                    alt = parseBlock()
+                    eat(TokKind.KW, "end")
+                end
+            else
+                eat(TokKind.KW, "end")
+            end
+            return IfNode(cond, body, alt)
+        end
+        
+        if t.t == TokKind.KW && t.v == "while"
+            eat(TokKind.KW, "while")
+            var cond = parseExpr()
+            var body = parseBlock()
+            eat(TokKind.KW, "end")
+            return WhileNode(cond, body, t.line, t.col)
+        end
+        
+        if t.t == TokKind.KW && t.v == "for"
+            eat(TokKind.KW, "for")
+            var id = eat(TokKind.ID, null).v
+            eat(TokKind.KW, "in")
+            var iterable = parseExpr()
+            var body = parseBlock()
+            eat(TokKind.KW, "end")
+            return ForNode(id, iterable, body, t.line, t.col)
+        end
+        
+        if t.t == TokKind.KW && t.v == "fn"
+            eat(TokKind.KW, "fn")
+            var name = eat(TokKind.ID, null).v
+            eat(TokKind.OP, "(")
+            var params = []
+            while !check(TokKind.OP, ")") && !parseError
+                push(params, eat(TokKind.ID, null).v)
+                if check(TokKind.OP, ",") eat(TokKind.OP, ",") end
+            end
+            eat(TokKind.OP, ")")
+            var body = parseBlock()
+            eat(TokKind.KW, "end")
+            return FnNode(name, params, body)
+        end
+        
+        if t.t == TokKind.KW && t.v == "return"
+            eat(TokKind.KW, "return")
+            var val = null
+            if !check(TokKind.EOF, null) && !check(TokKind.KW, "end") && !check(TokKind.KW, "else")
+                val = parseExpr()
+            end
+            return ReturnNode(val)
+        end
+        
+        return ExprNode(parseExpr())
+    end
+
+    var parsePrimary = fn()
+        var t = peek()
+        if t.t == TokKind.NUM eat(TokKind.NUM, null); return NumNode(t.v) end
+        if t.t == TokKind.STR eat(TokKind.STR, null); return StrNode(t.v) end
+        if t.t == TokKind.KW && t.v == "true" eat(TokKind.KW, null); return BoolNode(true) end
+        if t.t == TokKind.KW && t.v == "false" eat(TokKind.KW, null); return BoolNode(false) end
+        if t.t == TokKind.KW && t.v == "null" eat(TokKind.KW, null); return NullNode() end
+        
+        if t.t == TokKind.KW && t.v == "fn"
+            eat(TokKind.KW, "fn")
+            var params = []
+            eat(TokKind.OP, "(")
+            while !check(TokKind.OP, ")") && !parseError
+                push(params, eat(TokKind.ID, null).v)
+                if check(TokKind.OP, ",") eat(TokKind.OP, ",") end
+            end
+            eat(TokKind.OP, ")")
+            var body = parseBlock()
+            eat(TokKind.KW, "end")
+            return FnNode(null, params, body)
+        end
+        
+        if t.t == TokKind.ID eat(TokKind.ID, null); return IdNode(t.v, t.line, t.col) end
+        
+        if check(TokKind.OP, "(")
+            eat(TokKind.OP, "(")
+            var e = parseExpr()
+            eat(TokKind.OP, ")")
+            return e
+        end
+        
+        if check(TokKind.OP, "[")
+            eat(TokKind.OP, "[")
+            var elements = []
+            while !check(TokKind.OP, "]") && !parseError
+                push(elements, parseExpr())
+                if check(TokKind.OP, ",") eat(TokKind.OP, ",") end
+            end
+            eat(TokKind.OP, "]")
+            return ArrayNode(elements)
+        end
+        
+        if check(TokKind.OP, "{")
+            eat(TokKind.OP, "{")
+            var keys = []
+            var vals = []
+            while !check(TokKind.OP, "}") && !parseError
+                var t_key = peek()
+                var keyStr = ""
+                if t_key.t == TokKind.ID
+                    keyStr = eat(TokKind.ID, null).v
+                else if t_key.t == TokKind.STR
+                    keyStr = eat(TokKind.STR, null).v
+                else
+                    print("PARSE ERROR at line " + str(t_key.line) + ": Expected ID or STR for map key")
+                    parseError = true
+                    return null
+                end
+                push(keys, keyStr)
+                eat(TokKind.OP, ":")
+                push(vals, parseExpr())
+                if check(TokKind.OP, ",") eat(TokKind.OP, ",") end
+            end
+            eat(TokKind.OP, "}")
+            return MapNode(keys, vals)
+        end
+        
+        print("PARSE ERROR at line " + str(t.line) + ": Unexpected token '" + str(t.v) + "'")
+        parseError = true
+        return null
+    end
+
+    var parseCall = fn()
+        var e = parsePrimary()
+        while !parseError && (check(TokKind.OP, "(") || check(TokKind.OP, "[") || check(TokKind.OP, "."))
+            if check(TokKind.OP, "(")
+                var t = peek()
+                eat(TokKind.OP, "(")
+                var args = []
+                while !check(TokKind.OP, ")") && !parseError
+                    push(args, parseExpr())
+                    if check(TokKind.OP, ",") eat(TokKind.OP, ",") end
+                end
+                eat(TokKind.OP, ")")
+                e = CallNode(e, args, t.line, t.col)
+            else if check(TokKind.OP, "[")
+                var t = peek()
+                eat(TokKind.OP, "[")
+                var index = parseExpr()
+                eat(TokKind.OP, "]")
+                e = IndexGetNode(e, index, t.line, t.col)
+            else if check(TokKind.OP, ".")
+                var t = peek()
+                eat(TokKind.OP, ".")
+                var propName = eat(TokKind.ID, null).v
+                e = IndexGetNode(e, StrNode(propName), t.line, t.col)
+            end
+        end
+        return e
+    end
+
+    var parseUnary = fn()
+        if check(TokKind.OP, "!")
+            eat(TokKind.OP, "!")
+            return UnaryNode(OpKind.NOT, parseUnary())
+        end
+        if check(TokKind.OP, "-")
+            eat(TokKind.OP, "-")
+            return UnaryNode(OpKind.NEG, parseUnary())
+        end
+        return parseCall()
+    end
+
+    var parseMul = fn()
+        var l = parseUnary()
+        while !parseError && (check(TokKind.OP, "*") || check(TokKind.OP, "/") || check(TokKind.OP, "%"))
+            var t = peek()
+            var op = strToOp(eat(TokKind.OP, null).v)
+            l = BinNode(op, l, parseUnary(), t.line, t.col)
+        end
+        return l
+    end
+
+    var parseAdd = fn()
+        var l = parseMul()
+        while !parseError && (check(TokKind.OP, "+") || check(TokKind.OP, "-"))
+            var t = peek()
+            var op = strToOp(eat(TokKind.OP, null).v)
+            l = BinNode(op, l, parseMul(), t.line, t.col)
+        end
+        return l
+    end
+
+    var parseRel = fn()
+        var l = parseAdd()
+        while !parseError && (check(TokKind.OP, "<") || check(TokKind.OP, ">") || check(TokKind.OP, "<=") || check(TokKind.OP, ">="))
+            var t = peek()
+            var op = strToOp(eat(TokKind.OP, null).v)
+            l = BinNode(op, l, parseAdd(), t.line, t.col)
+        end
+        return l
+    end
+
+    var parseEq = fn()
+        var l = parseRel()
+        while !parseError && (check(TokKind.OP, "==") || check(TokKind.OP, "!="))
+            var t = peek()
+            var op = strToOp(eat(TokKind.OP, null).v)
+            l = BinNode(op, l, parseRel(), t.line, t.col)
+        end
+        return l
+    end
+
+    var parseAnd = fn()
+        var l = parseEq()
+        while !parseError && check(TokKind.OP, "&&")
+            var t = peek()
+            eat(TokKind.OP, "&&")
+            l = BinNode(OpKind.AND, l, parseEq(), t.line, t.col)
+        end
+        return l
+    end
+
+    var parseOr = fn()
+        var l = parseAnd()
+        while !parseError && check(TokKind.OP, "||")
+            var t = peek()
+            eat(TokKind.OP, "||")
+            l = BinNode(OpKind.OR, l, parseAnd(), t.line, t.col)
+        end
+        return l
+    end
+
+    parseExpr = fn() return parseOr() end
+
+    var stmts = []
+    while !check(TokKind.EOF, null) && !parseError
+        push(stmts, parseStmt())
+    end
+    
+    if parseError return null end
+    return ProgramNode(stmts)
+end
+
+var isLumeNull = fn(val)
+    if val == null return false end
+    if val == true || val == false return false end
+    var t = typeof(val)
+    if t != "map" return false end
+    return val.k == ValKind.LUME_NULL
+end
+
+var isTruthy = fn(val)
+    if val == null return false end
+    if isLumeNull(val) return false end
+    if val == false return false end
+    return true
+end
+
+var stringify = fn(val)
+    if isLumeNull(val) return "null" end
+    if val == null return "null" end
+    var t = typeof(val)
+    if t == "list"
+        var res = "["
+        for i in range(0, length(val))
+            var item = val[i]
+            if typeof(item) == "string"
+                res = res + "\"" + item + "\""
+            else
+                res = res + stringify(item)
+            end
+            if i < length(val) - 1 res = res + ", " end
+        end
+        res = res + "]"
+        return res
+    end
+    return str(val)
+end
+
+var envGet = fn(env, name, depth, slot, line, col, ctx)
+    if depth != null
+        var curr = env
+        for i in range(0, depth)
+            curr = curr.parent
+        end
+        return curr.vars[slot]
+    end
+
+    var curr = env
+    while curr.parent != null
+        curr = curr.parent
+    end
+    
+    var val = curr.vars[name]
+    if val == null
+        print("RUNTIME ERROR at line " + str(line) + ": Undefined variable: '" + str(name) + "'")
+        ctx.error = true
+        return null
+    end
+    return val
+end
+
+var resolve = fn(node, scopes)
+    if node == null return null end
+    var kind = node.k
+
+    if kind == NodeKind.PROGRAM
+        for i in range(0, length(node.body))
+            resolve(node.body[i], scopes)
+        end
+        return null
+    end
+
+    if kind == NodeKind.BLOCK
+        push(scopes, [])
+        for i in range(0, length(node.body))
+            resolve(node.body[i], scopes)
+        end
+        pop(scopes)
+        return null
+    end
+
+    if kind == NodeKind.FN
+        if node.name != null && length(scopes) > 0
+            var scope = scopes[length(scopes)-1]
+            push(scope, node.name)
+            node.depth = 0
+            node.slot = length(scope) - 1
+        end
+        push(scopes, [])
+        var inner = scopes[length(scopes)-1]
+        for i in range(0, length(node.params))
+            push(inner, node.params[i])
+        end
+        resolve(node.body, scopes)
+        pop(scopes)
+        return null
+    end
+
+    if kind == NodeKind.VAR
+        resolve(node.val, scopes)
+        if length(scopes) > 0
+            var scope = scopes[length(scopes)-1]
+            push(scope, node.id)
+            node.depth = 0
+            node.slot = length(scope) - 1
+        end
+        return null
+    end
+
+    if kind == NodeKind.ID || kind == NodeKind.SET || kind == NodeKind.INDEX_SET
+        var name = node.id
+        if kind == NodeKind.ID name = node.v end
+        
+        var found = false
+        for i_idx in range(0, length(scopes))
+            var i = length(scopes) - 1 - i_idx
+            if !found
+                var scope = scopes[i]
+                for s in range(0, length(scope))
+                    if !found && scope[s] == name
+                        node.depth = length(scopes) - 1 - i
+                        node.slot = s
+                        found = true
+                    end
+                end
+            end
+        end
+        
+        if kind == NodeKind.SET resolve(node.val, scopes) end
+        if kind == NodeKind.INDEX_SET
+            resolve(node.index, scopes)
+            resolve(node.val, scopes)
+        end
+        return null
+    end
+
+    if kind == NodeKind.FOR
+        resolve(node.iterable, scopes)
+        push(scopes, [])
+        var scope = scopes[length(scopes)-1]
+        push(scope, node.id)
+        node.depth = 0
+        node.slot = length(scope) - 1
+        resolve(node.body, scopes)
+        pop(scopes)
+        return null
+    end
+
+    if kind == NodeKind.ARRAY
+        for i in range(0, length(node.elements)) resolve(node.elements[i], scopes) end
+    end
+
+    if kind == NodeKind.INDEX_GET
+        resolve(node.target, scopes)
+        resolve(node.index, scopes)
+    end
+
+    if kind == NodeKind.MAP
+        for i in range(0, length(node.vals)) resolve(node.vals[i], scopes) end
+    end
+    
+    if kind == NodeKind.IF
+        resolve(node.cond, scopes)
+        resolve(node.body, scopes)
+        resolve(node.alt, scopes)
+    end
+    if kind == NodeKind.WHILE
+        resolve(node.cond, scopes)
+        resolve(node.body, scopes)
+    end
+    if kind == NodeKind.RETURN || kind == NodeKind.EXPR || kind == NodeKind.UNARY
+        resolve(node.val, scopes)
+    end
+    if kind == NodeKind.BIN
+        resolve(node.l, scopes)
+        resolve(node.r, scopes)
+    end
+    if kind == NodeKind.CALL
+        resolve(node.nodeFunc, scopes)
+        for i in range(0, length(node.args)) resolve(node.args[i], scopes) end
+    end
+    return null
+end
+
+var evaluate = null
+evaluate = fn(node, env, ctx)
+    if node == null || ctx.returned || ctx.error return null end
+    
+    var k = node.k
+
+    if k == NodeKind.PROGRAM
+        for i in range(0, length(node.body))
+            if !ctx.returned && !ctx.error
+                evaluate(node.body[i], env, ctx)
+            end
+        end
+        return null
+    end
+
+    if k == NodeKind.BLOCK
+        var innerEnv = Env([], env)
+        for i in range(0, length(node.body))
+            if !ctx.returned && !ctx.error
+                evaluate(node.body[i], innerEnv, ctx)
+            end
+        end
+        return null
+    end
+
+    if k == NodeKind.VAR
+        var val = evaluate(node.val, env, ctx)
+        if node.depth != null
+            push(env.vars, envStoreVal(val))
+        else
+            var curr = env
+            while curr.parent != null curr = curr.parent end
+            curr.vars[node.id] = envStoreVal(val) 
+        end
+        return null
+    end
+    
+    if k == NodeKind.SET
+        var val = evaluate(node.val, env, ctx)
+        if node.depth != null
+            var curr = env
+            for i in range(0, node.depth) curr = curr.parent end
+            curr.vars[node.slot] = envStoreVal(val)
+            return null
+        end
+        var curr = env
+        while curr.parent != null curr = curr.parent end
+        curr.vars[node.id] = envStoreVal(val)
+        return null
+    end
+
+    if k == NodeKind.FN
+        var closure = ClosureVal(node.params, node.body, env)
+        if node.name == null return closure end
+        
+        if node.depth != null
+            push(env.vars, closure)
+        else
+            var curr = env
+            while curr.parent != null curr = curr.parent end
+            curr.vars[node.name] = envStoreVal(closure)
+        end
+        return null
+    end
+
+    if k == NodeKind.RETURN
+        var v = NullVal()
+        if node.val != null v = evaluate(node.val, env, ctx) end
+        ctx.returned = true
+        ctx.val = envStoreVal(v)
+        return null
+    end
+
+    if k == NodeKind.IF
+        if isTruthy(evaluate(node.cond, env, ctx))
+            evaluate(node.body, env, ctx)
+        else if node.alt != null
+            evaluate(node.alt, env, ctx)
+        end
+        return null
+    end
+
+    if k == NodeKind.WHILE
+        var guard = 0
+        while isTruthy(evaluate(node.cond, env, ctx)) && !ctx.error && !ctx.returned
+            guard = guard + 1
+            if guard > 100000
+                print("RUNTIME ERROR at line " + str(node.line) + ": Infinite loop guard")
+                ctx.error = true
+            else
+                evaluate(node.body, env, ctx)
+            end
+        end
+        return null
+    end
+
+    if k == NodeKind.FOR
+        var targetArray = evaluate(node.iterable, env, ctx)
+        if ctx.error return null end
+        if typeof(targetArray) != "list"
+            print("RUNTIME ERROR at line " + str(node.line) + ": Attempt to iterate over non-list")
+            ctx.error = true
+            return null
+        end
+        
+        for i in range(0, length(targetArray))
+            if !ctx.error && !ctx.returned
+                var innerEnv = Env([], env)
+                push(innerEnv.vars, targetArray[i])
+                evaluate(node.body, innerEnv, ctx)
+            end
+        end
+        return null
+    end
+
+    if k == NodeKind.EXPR return evaluate(node.val, env, ctx) end
+    if k == NodeKind.NUM return node.v end
+    if k == NodeKind.STR return node.v end
+    if k == NodeKind.BOOL return node.v end
+    if k == NodeKind.NULL_NODE return NullVal() end
+    if k == NodeKind.ID return envGet(env, node.v, node.depth, node.slot, node.line, node.col, ctx) end
+
+    if k == NodeKind.UNARY
+        var val = evaluate(node.val, env, ctx)
+        if ctx.error return null end
+        if node.op == OpKind.NOT return !isTruthy(val) end
+        if node.op == OpKind.NEG
+            if typeof(val) != "number"
+                print("RUNTIME ERROR at line " + str(node.line) + ": Negation requires a number")
+                ctx.error = true
+                return null
+            end
+            return -val
+        end
+    end
+
+    if k == NodeKind.BIN
+        var l = evaluate(node.l, env, ctx)
+        if ctx.error return null end
+        
+        if node.op == OpKind.AND
+            if !isTruthy(l) return false end
+            return evaluate(node.r, env, ctx)
+        end
+        if node.op == OpKind.OR
+            if isTruthy(l) return true end
+            return evaluate(node.r, env, ctx)
+        end
+        
+        var r = evaluate(node.r, env, ctx)
+        if ctx.error return null end
+        
+        if node.op == OpKind.EQ
+            if isLumeNull(l) && isLumeNull(r) return true end
+            return l == r
+        end
+        if node.op == OpKind.NEQ
+            if isLumeNull(l) && isLumeNull(r) return false end
+            return l != r
+        end
+
+        var lType = typeof(l)
+        var rType = typeof(r)
+        
+        if node.op == OpKind.ADD
+            if (lType == "number" && rType == "number") || (lType == "string" && rType == "string")
+                return l + r
+            end
+            print("RUNTIME ERROR at line " + str(node.line) + ": Cannot add " + lType + " to " + rType)
+            ctx.error = true
+            return null
+        end
+        
+        var isMath = (node.op == OpKind.SUB || node.op == OpKind.MUL || node.op == OpKind.DIV || node.op == OpKind.MOD)
+        var isRel = (node.op == OpKind.LT || node.op == OpKind.GT || node.op == OpKind.LTE || node.op == OpKind.GTE)
+        
+        if isMath || isRel
+            if lType != "number" || rType != "number"
+                print("RUNTIME ERROR at line " + str(node.line) + ": Operands must be numbers")
+                ctx.error = true
+                return null
+            end
+        end
+        
+        if node.op == OpKind.SUB return l - r end
+        if node.op == OpKind.MUL return l * r end
+        if node.op == OpKind.DIV
+            if r == 0
+                print("RUNTIME ERROR at line " + str(node.line) + ": Division by zero")
+                ctx.error = true
+                return 0
+            end
+            return l / r
+        end
+        if node.op == OpKind.MOD return l % r end
+        if node.op == OpKind.LT return l < r end
+        if node.op == OpKind.GT return l > r end
+        if node.op == OpKind.LTE return l <= r end
+        if node.op == OpKind.GTE return l >= r end
+    end
+
+    if k == NodeKind.CALL
+        var callee = evaluate(node.nodeFunc, env, ctx)
+        if ctx.error return null end
+        
+        var args = []
+        for i in range(0, length(node.args))
+            push(args, evaluate(node.args[i], env, ctx))
+            if ctx.error return null end
+        end
+
+        var calleeType = typeof(callee)
+
+        if calleeType == "map" && callee.k == ValKind.BUILTIN
+            var result = callee.builtinFn(args, ctx, node)
+            if ctx.error return null end
+            return envStoreVal(result)
+        end
+
+        if calleeType == "map" && callee.k == ValKind.CLOSURE
+            var inner = Env([], callee.env)
+            for i in range(0, length(callee.params))
+                var argVal = NullVal()
+                if i < length(args) argVal = args[i] end
+                push(inner.vars, envStoreVal(argVal))
+            end
+
+            var callCtx = Ctx()
+            evaluate(callee.body, inner, callCtx)
+            if callCtx.error
+                ctx.error = true
+                return null
+            end
+            return envStoreVal(callCtx.val)
+        end
+
+        print("RUNTIME ERROR at line " + str(node.line) + ": Not a function, got " + calleeType)
+        ctx.error = true
+        return null
+    end
+
+    if k == NodeKind.ARRAY
+        var arr = []
+        for i in range(0, length(node.elements))
+            push(arr, evaluate(node.elements[i], env, ctx))
+        end
+        return arr
+    end
+
+    if k == NodeKind.INDEX_GET
+        var target = evaluate(node.target, env, ctx)
+        var index = evaluate(node.index, env, ctx)
+        if ctx.error return null end
+        var tType = typeof(target)
+        if tType != "list" && tType != "map"
+            print("RUNTIME ERROR at line " + str(node.line) + ": Attempt to index non-collection")
+            ctx.error = true
+            return null
+        end
+        if tType == "list" && index >= length(target) return NullVal() end
+        
+        var res = target[index]
+        if res == null return NullVal() end
+        return res
+    end
+
+    if k == NodeKind.INDEX_SET
+        var target = envGet(env, node.id, node.depth, node.slot, node.line, node.col, ctx)
+        if ctx.error return null end
+        var index = evaluate(node.index, env, ctx)
+        var val = evaluate(node.val, env, ctx)
+        if ctx.error return null end
+        
+        var tType = typeof(target)
+        if tType != "list" && tType != "map"
+            print("RUNTIME ERROR at line " + str(node.line) + ": Attempt to assign to non-collection")
+            ctx.error = true
+            return null
+        end
+        if tType == "list"
+            while length(target) <= index
+                push(target, NullVal())
+            end
+        end
+        target[index] = val
+        return null
+    end
+
+    if k == NodeKind.MAP
+        var m = {}
+        for i in range(0, length(node.keys))
+            m[node.keys[i]] = evaluate(node.vals[i], env, ctx)
+        end
+        return m
+    end
+end
+
+var makeGlobalEnv = fn(hostArgv)
+    var env = Env({}, null)
+    
+    if hostArgv != null
+        env.vars["argv"] = envStoreVal(hostArgv)
+    else
+        env.vars["argv"] = envStoreVal([])
+    end
+
+    env.vars["print"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            if length(args) > 0 print(stringify(args[0])) else print("") end
+            return null
+        end
+    }
+
+    env.vars["clock"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return clock()
+        end
+    }
+
+    env.vars["str"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            if length(args) == 0 return "" end
+            return stringify(args[0])
+        end
+    }
+    
+    env.vars["num"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            if length(args) == 0 return 0 end
+            return num(args[0])
+        end
+    }
+
+    env.vars["length"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return length(args[0])
+        end
+    }
+
+    env.vars["push"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            push(args[0], args[1])
+            return args[1]
+        end
+    }
+
+    env.vars["pop"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return pop(args[0])
+        end
+    }
+
+    env.vars["range"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            var start = 0
+            var end_idx = 0
+            if length(args) == 1
+                end_idx = args[0]
+            else if length(args) > 1
+                start = args[0]
+                end_idx = args[1]
+            end
+            var arr = []
+            for i in range(start, end_idx) push(arr, i) end
+            return arr
+        end
+    }
+
+    env.vars["charAt"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return charAt(args[0], args[1])
+        end
+    }
+    
+    env.vars["charCodeAt"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return charCodeAt(args[0], args[1])
+        end
+    }
+
+    env.vars["slice"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return slice(args[0], args[1], args[2])
+        end
+    }
+
+    env.vars["contains"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return contains(args[0], args[1])
+        end
+    }
+
+    env.vars["fileExists"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return fileExists(args[0])
+        end
+    }
+
+    env.vars["fileRead"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return fileRead(args[0])
+        end
+    }
+
+    env.vars["typeof"] = {
+        k: ValKind.BUILTIN,
+        builtinFn: fn(args, ctx, node)
+            return typeof(args[0])
+        end
+    }
+
+    return env
+end
+
+var run = fn(src, runArgv)
+    var env = makeGlobalEnv(runArgv)
+    var tokens = tokenize(src)
+    if tokens == null return null end
+    
+    var ast = parse(tokens)
+    if ast == null return null end
+    
+    resolve(ast, [])
+    var ctx = Ctx()
+    evaluate(ast, env, ctx)
+    return null
+end
+
+var main = fn(sysArgv)
+    if length(sysArgv) < 2
+        print("Usage: lume <script_file.lm>")
+        return null
+    end
+    
+    var targetPath = sysArgv[1]
+    if !contains(targetPath, ".lm")
+        print("ERROR: Invalid file extension.")
+        return null
+    end
+    
+    if !fileExists(targetPath)
+        print("ERROR: Target script not found: " + targetPath)
+        return null
+    end
+    
+    var src = fileRead(targetPath)
+    run(src, sysArgv)
+    return null
+end
+main([null, "fib.lm"])

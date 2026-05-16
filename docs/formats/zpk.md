@@ -90,7 +90,7 @@ point for every reader.
 | 12 | 4 | `flags`               | Bit field. See *Footer flags* below. Unknown bits must be ignored unless documented as `MUST_UNDERSTAND`. |
 | 16 | 8 | `manifest_offset`     | Absolute offset of the first `ZpkEntry`. |
 | 24 | 4 | `entry_count`         | Number of `ZpkEntry` records in the manifest. |
-| 28 | 4 | `entry_index`         | Index of the manifest entry that the runtime should execute as the program entry point. Must be `< entry_count` and must point to an entry of kind `ENTRY_SOURCE` or `ENTRY_BYTECODE`. |
+| 28 | 4 | `entry_index`         | Index of the manifest entry that the runtime should execute as the program entry point. Either `< entry_count` and pointing to an entry of kind `ENTRY_SOURCE` or `ENTRY_BYTECODE`, **or** the sentinel value `ZPK_NO_ENTRY` (`0xFFFFFFFF`) meaning "general archive — no runnable entry point". The runtime loader refuses to execute a bundle whose `entry_index` is the sentinel; readers used for inspection / unpacking accept it. |
 | 32 | 8 | `strtab_offset`       | Absolute offset of the string table. |
 | 40 | 8 | `strtab_size`         | Size of the string table in bytes. |
 | 48 | 4 | `manifest_crc32`      | CRC‑32 (IEEE 802.3 polynomial) computed over the manifest entries followed by the string table. |
@@ -120,8 +120,10 @@ A reader must, in order:
 6. Verify `manifest_offset + entry_count * 48 <= file_size - footer_size`.
 7. Verify `strtab_offset + strtab_size <= file_size - footer_size`.
 8. Recompute and verify `manifest_crc32`.
-9. Verify `entry_index < entry_count` and that the indexed entry has
-   `kind == ENTRY_SOURCE` or `kind == ENTRY_BYTECODE`.
+9. Verify that `entry_index` is either the sentinel `ZPK_NO_ENTRY`
+   (`0xFFFFFFFF`) — in which case the bundle is a general archive and
+   no kind check applies — or `< entry_count` with the indexed entry
+   having `kind == ENTRY_SOURCE` or `kind == ENTRY_BYTECODE`.
 
 CRC mismatches in v1 may be reported as a warning by the loader (so a
 half‑broken bundle still attempts to run) but will be promoted to a hard

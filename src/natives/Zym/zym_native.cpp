@@ -1083,8 +1083,74 @@ ZymValue cv_registerNative(ZymVM* parentVm, ZymValue context,
 struct LoadModulesCtx {
     ZymVM* parentVm;
     ZymVM* child;
-    ZymValue parentCallback;  // parent-side closure
+    ZymValue parentCallback;  // parent-side read closure
+    // Optional resolve closure. `hasResolveCallback == false` => we pass
+    // NULL into `loadModulesEx` and the C loader follows its
+    // byte-identical-to-before path. When present, the resolve
+    // trampoline below caches its last-returned string in
+    // `resolveScratch` so the borrowed `const char*` we hand back to
+    // the loader stays valid for the duration of that single
+    // `resolve_callback(path, ud)` -> `read_callback(canonical)` round
+    // trip (the C loader does an internal strdup immediately on return,
+    // so we only need lifetime up to that point).
+    ZymValue parentResolveCallback;
+    bool hasResolveCallback;
+    std::string resolveScratch;
 };
+
+// Resolve trampoline. Invoked by the C loader BEFORE any internal
+// path math and BEFORE the cycle/cache check; the resolver is the
+// authority on the canonical module key.
+//
+// Arguments:
+//   - `spec`     : raw import spec exactly as it appeared in source
+//   - `importer` : canonical path of the module that issued the import,
+//                  or NULL when resolving the entry module's own deps
+//
+// Returning NULL = "fall back to the loader's default
+// `resolve_module_path(importer_dir, spec)`" (identical behavior to no
+// resolver for that spec). Returning a string = "use this as the
+// canonical key from here on": the C loader copies it internally on
+// return, so the pointer only needs to be valid for the duration of
+// this call. We stash it in `ctx->resolveScratch` to back the returned
+// pointer.
+//
+// Script-side signature: `resolveCallback(spec, importer)` — `importer`
+// is a null string when there is no importer (entry-module deps).
+static const char* zym_loadModules_resolve_trampoline(const char* spec, const char* importer, void* user_data) {
+    auto* ctx = static_cast<LoadModulesCtx*>(user_data);
+    if (!ctx || !ctx->parentVm || !ctx->child) return nullptr;
+    if (!ctx->hasResolveCallback) return nullptr;
+
+    ZymValue specV = zym_newString(ctx->parentVm, spec ? spec : "");
+    zym_pushRoot(ctx->parentVm, specV);
+    ZymValue importerV = importer
+        ? zym_newString(ctx->parentVm, importer)
+        : zym_newNull();
+    zym_pushRoot(ctx->parentVm, importerV);
+    ZymValue argv[2] = { specV, importerV };
+    ZymStatus st = zym_callClosurev(ctx->parentVm, ctx->parentResolveCallback, 2, argv);
+    if (st != ZYM_STATUS_OK) {
+        zym_popRoot(ctx->parentVm); // importerV
+        zym_popRoot(ctx->parentVm); // specV
+        return nullptr;
+    }
+
+    ZymValue ret = zym_getCallResult(ctx->parentVm);
+    zym_popRoot(ctx->parentVm); // importerV
+    zym_popRoot(ctx->parentVm); // specV
+
+    // Script signaled "no override" → fall through to default.
+    if (zym_isNull(ret)) return nullptr;
+    if (!zym_isString(ret)) return nullptr;
+
+    const char* s = zym_asCString(ret);
+    if (!s) return nullptr;
+    // Copy into ctx-owned storage so the C loader sees a stable pointer
+    // even after the parent-VM string `ret` is released.
+    ctx->resolveScratch.assign(s);
+    return ctx->resolveScratch.c_str();
+}
 
 static ModuleReadResult zym_loadModules_trampoline(const char* path, void* user_data) {
     ModuleReadResult result = { nullptr, nullptr, ZYM_FILE_ID_INVALID };
@@ -1203,26 +1269,47 @@ ZymValue cv_loadModules(ZymVM* parentVm, ZymValue context,
 
     bool debug_names = true;
     bool write_debug = false;
+    ZymValue resolveCb = ZYM_ERROR;
+    bool hasResolve = false;
     if (zym_isMap(optsV)) {
         ZymValue v;
         v = zym_mapGet(parentVm, optsV, "debugNames");
         if (v != ZYM_ERROR && zym_isBool(v)) debug_names = zym_asBool(v);
         v = zym_mapGet(parentVm, optsV, "writeDebugOutput");
         if (v != ZYM_ERROR && zym_isBool(v)) write_debug = zym_asBool(v);
+        // Optional resolve callback. When absent or null, we pass NULL
+        // into `loadModulesEx` so the C loader takes its
+        // byte-identical-to-before path — no script-side overhead, no
+        // behavior change for the 99% of callers that only need the
+        // existing root-relative resolution.
+        v = zym_mapGet(parentVm, optsV, "resolveCallback");
+        if (v != ZYM_ERROR && !zym_isNull(v)) {
+            if (!zym_isClosure(v) && !zym_isFunction(v)) {
+                zym_runtimeError(parentVm,
+                    "loadModules: opts.resolveCallback must be a closure (or null/absent)");
+                return ZYM_ERROR;
+            }
+            resolveCb = v;
+            hasResolve = true;
+        }
     }
 
-    LoadModulesCtx ctx { parentVm, h->child, cbV };
+    LoadModulesCtx ctx { parentVm, h->child, cbV, resolveCb, hasResolve, {} };
     zym_pushRoot(parentVm, cbV);
+    if (hasResolve) zym_pushRoot(parentVm, resolveCb);
     zym_pushRoot(parentVm, srcV);
     zym_pushRoot(parentVm, entryV);
     zym_pushRoot(parentVm, smV);
-    ModuleLoadResult* mr = loadModules(
+    ModuleLoadResult* mr = loadModulesEx(
         h->child, zym_asCString(srcV), smr->sm, zym_asCString(entryV),
-        zym_loadModules_trampoline, &ctx,
+        zym_loadModules_trampoline,
+        hasResolve ? zym_loadModules_resolve_trampoline : nullptr,
+        &ctx,
         debug_names, write_debug, nullptr);
     zym_popRoot(parentVm); // smV
     zym_popRoot(parentVm); // entryV
     zym_popRoot(parentVm); // srcV
+    if (hasResolve) zym_popRoot(parentVm); // resolveCb
     zym_popRoot(parentVm); // cbV
 
     ZymValue result = zym_newMap(parentVm);
@@ -1259,6 +1346,56 @@ ZymValue cv_loadModules(ZymVM* parentVm, ZymValue context,
     if (mr) freeModuleLoadResult(h->child, mr);
     zym_popRoot(parentVm);
     return result;
+}
+
+// =============================================================================
+// vm.moduleLoader.getCaller() / getStack()
+// =============================================================================
+//
+// Per the design: `read_callback(path)` stays single-argument. Scripts
+// that need to know "who asked?" reach for these methods, which are valid
+// ONLY during an active `read_callback` invocation on `h->child`. Calling
+// them outside that window raises a runtime error so the misuse is loud
+// rather than silently returning stale data.
+//
+// State source: `zym_currentImport*` in zym_core's module_loader, which
+// reads the VM-side pointer set by `load_module_recursive` around each
+// callback dispatch (see `vm.h::current_import_stack`).
+
+ZymValue cv_moduleLoader_getCaller(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (zym_currentImportDepth(h->child) == 0) {
+        zym_runtimeError(parentVm,
+            "vm.moduleLoader.getCaller(): not valid outside of a read_callback "
+            "invocation. This method is only meaningful while the module loader "
+            "is actively resolving an import.");
+        return ZYM_ERROR;
+    }
+    const char* caller = zym_currentImportCaller(h->child);
+    if (!caller) return zym_newNull();
+    return zym_newString(parentVm, caller);
+}
+
+ZymValue cv_moduleLoader_getStack(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    int depth = zym_currentImportDepth(h->child);
+    if (depth == 0) {
+        zym_runtimeError(parentVm,
+            "vm.moduleLoader.getStack(): not valid outside of a read_callback "
+            "invocation. This method is only meaningful while the module loader "
+            "is actively resolving an import.");
+        return ZYM_ERROR;
+    }
+    ZymValue list = zym_newList(parentVm);
+    zym_pushRoot(parentVm, list);
+    for (int i = 0; i < depth; i++) {
+        const char* p = zym_currentImportPathAt(h->child, i);
+        zym_listAppend(parentVm, list, zym_newString(parentVm, p ? p : ""));
+    }
+    zym_popRoot(parentVm);
+    return list;
 }
 
 ZymValue cv_free(ZymVM* /*parentVm*/, ZymValue context) {
@@ -1317,6 +1454,12 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mDiag     = MK_CLOSURE("diagnostics()", cv_diagnostics);                            zym_pushRoot(parentVm, mDiag);
     ZymValue mFreeCh   = MK_CLOSURE("freeChunk(chunk)", cv_freeChunk);                           zym_pushRoot(parentVm, mFreeCh);
 
+    // Module-loader query API. Only meaningful during a read_callback
+    // invocation issued by `loadModules`; calling outside raises a
+    // runtime error (see cv_moduleLoader_getCaller / getStack).
+    ZymValue mMlCaller = MK_CLOSURE("getCaller()", cv_moduleLoader_getCaller);                   zym_pushRoot(parentVm, mMlCaller);
+    ZymValue mMlStack  = MK_CLOSURE("getStack()", cv_moduleLoader_getStack);                     zym_pushRoot(parentVm, mMlStack);
+
 #undef MK_CLOSURE
 
     ZymValue obj = zym_newMap(parentVm);
@@ -1347,8 +1490,18 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "diagnostics",        mDiag);
     zym_mapSet(parentVm, obj, "freeChunk",          mFreeCh);
 
-    // ctx + 24 closures + obj = 26
-    for (int i = 0; i < 26; i++) zym_popRoot(parentVm);
+    // `moduleLoader`: a small sub-map exposing the runtime introspection
+    // surface (`getCaller`, `getStack`). Constructed after the main
+    // closures so it can be rooted alongside `obj` before the final
+    // bulk-pop.
+    ZymValue mlObj = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, mlObj);
+    zym_mapSet(parentVm, mlObj, "getCaller", mMlCaller);
+    zym_mapSet(parentVm, mlObj, "getStack",  mMlStack);
+    zym_mapSet(parentVm, obj, "moduleLoader", mlObj);
+
+    // ctx + 24 closures + 2 moduleLoader closures + obj + mlObj = 29
+    for (int i = 0; i < 29; i++) zym_popRoot(parentVm);
     return obj;
 }
 

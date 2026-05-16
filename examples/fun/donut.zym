@@ -345,7 +345,7 @@ func main(argv) {
     var lastTime = Time.clock();
     var fpsFrame = 0;
 
-    while (frame < 100000) {
+    while (frame < 1000) {
         resetFrameBuffers();
         updateLights();
         renderTorusFrame();

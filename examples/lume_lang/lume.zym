@@ -1,0 +1,960 @@
+enum NodeKind { PROGRAM, BLOCK, VAR, SET, FN, RETURN, IF, WHILE, EXPR, NUM, STR, BOOL, NULL, ID, UNARY, BIN, CALL, ARRAY, INDEX_GET, INDEX_SET, FOR, MAP }
+enum TokKind  { NUM, STR, KW, ID, OP, EOF }
+enum OpKind   { ADD, SUB, MUL, DIV, MOD, LT, GT, LTE, GTE, EQ, NEQ, AND, OR, NOT, NEG }
+enum ValKind  { CLOSURE, BUILTIN, LUME_NULL }
+
+struct ProgramNode   { k; body }
+struct BlockNode     { k; body }
+struct VarNode       { k; id; val; depth; slot }
+struct SetNode       { k; id; val; depth; slot; line; col }
+struct FnNode        { k; name; params; body; depth; slot }
+struct ReturnNode    { k; val }
+struct IfNode        { k; cond; body; alt }
+struct WhileNode     { k; cond; body; line; col }
+struct ExprNode      { k; val }
+struct NumNode       { k; v }
+struct StrNode       { k; v }
+struct BoolNode      { k; v }
+struct NullNode      { k }
+struct IdNode        { k; v; depth; slot; line; col }
+struct UnaryNode     { k; op; val }
+struct BinNode       { k; op; l; r; line; col }
+struct CallNode      { k; nodeFunc; args; line; col }
+struct ArrayNode     { k; elements }
+struct IndexGetNode  { k; target; index; line; col }
+struct IndexSetNode  { k; target; index; val; depth; slot; line; col }
+struct ForNode       { k; id; iterable; body; depth; slot; line; col }
+struct MapNode       { k; keys; vals }
+
+struct ClosureVal    { k; params; body; env }
+struct BuiltinVal    { k; builtinFn }
+struct NullVal       { k }
+
+struct Env           { vars; parent }
+struct ParserState   { tokens; pos }
+struct Ctx           { returned; val; error }
+struct Tok           { t; v; line; col }
+
+func stringify(val) {
+    if (isLumeNull(val)) return "null"
+    if (val == null) return "null"
+    var t = typeof(val)
+    if (t == "list") {
+        var res = "["
+        for (var i = 0; i < length(val); i++) {
+            var item = val[i]
+            if (typeof(item) == "string") { res += "\"" + item + "\"" }
+            else { res += stringify(item) }
+            if (i < length(val) - 1) res += ", "
+        }
+        res += "]"
+        return res
+    }
+    return str(val)
+}
+
+func isLumeNull(val) {
+    if (val == null) return false
+    if (val == true or val == false) return false
+    var t = typeof(val)
+    if (t == "number" or t == "string" or t == "list") return false
+    return val.k == ValKind.LUME_NULL
+}
+
+func isTruthy(val) {
+    if (val == null) return false
+    if (isLumeNull(val)) return false
+    if (val == false) return false
+    return true
+}
+
+func tokenize(src) {
+    var tokens = []
+    var i = 0
+    var len = length(src)
+    
+    var last_idx = 0
+    var last_line = 1
+    var last_col = 1
+    
+    func getLineCol(index) {
+        var l = last_line
+        var c = last_col
+        for (var j = last_idx; j < index; j++) {
+            if (charAt(src, j) == "\n") { l++; c = 1 }
+            else { c++ }
+        }
+        last_idx = index
+        last_line = l
+        last_col = c
+        return [l, c]
+    }
+
+    var singleOps = "+-*/%<>().,!=[]{}:"
+    var ops2 = ["==", "!=", "<=", ">=", "&&", "||"]
+    var kw = ["var", "if", "else", "while", "for", "in", "fn", "return", "true", "false", "null", "end"]
+
+    while (i < len) {
+        var c = charAt(src, i)
+        var code = charCodeAt(src, i)
+        if (c == " " or c == "\n" or c == "\t" or c == "\r" or c == ";") { i++; continue }
+        if (c == "#") { while (i < len and charAt(src, i) != "\n") { i++ } continue }
+        if (c == "/" and i + 1 < len and charAt(src, i+1) == "/") { while (i < len and charAt(src, i) != "\n") { i++ } continue }
+        var pos = getLineCol(i)
+        var line = pos[0]
+        var col = pos[1]
+        if (code >= 48 and code <= 57) {
+            var n = ""
+            while (i < len) {
+                var n_code = charCodeAt(src, i)
+                if ((n_code >= 48 and n_code <= 57) or n_code == 46) { n += charAt(src, i); i++ }
+                else { break }
+            }
+            push(tokens, Tok(TokKind.NUM, num(n), line, col))
+            continue
+        }
+        if (c == "\"" or c == "'") {
+            var q = c; i++
+            var s = ""
+            while (i < len) {
+                var currChar = charAt(src, i)
+                if (currChar == q) break
+                if (currChar == "\\" and i + 1 < len) {
+                    var nextChar = charAt(src, i+1)
+                    if (nextChar == "n") { s += "\n" }
+                    else if (nextChar == "t") { s += "	" }
+                    else if (nextChar == "r") { s += "
+" }
+                    else if (nextChar == q) { s += q }
+                    else if (nextChar == "\\") { s += "\\" }
+                    else {
+                        print("LEXER ERROR at line %v, col %v: Unknown escape sequence: \\%v", line, col, nextChar)
+                        return null
+                    }
+                    i += 2
+                } else { 
+                    s += currChar
+                    i++ 
+                }
+            }
+            i++
+            push(tokens, Tok(TokKind.STR, s, line, col))
+            continue
+        }
+        var isAlpha = (code >= 97 and code <= 122) or (code >= 65 and code <= 90) or code == 95
+        if (isAlpha) {
+            var w = ""
+            while (i < len) {
+                var ch_code = charCodeAt(src, i)
+                var isAlnum = (ch_code >= 97 and ch_code <= 122) or (ch_code >= 65 and ch_code <= 90) or (ch_code >= 48 and ch_code <= 57) or ch_code == 95
+                if (!isAlnum) break
+                w += charAt(src, i); i++
+            }
+            var isKW = false
+            for (var ki = 0; ki < length(kw); ki++) if (kw[ki] == w) { isKW = true; break }
+            push(tokens, Tok(isKW ? TokKind.KW : TokKind.ID, w, line, col))
+            continue
+        }
+        var twoChar = ""
+        if (i + 1 < len) { twoChar = slice(src, i, i + 2) }
+        var isTwoChar = false
+        for (var oi = 0; oi < length(ops2); oi++) if (ops2[oi] == twoChar) { isTwoChar = true; break }
+        if (isTwoChar) { push(tokens, Tok(TokKind.OP, twoChar, line, col)); i += 2; continue }
+        if (contains(singleOps, c)) { push(tokens, Tok(TokKind.OP, c, line, col)); i++; continue }
+        print("LEXER ERROR at line %v, col %v: Unknown character: %v", line, col, c)
+        return null
+    }
+
+    var endPos = getLineCol(i)
+    push(tokens, Tok(TokKind.EOF, null, endPos[0], endPos[1]))
+    return tokens
+}
+
+func strToOp(s) {
+    if (s == "+") return OpKind.ADD
+    if (s == "-") return OpKind.SUB
+    if (s == "*") return OpKind.MUL
+    if (s == "/") return OpKind.DIV
+    if (s == "%") return OpKind.MOD
+    if (s == "<") return OpKind.LT
+    if (s == ">") return OpKind.GT
+    if (s == "<=") return OpKind.LTE
+    if (s == ">=") return OpKind.GTE
+    if (s == "==") return OpKind.EQ
+    if (s == "!=") return OpKind.NEQ
+    if (s == "&&") return OpKind.AND
+    if (s == "||") return OpKind.OR
+    if (s == "!") return OpKind.NOT
+    return OpKind.NEG
+}
+
+func envGet(env, name, depth, slot, line, col, ctx) {
+    if (depth != null) {
+        var curr = env
+        for (var i = 0; i < depth; i++) curr = curr.parent
+        return curr.vars[slot]
+    }
+    var curr = env
+    while (curr.parent != null) curr = curr.parent
+    if (curr.vars[name] != null) return curr.vars[name]
+    print("RUNTIME ERROR at line %v, col %v: Undefined variable: '%v'", line, col, name)
+    ctx.error = true
+    return null
+}
+
+func parse(tokens) {
+    var ps = ParserState(tokens, 0)
+    func peek() { return ps.tokens[ps.pos] }
+    func check(t, v) {
+        var tok = peek()
+        if (tok == null) return false
+        if (v == null) return tok.t == t
+        return tok.t == t and tok.v == v
+    }
+
+    func eat(t, v) {
+        var tok = ps.tokens[ps.pos]
+        if (t != null and tok.t != t) { print("PARSE ERROR at line %v, col %v: Expected %v, got %v", tok.line, tok.col, t, tok.t); return Tok(t, "", tok.line, tok.col) }
+        if (v != null and tok.v != v) { print("PARSE ERROR at line %v, col %v: Expected '%v', got '%v'", tok.line, tok.col, v, tok.v); return Tok(t, "", tok.line, tok.col) }
+        ps.pos++
+        return tok
+    }
+
+    func parseBlock() {
+        var stmts = []
+        while (!check(TokKind.KW, "end") and !check(TokKind.KW, "else") and !check(TokKind.EOF, null)) push(stmts, parseStmt())
+        return BlockNode(NodeKind.BLOCK, stmts)
+    }
+
+    func parseStmt() {
+        var t = peek()
+        if (t.t == TokKind.KW and t.v == "var") {
+            eat(TokKind.KW, "var"); var id = eat(TokKind.ID, null).v; eat(TokKind.OP, "=")
+            return VarNode(NodeKind.VAR, id, parseExpr(), null, null)
+        }
+        if (t.t == TokKind.KW and t.v == "if") {
+            eat(TokKind.KW, "if")
+            var cond = parseExpr()
+            var body = parseBlock()
+            var alt = null
+            if (check(TokKind.KW, "else")) {
+                eat(TokKind.KW, "else")
+                if (check(TokKind.KW, "if")) { alt = parseStmt() }
+                else { alt = parseBlock(); eat(TokKind.KW, "end") }
+            } else { eat(TokKind.KW, "end") }
+            return IfNode(NodeKind.IF, cond, body, alt)
+        }
+        if (t.t == TokKind.KW and t.v == "while") {
+            eat(TokKind.KW, "while")
+            var cond = parseExpr(); var body = parseBlock(); eat(TokKind.KW, "end")
+            return WhileNode(NodeKind.WHILE, cond, body, t.line, t.col)
+        }
+        if (t.t == TokKind.KW and t.v == "for") {
+            eat(TokKind.KW, "for")
+            var id = eat(TokKind.ID, null).v
+            eat(TokKind.KW, "in")
+            var iterable = parseExpr()
+            var body = parseBlock()
+            eat(TokKind.KW, "end")
+            return ForNode(NodeKind.FOR, id, iterable, body, null, null, t.line, t.col)
+        }
+        if (t.t == TokKind.KW and t.v == "fn") {
+            eat(TokKind.KW, "fn"); var name = eat(TokKind.ID, null).v; eat(TokKind.OP, "("); var params = []
+            while (!check(TokKind.OP, ")")) {
+                push(params, eat(TokKind.ID, null).v)
+                if (check(TokKind.OP, ",")) eat(TokKind.OP, ",")
+            }
+            eat(TokKind.OP, ")")
+            var body = parseBlock(); eat(TokKind.KW, "end")
+            return FnNode(NodeKind.FN, name, params, body, null, null)
+        }
+        if (t.t == TokKind.KW and t.v == "return") {
+            eat(TokKind.KW, "return"); var val = null
+            if (!check(TokKind.EOF, null) and !check(TokKind.KW, "end") and !check(TokKind.KW, "else")) val = parseExpr()
+            return ReturnNode(NodeKind.RETURN, val)
+        }
+        var expr = parseExpr()
+        if (check(TokKind.OP, "=")) {
+            var eqTok = eat(TokKind.OP, "=")
+            var val = parseExpr()
+            
+            if (expr.k == NodeKind.ID) {
+                return SetNode(NodeKind.SET, expr.v, val, null, null, expr.line, expr.col)
+            }
+            if (expr.k == NodeKind.INDEX_GET) {
+                return IndexSetNode(NodeKind.INDEX_SET, expr.target, expr.index, val, null, null, expr.line, expr.col)
+            }
+            
+            print("PARSE ERROR at line %v, col %v: Invalid assignment target", eqTok.line, eqTok.col)
+            return null
+        }
+        return ExprNode(NodeKind.EXPR, expr)
+    }
+
+    func parseExpr() { return parseOr() }
+    func parseOr() {
+        var l = parseAnd()
+        while (check(TokKind.OP, "||")) {
+            var t = peek(); eat(TokKind.OP, "||"); var left = l
+            l = BinNode(NodeKind.BIN, OpKind.OR, left, parseAnd(), t.line, t.col)
+        }
+        return l
+    }
+
+    func parseAnd() {
+        var l = parseEq()
+        while (check(TokKind.OP, "&&")) {
+            var t = peek(); eat(TokKind.OP, "&&"); var left = l
+            l = BinNode(NodeKind.BIN, OpKind.AND, left, parseEq(), t.line, t.col)
+        }
+        return l
+    }
+
+    func parseEq() {
+        var l = parseRel()
+        while (check(TokKind.OP, "==") or check(TokKind.OP, "!=")) {
+            var t = peek(); var op = strToOp(eat(TokKind.OP, null).v); var left = l
+            l = BinNode(NodeKind.BIN, op, left, parseRel(), t.line, t.col)
+        }
+        return l
+    }
+
+    func parseRel() {
+        var l = parseAdd()
+        while (check(TokKind.OP, "<") or check(TokKind.OP, ">") or check(TokKind.OP, "<=") or check(TokKind.OP, ">=")) {
+            var t = peek(); var op = strToOp(eat(TokKind.OP, null).v); var left = l
+            l = BinNode(NodeKind.BIN, op, left, parseAdd(), t.line, t.col)
+        }
+        return l
+    }
+
+    func parseAdd() {
+        var l = parseMul()
+        while (check(TokKind.OP, "+") or check(TokKind.OP, "-")) {
+            var t = peek(); var op = strToOp(eat(TokKind.OP, null).v); var left = l
+            l = BinNode(NodeKind.BIN, op, left, parseMul(), t.line, t.col)
+        }
+        return l
+    }
+
+    func parseMul() {
+        var l = parseUnary()
+        while (check(TokKind.OP, "*") or check(TokKind.OP, "/") or check(TokKind.OP, "%")) {
+            var t = peek(); var op = strToOp(eat(TokKind.OP, null).v); var left = l
+            l = BinNode(NodeKind.BIN, op, left, parseUnary(), t.line, t.col)
+        }
+        return l
+    }
+
+    func parseUnary() {
+        if (check(TokKind.OP, "!")) { eat(TokKind.OP, "!"); return UnaryNode(NodeKind.UNARY, OpKind.NOT, parseUnary()) }
+        if (check(TokKind.OP, "-")) { eat(TokKind.OP, "-"); return UnaryNode(NodeKind.UNARY, OpKind.NEG, parseUnary()) }
+        return parseCall()
+    }
+
+    func parseCall() {
+        var e = parsePrimary()
+        while (check(TokKind.OP, "(") or check(TokKind.OP, "[") or check(TokKind.OP, ".")) {
+            if (check(TokKind.OP, "(")) {
+                var t = peek()
+                eat(TokKind.OP, "(")
+                var args = []
+                while (!check(TokKind.OP, ")")) {
+                    push(args, parseExpr())
+                    if (check(TokKind.OP, ",")) eat(TokKind.OP, ",")
+                }
+                eat(TokKind.OP, ")")
+                var callee = e
+                e = CallNode(NodeKind.CALL, callee, args, t.line, t.col)
+            } else if (check(TokKind.OP, "[")) {
+                var t = peek()
+                eat(TokKind.OP, "[")
+                var index = parseExpr()
+                eat(TokKind.OP, "]")
+                var target = e
+                e = IndexGetNode(NodeKind.INDEX_GET, target, index, t.line, t.col)
+            } else if (check(TokKind.OP, ".")) {
+                var t = peek()
+                eat(TokKind.OP, ".")
+                var propName = eat(TokKind.ID, null).v
+                var target = e
+                e = IndexGetNode(NodeKind.INDEX_GET, target, StrNode(NodeKind.STR, propName), t.line, t.col)
+            }
+        }
+        return e
+    }
+
+    func parsePrimary() {
+        var t = peek()
+        if (t.t == TokKind.NUM) { eat(TokKind.NUM, null); return NumNode(NodeKind.NUM, t.v) }
+        if (t.t == TokKind.STR) { eat(TokKind.STR, null); return StrNode(NodeKind.STR, t.v) }
+        if (t.t == TokKind.KW and t.v == "true")  { eat(TokKind.KW, null); return BoolNode(NodeKind.BOOL, true)  }
+        if (t.t == TokKind.KW and t.v == "false") { eat(TokKind.KW, null); return BoolNode(NodeKind.BOOL, false) }
+        if (t.t == TokKind.KW and t.v == "null")  { eat(TokKind.KW, null); return NullNode(NodeKind.NULL) }
+        if (t.t == TokKind.KW and t.v == "fn") {
+            eat(TokKind.KW, "fn")
+            var params = []
+            eat(TokKind.OP, "(")
+            while (!check(TokKind.OP, ")")) {
+                push(params, eat(TokKind.ID, null).v)
+                if (check(TokKind.OP, ",")) eat(TokKind.OP, ",")
+            }
+            eat(TokKind.OP, ")")
+            var body = parseBlock()
+            eat(TokKind.KW, "end")
+            return FnNode(NodeKind.FN, null, params, body, null, null)
+        }
+        if (t.t == TokKind.ID) { eat(TokKind.ID, null); return IdNode(NodeKind.ID, t.v, null, null, t.line, t.col) }
+        if (check(TokKind.OP, "(")) { eat(TokKind.OP, "("); var e = parseExpr(); eat(TokKind.OP, ")"); return e }
+        if (check(TokKind.OP, "[")) { 
+            eat(TokKind.OP, "[")
+            var elements = []
+            while (!check(TokKind.OP, "]")) {
+                push(elements, parseExpr())
+                if (check(TokKind.OP, ",")) eat(TokKind.OP, ",")
+            }
+            eat(TokKind.OP, "]")
+            return ArrayNode(NodeKind.ARRAY, elements) 
+        }
+        if (check(TokKind.OP, "{")) {
+            eat(TokKind.OP, "{")
+            var keys = []
+            var vals = []
+            while (!check(TokKind.OP, "}")) {
+                var t_key = peek()
+                var keyStr = ""
+                if (t_key.t == TokKind.ID) {
+                    keyStr = eat(TokKind.ID, null).v
+                } else if (t_key.t == TokKind.STR) {
+                    keyStr = eat(TokKind.STR, null).v
+                } else {
+                    print("PARSE ERROR at line %v, col %v: Expected ID or STR for map key", t_key.line, t_key.col)
+                    return null
+                }
+                push(keys, keyStr)
+                eat(TokKind.OP, ":")
+                push(vals, parseExpr())
+                if (check(TokKind.OP, ",")) eat(TokKind.OP, ",")
+            }
+            eat(TokKind.OP, "}")
+            return MapNode(NodeKind.MAP, keys, vals)
+        }
+        print("PARSE ERROR at line %v, col %v: Unexpected token '%v'", t.line, t.col, t.v)
+        return null
+    }
+
+    var stmts = []
+    while (!check(TokKind.EOF, null)) {
+        var stmt = parseStmt()
+        if (stmt == null) return null
+        push(stmts, stmt) 
+    }
+    return ProgramNode(NodeKind.PROGRAM, stmts)
+}
+
+func resolve(node, scopes) {
+    if (node == null) return null
+    var kind = node.k
+
+    if (kind == NodeKind.PROGRAM) {
+        for (var i = 0; i < length(node.body); i++) resolve(node.body[i], scopes)
+        return null
+    }
+
+    if (kind == NodeKind.BLOCK) {
+        push(scopes, [])
+        for (var i = 0; i < length(node.body); i++) resolve(node.body[i], scopes)
+        pop(scopes)
+        return null
+    }
+
+    if (kind == NodeKind.FN) {
+        if (node.name != null and length(scopes) > 0) {
+            var scope = scopes[length(scopes)-1]
+            push(scope, node.name)
+            node.depth = 0
+            node.slot = length(scope) - 1
+        }
+        push(scopes, [])
+        var inner = scopes[length(scopes)-1]
+        for (var i = 0; i < length(node.params); i++) push(inner, node.params[i])
+        resolve(node.body, scopes)
+        pop(scopes)
+        return null
+    }
+
+    if (kind == NodeKind.VAR) {
+        resolve(node.val, scopes)
+        if (length(scopes) > 0) { 
+            var scope = scopes[length(scopes)-1]
+            push(scope, node.id)
+            node.depth = 0
+            node.slot = length(scope) - 1
+        }
+        return null
+    }
+
+    if (kind == NodeKind.ID or kind == NodeKind.SET) {
+        var name = (kind == NodeKind.ID) ? node.v : node.id
+        for (var i = length(scopes) - 1; i >= 0; i--) {
+            var scope = scopes[i]
+            for (var s = 0; s < length(scope); s++) {
+                if (scope[s] == name) {
+                    node.depth = length(scopes) - 1 - i
+                    node.slot = s
+                    break
+                }
+            }
+            if (node.depth != null) break
+        }
+        if (kind == NodeKind.SET) resolve(node.val, scopes)
+        return null
+    }
+
+    if (kind == NodeKind.INDEX_SET) {
+        resolve(node.target, scopes)
+        resolve(node.index, scopes)
+        resolve(node.val, scopes)
+        return null
+    }
+
+    if (kind == NodeKind.FOR) {
+        resolve(node.iterable, scopes)
+        push(scopes, [])
+        var scope = scopes[length(scopes)-1]
+        push(scope, node.id)
+        node.depth = 0
+        node.slot = length(scope) - 1
+        resolve(node.body, scopes)
+        pop(scopes)
+        return null
+    }
+
+    if (kind == NodeKind.ARRAY) {
+        for (var i = 0; i < length(node.elements); i++) resolve(node.elements[i], scopes)
+    }
+
+    if (kind == NodeKind.INDEX_GET) {
+        resolve(node.target, scopes); resolve(node.index, scopes)
+    }
+
+    if (kind == NodeKind.MAP) {
+        for (var i = 0; i < length(node.vals); i++) resolve(node.vals[i], scopes)
+    }
+    
+    if (kind == NodeKind.IF) { resolve(node.cond, scopes); resolve(node.body, scopes); resolve(node.alt, scopes) }
+    if (kind == NodeKind.WHILE) { resolve(node.cond, scopes); resolve(node.body, scopes) }
+    if (kind == NodeKind.RETURN or kind == NodeKind.EXPR or kind == NodeKind.UNARY) resolve(node.val, scopes)
+    if (kind == NodeKind.BIN) { resolve(node.l, scopes); resolve(node.r, scopes) }
+    if (kind == NodeKind.CALL) {
+        resolve(node.nodeFunc, scopes)
+        for (var i = 0; i < length(node.args); i++) resolve(node.args[i], scopes)
+    }
+
+    return null
+}
+
+func evaluate(node, env, ctx) {
+    if (node == null or ctx.returned or ctx.error) return null
+    
+    if (node.k == NodeKind.PROGRAM) {
+        for (var i = 0; i < length(node.body); i++) {
+            evaluate(node.body[i], env, ctx)
+            if (ctx.returned) return null
+        }
+        return null
+    }
+
+    if (node.k == NodeKind.BLOCK) {
+        var innerEnv = Env([], env)
+        for (var i = 0; i < length(node.body); i++) {
+            evaluate(node.body[i], innerEnv, ctx)
+            if (ctx.returned) return null
+        }
+        return null
+    }
+
+    if (node.k == NodeKind.VAR) { 
+        var val = evaluate(node.val, env, ctx)
+        if (node.depth != null) {
+            push(env.vars, val)
+        } else {
+            var curr = env
+            while (curr.parent != null) curr = curr.parent
+            curr.vars[node.id] = val
+        }
+        return null 
+    }
+    
+    if (node.k == NodeKind.SET) { 
+        var val = evaluate(node.val, env, ctx)
+        if (node.depth != null) {
+            var curr = env
+            for (var i = 0; i < node.depth; i++) curr = curr.parent
+            curr.vars[node.slot] = val
+            return null
+        }
+        var curr = env
+        while (curr.parent != null) curr = curr.parent
+        if (curr.vars[node.id] != null) { curr.vars[node.id] = val; return null }
+        ctx.error = true
+        print("RUNTIME ERROR at line %v, col %v: Undefined variable: '%v'", node.line, node.col, node.id)
+        ctx.error = true
+        return null
+    }
+    
+    if (node.k == NodeKind.FN) { 
+        var closure = ClosureVal(ValKind.CLOSURE, node.params, node.body, env)
+        
+        if (node.name == null) return closure
+        if (node.depth != null) {
+            push(env.vars, closure)
+        } else {
+            var curr = env
+            while (curr.parent != null) curr = curr.parent
+            curr.vars[node.name] = closure
+        }
+        return null 
+    }
+
+    if (node.k == NodeKind.RETURN) {
+        var v = null
+        if (node.val != null) v = evaluate(node.val, env, ctx)
+        ctx.returned = true; ctx.val = v
+        return null
+    }
+
+    if (node.k == NodeKind.IF) {
+        if (isTruthy(evaluate(node.cond, env, ctx))) { evaluate(node.body, env, ctx) }
+        else if (node.alt != null) { evaluate(node.alt, env, ctx) }
+        return null
+    }
+
+    if (node.k == NodeKind.WHILE) {
+        var guard = 0
+        while (isTruthy(evaluate(node.cond, env, ctx))) {
+            guard = guard + 1
+            if (guard > 100000) { print("RUNTIME ERROR at line %v, col %v: Infinite loop guard", node.line, node.col); ctx.error = true; return null }
+            evaluate(node.body, env, ctx)
+            if (ctx.returned) return null
+        }
+        return null
+    }
+
+    if (node.k == NodeKind.FOR) {
+        var targetArray = evaluate(node.iterable, env, ctx)
+        if (ctx.error) return null
+        if (typeof(targetArray) != "list") {
+            print("RUNTIME ERROR at line %v, col %v: Attempt to iterate over a non-list", node.line, node.col)
+            ctx.error = true
+            return null
+        }
+        for (var i = 0; i < length(targetArray); i++) {
+            var innerEnv = Env([], env)
+            push(innerEnv.vars, targetArray[i])
+            evaluate(node.body, innerEnv, ctx)
+            if (ctx.returned) return null
+        }
+        return null
+    }
+
+    if (node.k == NodeKind.EXPR) return evaluate(node.val, env, ctx)
+    if (node.k == NodeKind.NUM)  return node.v
+    if (node.k == NodeKind.STR)  return node.v
+    if (node.k == NodeKind.BOOL) return node.v
+    if (node.k == NodeKind.NULL) return NullVal(ValKind.LUME_NULL)
+    if (node.k == NodeKind.ID)   return envGet(env, node.v, node.depth, node.slot, node.line, node.col, ctx)
+
+    if (node.k == NodeKind.UNARY) {
+        var val = evaluate(node.val, env, ctx)
+        if (ctx.error) return null
+        if (node.op == OpKind.NOT) return !val
+        if (node.op == OpKind.NEG) {
+            if (typeof(val) != "number") {
+                print("RUNTIME ERROR at line %v, col %v: Negation requires a number, got %v", node.line, node.col, typeof(val))
+                ctx.error = true
+                return null
+            }
+            return -val
+        }
+    }
+
+    if (node.k == NodeKind.BIN) {
+        var l = evaluate(node.l, env, ctx)
+        if (ctx.error) return null
+        if (node.op == OpKind.AND) { if (!isTruthy(l)) return false; return evaluate(node.r, env, ctx) }
+        if (node.op == OpKind.OR)  { if (isTruthy(l))  return true; return evaluate(node.r, env, ctx) }
+        var r = evaluate(node.r, env, ctx)
+        if (ctx.error) return null
+        var lType = typeof(l)
+        var rType = typeof(r)
+        if (node.op == OpKind.ADD) {
+            if (lType == "number" and rType == "number") return l + r
+            if (lType == "string" and rType == "string") return l + r
+            
+            print("RUNTIME ERROR at line %v, col %v: Cannot add %v to %v", node.line, node.col, lType, rType)
+            ctx.error = true
+            return null
+        }
+        var isMath = (node.op == OpKind.SUB or node.op == OpKind.MUL or node.op == OpKind.DIV or node.op == OpKind.MOD)
+        var isRel = (node.op == OpKind.LT or node.op == OpKind.GT or node.op == OpKind.LTE or node.op == OpKind.GTE)
+        if (isMath or isRel) {
+            if (lType != "number" or rType != "number") {
+                print("RUNTIME ERROR at line %v, col %v: Math operands must be numbers, got %v and %v", node.line, node.col, lType, rType)
+                ctx.error = true
+                return null
+            }
+        }
+        if (node.op == OpKind.SUB) return l - r
+        if (node.op == OpKind.MUL) return l * r
+        if (node.op == OpKind.DIV) { 
+            if (r == 0) { print("RUNTIME ERROR at line %v, col %v: Division by zero", node.line, node.col); ctx.error = true; return 0 } 
+            return l / r 
+        }
+        if (node.op == OpKind.MOD) return l % r
+        if (node.op == OpKind.LT)  return l < r
+        if (node.op == OpKind.GT)  return l > r
+        if (node.op == OpKind.LTE) return l <= r
+        if (node.op == OpKind.GTE) return l >= r
+        if (node.op == OpKind.EQ) {
+            if (isLumeNull(l) and isLumeNull(r)) return true
+            return l == r
+        }
+        if (node.op == OpKind.NEQ) {
+            if (isLumeNull(l) and isLumeNull(r)) return false
+            return l != r
+        }
+    }
+
+    if (node.k == NodeKind.CALL) {
+        var callee = evaluate(node.nodeFunc, env, ctx)
+        if (ctx.error) return null
+        
+        var args = []
+        for (var i = 0; i < length(node.args); i++) {
+            push(args, evaluate(node.args[i], env, ctx))
+            if (ctx.error) return null
+        }
+
+        if (callee != null and callee.k == ValKind.BUILTIN) {
+            var result = callee.builtinFn(args, ctx, node)
+            if (ctx.error) return null
+            return result
+        }
+
+        if (callee != null and callee.k == ValKind.CLOSURE) {
+            var inner = Env([], callee.env)
+            for (var i = 0; i < length(callee.params); i++) {
+                var argVal = null
+                if (i < length(args)) argVal = args[i]
+                push(inner.vars, argVal) 
+            }
+            var callCtx = Ctx(false, null, false)
+            evaluate(callee.body, inner, callCtx)
+            if (callCtx.error) { ctx.error = true; return null }
+            return callCtx.val
+        }
+
+        print("RUNTIME ERROR at line %v, col %v: Not a function", node.line, node.col)
+        ctx.error = true
+        return null
+    }
+
+    if (node.k == NodeKind.ARRAY) {
+        var arr = []
+        for (var i = 0; i < length(node.elements); i++) push(arr, evaluate(node.elements[i], env, ctx))
+        return arr
+    }
+
+    if (node.k == NodeKind.INDEX_GET) {
+        var target = evaluate(node.target, env, ctx)
+        var index = evaluate(node.index, env, ctx)
+        if (ctx.error) return null
+        var tType = typeof(target)
+        if (tType != "list" and tType != "map") { print("RUNTIME ERROR at line %v, col %v: Attempt to index a non-collection", node.line, node.col); ctx.error = true; return null }
+        if (tType == "list" and index >= length(target)) return null
+        return target[index]
+    }
+
+    if (node.k == NodeKind.INDEX_SET) {
+        var target = evaluate(node.target, env, ctx)
+        if (ctx.error) return null
+        var index = evaluate(node.index, env, ctx)
+        var val = evaluate(node.val, env, ctx)
+        if (ctx.error) return null
+        var tType = typeof(target)
+        if (tType != "list" and tType != "map") { print("RUNTIME ERROR at line %v, col %v: Attempt to index-assign to a non-collection", node.line, node.col); ctx.error = true; return null }
+        if (tType == "list") while (length(target) <= index) push(target, null)
+        target[index] = val
+        return null
+    }
+
+    if (node.k == NodeKind.MAP) {
+        var m = {}
+        for (var i = 0; i < length(node.keys); i++) m[node.keys[i]] = evaluate(node.vals[i], env, ctx)
+        return m
+    }
+}
+
+func makeGlobalEnv(argv) {
+    var env = Env({}, null)
+
+    if (argv != null) env.vars["argv"] = argv
+    else env.vars["argv"] = []
+    
+    env.vars["print"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) > 0) {
+            print(stringify(args[0]))
+        } else { 
+            print("") 
+        }
+        return null 
+    })
+    
+    env.vars["str"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) == 0 or length(args) > 1) { print("RUNTIME ERROR at line %v, col %v: 'str' requires 1 argument", node.line, node.col); ctx.error = true; return null }
+        return stringify(args[0])
+    })
+    
+    env.vars["num"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) == 0 or length(args) > 1) { print("RUNTIME ERROR at line %v, col %v: 'num' requires 1 argument", node.line, node.col); ctx.error = true; return null }
+        if (typeof(args[0]) != "string") { print("RUNTIME ERROR at line %v, col %v: 'num' requires a string argument", node.line, node.col); ctx.error = true; return null }
+        return num(args[0]) 
+    })
+    
+    env.vars["clock"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        return Time.clock() 
+    })
+    
+    env.vars["range"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        var start = 0; var end = 0
+        if (length(args) == 1) { end = args[0] }
+        else if (length(args) > 1) { start = args[0]; end = args[1] }
+        var arr = []
+        for (var i = start; i < end; i++) push(arr, i)
+        return arr
+    })
+
+    env.vars["error"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        var msg = "Custom Error"
+        if (length(args) > 0) msg = str(args[0])
+        print("RUNTIME ERROR at line %v, col %v: %v", node.line, node.col, msg)
+        ctx.error = true
+        return null
+    })
+
+    env.vars["length"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) == 0) { print("RUNTIME ERROR at line %v, col %v: 'length' requires 1 argument", node.line, node.col); ctx.error = true; return null }
+        var target = args[0]
+        var tType = typeof(target)
+        if (tType != "list" and tType != "string") { print("RUNTIME ERROR at line %v, col %v: 'length' requires a list or string, got %v", node.line, node.col, tType); ctx.error = true; return null }
+        return length(target)
+    })
+
+    env.vars["push"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) < 2) { print("RUNTIME ERROR at line %v, col %v: 'push' requires 2 arguments (list, value)", node.line, node.col); ctx.error = true; return null }
+        var arr = args[0]
+        var val = args[1]
+        if (typeof(arr) != "list") { print("RUNTIME ERROR at line %v, col %v: 'push' requires a list as its first argument", node.line, node.col); ctx.error = true; return null }
+        push(arr, val)
+        return val
+    })
+
+    env.vars["pop"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) == 0) { print("RUNTIME ERROR at line %v, col %v: 'pop' requires 1 argument (list)", node.line, node.col); ctx.error = true; return null }
+        var arr = args[0]
+        if (typeof(arr) != "list") { print("RUNTIME ERROR at line %v, col %v: 'pop' requires a list", node.line, node.col); ctx.error = true; return null }
+        if (length(arr) == 0) { print("RUNTIME ERROR at line %v, col %v: Cannot pop from an empty list", node.line, node.col); ctx.error = true; return null }
+        return pop(arr)
+    })
+
+    env.vars["charAt"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) < 2) { print("RUNTIME ERROR at line %v, col %v: 'charAt' requires 2 arguments (string, index)", node.line, node.col); ctx.error = true; return null }
+        var s = args[0]; var i = args[1]
+        if (typeof(s) != "string" or typeof(i) != "number") { print("RUNTIME ERROR at line %v, col %v: 'charAt' requires a string and a number", node.line, node.col); ctx.error = true; return null }
+        if (i < 0 or i >= length(s)) { print("RUNTIME ERROR at line %v, col %v: String index out of bounds", node.line, node.col); ctx.error = true; return null }
+        return charAt(s, i)
+    })
+
+    env.vars["charCodeAt"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) < 2) { print("RUNTIME ERROR at line %v, col %v: 'charCodeAt' requires 2 arguments (string, index)", node.line, node.col); ctx.error = true; return null }
+        var s = args[0]; var i = args[1]
+        if (typeof(s) != "string" or typeof(i) != "number") { print("RUNTIME ERROR at line %v, col %v: 'charCodeAt' requires a string and a number", node.line, node.col); ctx.error = true; return null }
+        if (i < 0 or i >= length(s)) { print("RUNTIME ERROR at line %v, col %v: String index out of bounds", node.line, node.col); ctx.error = true; return null }
+        return charCodeAt(s, i)
+    })
+
+    env.vars["slice"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) < 3) { print("RUNTIME ERROR at line %v, col %v: 'slice' requires 3 arguments (string, start, end)", node.line, node.col); ctx.error = true; return null }
+        var s = args[0]; var start = args[1]; var end = args[2]
+        if (typeof(s) != "string" or typeof(start) != "number" or typeof(end) != "number") { print("RUNTIME ERROR at line %v, col %v: 'slice' requires (string, number, number)", node.line, node.col); ctx.error = true; return null }
+        var slen = length(s)
+        if (start < 0) start = 0
+        if (end > slen) end = slen
+        if (start > end) return ""
+        return slice(s, start, end)
+    })
+
+    env.vars["contains"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) < 2) { print("RUNTIME ERROR at line %v, col %v: 'contains' requires 2 arguments (string, searchString)", node.line, node.col); ctx.error = true; return null }
+        var haystack = args[0]; var needle = args[1]
+        if (typeof(haystack) != "string" or typeof(needle) != "string") { print("RUNTIME ERROR at line %v, col %v: 'contains' requires two strings", node.line, node.col); ctx.error = true; return null }
+        return contains(haystack, needle)
+    })
+
+    env.vars["fileExists"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) < 1) { print("RUNTIME ERROR at line %v, col %v: 'fileExists' requires 1 argument (path)", node.line, node.col); ctx.error = true; return null }
+        var path = args[0]
+        if (typeof(path) != "string") { print("RUNTIME ERROR at line %v, col %v: 'fileExists' requires a string path", node.line, node.col); ctx.error = true; return null }
+        return File.exists(path)
+    })
+
+    env.vars["fileRead"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) < 1) { print("RUNTIME ERROR at line %v, col %v: 'fileRead' requires 1 argument (path)", node.line, node.col); ctx.error = true; return null }
+        var path = args[0]
+        if (typeof(path) != "string") { print("RUNTIME ERROR at line %v, col %v: 'fileRead' requires a string path", node.line, node.col); ctx.error = true; return null }
+        if (!File.exists(path)) { print("RUNTIME ERROR at line %v, col %v: Cannot read file, path does not exist: %v", node.line, node.col, path); ctx.error = true; return null }
+        return File.readText(path)
+    })
+
+    env.vars["typeof"] = BuiltinVal(ValKind.BUILTIN, func(args, ctx, node) {
+        if (length(args) == 0) { print("RUNTIME ERROR at line %v, col %v: 'typeof' requires 1 argument", node.line, node.col); ctx.error = true; return null }
+        var val = args[0]
+        if (isLumeNull(val)) return "null"
+        if (val == null) return "null"
+        return typeof(val)
+    })
+    
+    return env
+}
+
+func run(src, argv) {
+    var env = makeGlobalEnv(argv)
+    var tokens = tokenize(src)
+    if (tokens == null) return null
+    var ast = parse(tokens)
+    if (ast == null) return null
+    resolve(ast, [])
+    var ctx = Ctx(false, null, false)
+    evaluate(ast, env, ctx)
+    return null
+}
+
+func main(argv) {
+    if (length(argv) < 2) {
+        print("Usage: lume <script_file.lm>")
+        return null
+    }
+    var targetPath = argv[1]
+    if (Path.extension(targetPath) != "lm") {
+        print("ERROR: Invalid file extension.")
+        return null
+    }
+    if (!File.exists(targetPath)) {
+        print("ERROR: Target script not found: %v", targetPath)
+        return null
+    }
+    var src = File.readText(targetPath)
+    run(src, argv)
+    return null
+}

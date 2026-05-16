@@ -1,0 +1,25 @@
+var createHero = fn(name, hp)
+    return {
+        name: name,
+        hp: hp,
+        inventory: ["Potion", "Shield"],
+        takeDamage: fn(amount)
+            print(name + " takes " + str(amount) + " damage!")
+            return amount
+        end
+    }
+end
+
+var hero = createHero("Lume Knight", 100)
+
+print("Adventure begins for " + hero.name)
+
+var damageTotal = 0
+for i in range(1, 4)
+    damageTotal = damageTotal + hero.takeDamage(i * 10)
+end
+
+hero.hp = hero.hp - damageTotal
+print("Final HP: " + str(hero.hp))
+hero.inventory = null
+print("Inventory cleared: " + str(hero.inventory))

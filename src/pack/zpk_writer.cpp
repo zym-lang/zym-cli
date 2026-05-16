@@ -61,22 +61,19 @@ int zpk_write_bundle_to_memory(uint8_t** out_buf_p, size_t* out_size_p,
         fprintf(stderr, "zpk_write_bundle: at least one entry is required.\n");
         return 0;
     }
-    if (entry_index >= entry_count) {
+    // `entry_index` is either an in-range manifest index pointing at an
+    // ENTRY_SOURCE/ENTRY_BYTECODE entry (runnable bundle) or the
+    // `ZPK_NO_ENTRY` sentinel meaning "general archive, no program
+    // entry point". At most one entry-kind entry is allowed per bundle:
+    // the runtime loader dispatches on a single index, so a second one
+    // would be ambiguous. Module-bytecode entries don't count — they're
+    // imported, not "the entry". A bundle with zero entry-kind entries
+    // is valid as a general archive and must carry the sentinel.
+    if (entry_index != ZPK_NO_ENTRY && entry_index >= entry_count) {
         fprintf(stderr, "zpk_write_bundle: entry_index %u out of range (entry_count=%zu).\n",
                 entry_index, entry_count);
         return 0;
     }
-    if (entries[entry_index].kind != ZPK_KIND_ENTRY_BYTECODE &&
-        entries[entry_index].kind != ZPK_KIND_ENTRY_SOURCE) {
-        fprintf(stderr, "zpk_write_bundle: entry at index %u must have kind ENTRY_BYTECODE or ENTRY_SOURCE.\n",
-                entry_index);
-        return 0;
-    }
-    // Exactly one entry-kind entry is allowed per bundle: the runtime
-    // loader picks the program entry by the footer's `entry_index` and
-    // dispatches on its kind, so a second entry-kind entry would be
-    // ambiguous (which one runs?). Module-bytecode entries don't count
-    // here — they're imported, not "the entry".
     {
         size_t entry_kind_count = 0;
         for (size_t i = 0; i < entry_count; i++) {
@@ -89,6 +86,14 @@ int zpk_write_bundle_to_memory(uint8_t** out_buf_p, size_t* out_size_p,
             fprintf(stderr, "zpk_write_bundle: bundle has %zu entry-kind entries; only one allowed.\n",
                     entry_kind_count);
             return 0;
+        }
+        if (entry_index != ZPK_NO_ENTRY) {
+            const uint8_t k = entries[entry_index].kind;
+            if (k != ZPK_KIND_ENTRY_BYTECODE && k != ZPK_KIND_ENTRY_SOURCE) {
+                fprintf(stderr, "zpk_write_bundle: entry at index %u must have kind ENTRY_BYTECODE or ENTRY_SOURCE (or pass ZPK_NO_ENTRY for a general archive).\n",
+                        entry_index);
+                return 0;
+            }
         }
     }
 

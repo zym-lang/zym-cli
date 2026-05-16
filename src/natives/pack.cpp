@@ -479,8 +479,14 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         return ZYM_ERROR;
     }
 
-    // ----- entryIndex (optional, default 0) -----
-    uint32_t entry_index = 0;
+    // ----- entryIndex (optional) -----
+    //
+    // Resolution is deferred until after entries are parsed (so we can
+    // count ENTRY_SOURCE/ENTRY_BYTECODE entries and auto-derive when
+    // omitted). Here we only capture whether the spec mentioned it and
+    // do basic type/range validation on the raw value.
+    bool     entry_index_set = false;
+    uint32_t entry_index     = ZPK_NO_ENTRY;
     {
         ZymValue eiv = zym_mapGet(vm, specV, "entryIndex");
         if (eiv != ZYM_ERROR && !zym_isNull(eiv)) {
@@ -494,6 +500,7 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
                 return ZYM_ERROR;
             }
             entry_index = (uint32_t)d;
+            entry_index_set = true;
         }
     }
 
@@ -559,18 +566,35 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
         }
     }
 
-    // ----- enforce single entry-kind entry per bundle -----
+    // ----- entryIndex resolution + single entry-kind entry rule -----
     //
-    // The runtime loader picks the program entry by the footer's
-    // `entry_index` and dispatches on its kind. A bundle with more
-    // than one entry-kind entry would be ambiguous, and `entryIndex`
-    // must point at one of them. Module-bytecode entries are not
-    // counted — they're imported, not "the entry".
+    // Count how many entries are ENTRY_SOURCE/ENTRY_BYTECODE (call
+    // this `K`). The runtime loader picks the program entry by the
+    // footer's `entry_index` and dispatches on its kind:
+    //
+    //   K == 0 (general archive)
+    //     The bundle is not runnable; the footer stores `ZPK_NO_ENTRY`
+    //     as the sentinel. `entryIndex` may still be passed (e.g. to
+    //     mark some other entry as significant to script tooling) but
+    //     is otherwise auto-set to the sentinel.
+    //   K == 1 (the common runnable case)
+    //     If `entryIndex` was omitted, it auto-resolves to the index
+    //     of the lone entry-kind entry — the user shouldn't have to
+    //     restate something we already know. If it was supplied, it
+    //     must point *at* that entry.
+    //   K >= 2
+    //     Ambiguous — rejected, same as before. The runtime would
+    //     have no way to pick which one to run.
+    //
+    // Module-bytecode entries don't count toward `K`; they're
+    // imported, not "the entry".
     {
         int entry_kind_count = 0;
+        uint32_t sole_entry_idx = 0;
         for (int i = 0; i < n; i++) {
             if (infos[i].kind == ZPK_KIND_ENTRY_BYTECODE ||
                 infos[i].kind == ZPK_KIND_ENTRY_SOURCE) {
+                if (entry_kind_count == 0) sole_entry_idx = (uint32_t)i;
                 entry_kind_count++;
             }
         }
@@ -580,12 +604,28 @@ ZymValue f_build(ZymVM* vm, ZymValue /*self*/, ZymValue specV) {
                 "only one is allowed", entry_kind_count);
             return ZYM_ERROR;
         }
-        const uint8_t ek = infos[entry_index].kind;
-        if (ek != ZPK_KIND_ENTRY_BYTECODE && ek != ZPK_KIND_ENTRY_SOURCE) {
-            zym_runtimeError(vm,
-                "Pack.build(spec): spec.entries[entryIndex=%u].kind must be "
-                "'entry_bytecode' or 'entry_source'", (unsigned)entry_index);
-            return ZYM_ERROR;
+        if (entry_kind_count == 1) {
+            if (!entry_index_set) {
+                // Auto-derive: the lone ENTRY_* entry is "the entry".
+                entry_index = sole_entry_idx;
+            } else if (entry_index != sole_entry_idx) {
+                zym_runtimeError(vm,
+                    "Pack.build(spec): spec.entryIndex=%u points at a non-entry-kind entry; "
+                    "either omit entryIndex or set it to %u (the sole entry_source/entry_bytecode)",
+                    (unsigned)entry_index, (unsigned)sole_entry_idx);
+                return ZYM_ERROR;
+            }
+        } else {
+            // K == 0: general archive. If the user didn't specify
+            // `entryIndex`, store the sentinel so the bundle is
+            // self-describing as non-runnable. If they did specify
+            // it, accept the value — they're using the index as
+            // free-form metadata for a general archive, which is
+            // fine; the loader will refuse to run it either way
+            // because no ENTRY_* entry exists for it to dispatch on.
+            if (!entry_index_set) {
+                entry_index = ZPK_NO_ENTRY;
+            }
         }
     }
 
@@ -954,6 +994,8 @@ ZymValue b_list(ZymVM* vm, ZymValue self) {
 ZymValue b_entryName(ZymVM* vm, ZymValue self) {
     BundleHandle* h = unwrap_bundle_with_vm(vm, self);
     if (!h || !h->open) return zym_newNull();
+    // General archive (no entry point): no name to return.
+    if (h->reader.footer.entry_index == ZPK_NO_ENTRY) return zym_newNull();
     const ZpkEntry& e = h->reader.manifest[h->reader.footer.entry_index];
     if (e.name_length == 0 || !h->reader.strtab) return zym_newString(vm, "");
     return zym_newStringN(vm, (const char*)(h->reader.strtab + e.name_offset), (int)e.name_length);
@@ -966,6 +1008,11 @@ ZymValue b_entryName(ZymVM* vm, ZymValue self) {
 ZymValue b_entryIndex(ZymVM* vm, ZymValue self) {
     BundleHandle* h = unwrap_bundle_with_vm(vm, self);
     if (!h || !h->open) return zym_newNull();
+    // General archive (no entry point): there isn't an entry index to
+    // hand back, so return null. Scripts that want to distinguish
+    // "handle closed" from "general archive" can check `bundle.open()`
+    // / `bundle.has(...)` separately.
+    if (h->reader.footer.entry_index == ZPK_NO_ENTRY) return zym_newNull();
     return zym_newNumber((double)h->reader.footer.entry_index);
 }
 
@@ -1161,7 +1208,14 @@ ZymValue f_inspectBin(ZymVM* vm, ZymValue, ZymValue pathV) {
     zym_mapSet(vm, m, "payloadSize",   zym_newNumber((double)geom.payload_size));
     zym_mapSet(vm, m, "formatVersion", zym_newNumber((double)geom.format_version));
     zym_mapSet(vm, m, "entryCount",    zym_newNumber((double)geom.entry_count));
+    // `entryIndex` is the raw footer value, including the
+    // `ZPK_NO_ENTRY` sentinel (0xFFFFFFFF) when the bundle is a
+    // general archive. `hasEntry` is the boolean form: false means
+    // the bundle is not runnable as a program (no ENTRY_*/dispatchable
+    // entry point), true means the loader could run it.
+    const bool has_entry = (geom.entry_index != ZPK_NO_ENTRY);
     zym_mapSet(vm, m, "entryIndex",    zym_newNumber((double)geom.entry_index));
+    zym_mapSet(vm, m, "hasEntry",      zym_newBool(has_entry));
     zym_mapSet(vm, m, "isHeadless",    zym_newBool(geom.stub_size == 0));
     zym_mapSet(vm, m, "hasStub",       zym_newBool(geom.stub_size != 0));
     zym_popRoot(vm);
@@ -2124,15 +2178,15 @@ ZymValue e_commit(ZymVM* vm, ZymValue self) {
 
     // ---- Build ZpkEntryInput[] from the staged view ----
     std::vector<ZpkEntryInput> inputs(h->view.size());
-    uint32_t entry_index = h->view_entry_index == UINT32_MAX
-                               ? 0u : h->view_entry_index;
-    // If view_entry_index is UINT32_MAX, the writer still needs *some*
-    // entry index; conventional choice = 0. But a v1 bundle with zero
-    // entries can't carry a meaningful entry_index either way; the
-    // writer enforces it points at a valid kind, so a no-entry edit
-    // would only be legal if the source already had zero entries AND
-    // entry_index was zero. We don't try to enable headless-edit-zero
-    // here — error out if there are no entries.
+    // The edit-handle's "no staged entry point" sentinel is
+    // `UINT32_MAX`, which is identical in value to the on-disk
+    // `ZPK_NO_ENTRY` sentinel. Pass it straight through to the
+    // writer: a general-archive commit (the staged view contains
+    // only file/blob/source_map kinds) lands as a non-runnable
+    // bundle, exactly mirroring `Pack.build`'s K==0 case.
+    static_assert(ZPK_NO_ENTRY == UINT32_MAX,
+                  "edit-handle no-entry sentinel must match ZPK_NO_ENTRY");
+    uint32_t entry_index = h->view_entry_index;
     if (h->view.empty()) {
         if (owned_stub) std::free(owned_stub);
         zym_runtimeError(vm,

@@ -1098,26 +1098,47 @@ struct LoadModulesCtx {
     std::string resolveScratch;
 };
 
-// Resolve trampoline. Invoked by the C loader BEFORE the cycle/cache
-// check; gives the script a chance to canonicalize the module key.
-// Returning NULL = "keep loader default" (== identical behavior to no
-// resolver). Returning a string = "use this as the canonical key from
-// here on": the C loader will copy it internally on return, so the
-// pointer only needs to be valid for the duration of this call. We
-// stash it in `ctx->resolveScratch` to back the returned pointer.
-static const char* zym_loadModules_resolve_trampoline(const char* path, void* user_data) {
+// Resolve trampoline. Invoked by the C loader BEFORE any internal
+// path math and BEFORE the cycle/cache check; the resolver is the
+// authority on the canonical module key.
+//
+// Arguments:
+//   - `spec`     : raw import spec exactly as it appeared in source
+//   - `importer` : canonical path of the module that issued the import,
+//                  or NULL when resolving the entry module's own deps
+//
+// Returning NULL = "fall back to the loader's default
+// `resolve_module_path(importer_dir, spec)`" (identical behavior to no
+// resolver for that spec). Returning a string = "use this as the
+// canonical key from here on": the C loader copies it internally on
+// return, so the pointer only needs to be valid for the duration of
+// this call. We stash it in `ctx->resolveScratch` to back the returned
+// pointer.
+//
+// Script-side signature: `resolveCallback(spec, importer)` — `importer`
+// is a null string when there is no importer (entry-module deps).
+static const char* zym_loadModules_resolve_trampoline(const char* spec, const char* importer, void* user_data) {
     auto* ctx = static_cast<LoadModulesCtx*>(user_data);
     if (!ctx || !ctx->parentVm || !ctx->child) return nullptr;
     if (!ctx->hasResolveCallback) return nullptr;
 
-    ZymValue pathV = zym_newString(ctx->parentVm, path ? path : "");
-    zym_pushRoot(ctx->parentVm, pathV);
-    ZymValue argv[1] = { pathV };
-    ZymStatus st = zym_callClosurev(ctx->parentVm, ctx->parentResolveCallback, 1, argv);
-    if (st != ZYM_STATUS_OK) { zym_popRoot(ctx->parentVm); return nullptr; }
+    ZymValue specV = zym_newString(ctx->parentVm, spec ? spec : "");
+    zym_pushRoot(ctx->parentVm, specV);
+    ZymValue importerV = importer
+        ? zym_newString(ctx->parentVm, importer)
+        : zym_newNull();
+    zym_pushRoot(ctx->parentVm, importerV);
+    ZymValue argv[2] = { specV, importerV };
+    ZymStatus st = zym_callClosurev(ctx->parentVm, ctx->parentResolveCallback, 2, argv);
+    if (st != ZYM_STATUS_OK) {
+        zym_popRoot(ctx->parentVm); // importerV
+        zym_popRoot(ctx->parentVm); // specV
+        return nullptr;
+    }
 
     ZymValue ret = zym_getCallResult(ctx->parentVm);
-    zym_popRoot(ctx->parentVm); // pathV — done with the input
+    zym_popRoot(ctx->parentVm); // importerV
+    zym_popRoot(ctx->parentVm); // specV
 
     // Script signaled "no override" → fall through to default.
     if (zym_isNull(ret)) return nullptr;

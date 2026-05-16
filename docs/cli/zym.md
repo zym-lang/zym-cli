@@ -141,7 +141,7 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.registerSourceFile(path, source)` | `int` (fileId) | Registers a buffer with the child's file registry. The returned `fileId` is what `preprocess` and diagnostics use to refer to this source. |
 | `cv.preprocess(source, sourceMap, fileId)` | `{ source, status }` | Runs the preprocessor. On success, `source` is the expanded buffer and `status == Zym.STATUS.OK`; on failure `source` is `null` and the status is non-`OK` (drain via `diagnostics()`). |
 | `cv.compile(source, chunk, sourceMap, entryFile, opts)` | `int` (status) | Compiles `source` into `chunk`. `sourceMap` may be `null` for raw text. `opts.includeLineInfo` (default `true`) controls whether line info is embedded. **Flips the child into execution phase.** |
-| `cv.loadModules(source, sourceMap, entryFile, callback, opts)` | `{ status, combinedSource, combinedSourceMap, modulePaths }` or `{ status, error }` | Multi-file compile. The parent `callback(path)` mirrors the C `readAndPreprocessCallback`: it must return `{ source, sourceMap, fileId }` for each imported module (the per-module `sourceMap` is the one produced by `preprocess` for *that module's raw source*), or `null` to signal a missing file. The native trampoline deep-clones the per-module SourceMap into the child VM so the parent wrapper retains ownership safely. On success, returns the combined preprocessed source together with the **combined** `SourceMap` (`combinedSourceMap`) — that's the map that must be passed to `compile`, not the entry-only map. `opts.resolveCallback` (optional closure `func(path) -> string \| null`) installs a resolver hook that runs **before** the loader's cycle detector and module cache: returning a non-null string overrides the canonical key the loader uses for cycle detection, caching, and the subsequent `read_callback(path)` argument; returning `null` (or omitting the option) keeps the loader's default root-relative resolution byte-identical to today. See [Resolve callback](#resolve-callback). |
+| `cv.loadModules(source, sourceMap, entryFile, callback, opts)` | `{ status, combinedSource, combinedSourceMap, modulePaths }` or `{ status, error }` | Multi-file compile. The parent `callback(path)` mirrors the C `readAndPreprocessCallback`: it must return `{ source, sourceMap, fileId }` for each imported module (the per-module `sourceMap` is the one produced by `preprocess` for *that module's raw source*), or `null` to signal a missing file. The native trampoline deep-clones the per-module SourceMap into the child VM so the parent wrapper retains ownership safely. On success, returns the combined preprocessed source together with the **combined** `SourceMap` (`combinedSourceMap`) — that's the map that must be passed to `compile`, not the entry-only map. `opts.resolveCallback` (optional closure `func(spec, importer) -> string \| null`) installs a resolver hook that runs **before** any path math (no directory join, no `normalize_path`) and **before** the loader's cycle detector and module cache. It is invoked with the raw import `spec` exactly as it appeared in source (e.g. `"@/foo.zym"`, `"./bar.zym"`, `"std/json"`) and the canonical path of the `importer` (or `null` when resolving the entry module's own deps). Returning a non-null string makes that string the canonical key the loader uses for cycle detection, caching, the subsequent `read_callback(path)` argument, and the `importer` of any transitive imports. Returning `null` (or omitting the option) falls back to the loader's default `resolve_module_path(importer_dir, spec)` for that spec — byte-identical to the no-resolver path. See [Resolve callback](#resolve-callback). |
 | `cv.serializeChunk(chunk, opts)` | `{ status, bytes }` | Serializes a compiled chunk to a `Buffer` of `.zbc` bytes. `opts.includeLineInfo` mirrors compile. |
 | `cv.deserializeChunk(chunk, bytes)` | `int` (status) | Loads `.zbc` bytes (a `Buffer`) into a freshly-allocated chunk. **Flips the child into execution phase.** |
 | `cv.runChunk(chunk)` | `int` (status) | Runs a compiled or deserialized chunk on the child. Auto-loops on `YIELD`. **Flips the child into execution phase.** |
@@ -486,20 +486,41 @@ meant to come from a local sibling — silently alias into a single
 cache slot because the loader cannot tell them apart.
 
 `opts.resolveCallback` plugs in at exactly the seam where this
-matters: the loader calls it on the result of its built-in resolver
-**before** the `stack_contains` / `loaded_modules` lookup. The string
-the resolver returns (if any) becomes the canonical key for cycle
-detection, caching, the `read_callback` `path` argument, and the
-`base_path` used when scanning the loaded module's transitive
-imports. Returning `null` (or the same string the loader passed in)
-means "keep the loader default" — there is zero behavioral or
-performance impact for callers that don't install a resolver.
+matters: the loader hands the resolver the **raw import spec** (the
+string as it appeared in `import("...")`) together with the
+**importer**'s canonical path, **before** any path math
+(`resolve_module_path`, `normalize_path`) runs and **before** the
+`stack_contains` / `loaded_modules` lookup. The string the resolver
+returns (if any) becomes the canonical key for cycle detection,
+caching, the `read_callback` `path` argument, and the `importer`
+used when scanning the loaded module's transitive imports. Returning
+`null` falls back to the loader's default
+`resolve_module_path(importer_dir, spec)` for that spec — byte-
+identical to the no-resolver path, so callers that don't install a
+resolver (or only override a subset of specs) pay nothing extra.
+
+Because the resolver runs upstream of path math, an `@/...` prefix,
+a leading `/`, or a `pkg:` / `std/` / `data:` alias is just a string
+the script can classify on its own terms — the loader stops
+appending the importer's directory or running it through
+`normalize_path` once the resolver returns a non-null value.
+
+The two arguments are independently useful:
+
+- `spec` is what the source literally said (`"@/foo.zym"`,
+  `"./bar.zym"`, `"std/json"`). The loader does **not** pre-join it
+  with the importer's directory.
+- `importer` is the canonical path of the module that issued the
+  import — i.e. whatever key the loader stored that module under.
+  For the entry module's own deps there is no importer; the script
+  receives `null` in that slot.
 
 `vm.moduleLoader.getCaller()` and `getStack()` are valid inside the
 resolve callback too, with the same semantics: `getCaller()` is the
-*requester* of the import currently being resolved, `getStack()[len-1]`
-is the requester (since the about-to-be-resolved module has not yet
-been pushed onto the loader's stack).
+*requester* of the import currently being resolved (it returns the
+same value as the `importer` argument for non-entry imports), and
+`getStack()[len-1]` is the requester (since the about-to-be-resolved
+module has not yet been pushed onto the loader's stack).
 
 #### Example: namespaced keys for a data-dir module system
 
@@ -519,22 +540,26 @@ var SCRIPT_PATH = Path.dirname(entryPath)
 
 func startsWith(s, p) { return Path.startsWith(s, p) }
 
-// Decide the canonical key *before* the loader does its cycle/cache
-// check. Returning null means "use loader default" (root-relative).
-func resolveCallback(path)
+// Decide the canonical key *before* the loader does any path math.
+// `spec` is the raw import spec exactly as it appeared in source
+// (e.g. "@/foo.zym", "./bar.zym", "std/json"). `importer` is the
+// canonical path of the module that issued this import, or null
+// when resolving the entry module's own deps.
+// Returning null means "fall back to loader default
+// (resolve_module_path(importer_dir, spec))" for this spec.
+func resolveCallback(spec, importer)
 {
-    var caller = vm.moduleLoader.getCaller()  // requester of this import
-
-    // Sibling import inside an already-known data-dir module: keep it
-    // in the data-dir namespace so its key cannot collide with a
-    // local module of the same name.
-    if (caller != null && startsWith(caller, "data:")) {
-        return "data:" + path
+    // Sibling import inside an already-known data-dir module: keep
+    // it in the data-dir namespace so its key cannot collide with a
+    // local module of the same name. `importer` carries the same
+    // value `vm.moduleLoader.getCaller()` would return here.
+    if (importer != null && startsWith(importer, "data:")) {
+        return "data:" + spec
     }
 
     // Bare name from the entry tree → route to data dir.
-    if (Path.extension(path) == "") {
-        return "data:" + path
+    if (Path.extension(spec) == "") {
+        return "data:" + spec
     }
 
     return null   // keep loader default for ordinary local imports
@@ -542,8 +567,9 @@ func resolveCallback(path)
 
 func readAndPreprocessCallback(path)
 {
-    // `path` is whatever resolveCallback canonicalized to (or the
-    // loader default if resolveCallback returned null).
+    // `path` is whatever resolveCallback canonicalized the spec to
+    // (or the loader's default `resolve_module_path(importer_dir, spec)`
+    // if resolveCallback returned null for that spec).
     var resolved
     if (startsWith(path, "data:")) {
         var rel = Path.slice(path, length("data:"), length(path))
@@ -584,9 +610,12 @@ Notes:
 
 - `resolveCallback` is optional and must be either a closure or
   absent/`null`; anything else raises a runtime error from
-  `loadModules`. When absent, the C loader takes its
-  byte-identical-to-before path — no resolver trampoline is invoked
-  and there is no per-import marshalling cost.
+  `loadModules`. When absent, every import takes the default
+  `resolve_module_path(importer_dir, spec)` path — no resolver
+  trampoline is invoked and there is no per-import marshalling cost.
+  Returning `null` from an installed resolver has the same effect
+  on a per-spec basis: the loader falls back to the default for
+  that one spec.
 - The string the resolver returns is **borrowed** at the C boundary
   (the loader copies it internally on return). Scripts don't need to
   reason about lifetime; just return the string.
@@ -594,6 +623,50 @@ Notes:
   imports that ultimately hit the module cache. That's the whole
   point: it has to run before the cache lookup in order to influence
   which slot is consulted.
+
+#### Supported characters in returned keys
+
+The string a resolver returns becomes both the canonical cache key
+*and* the source of the `__module_<encoded>` identifier emitted at
+every call site. That identifier has to be a legal Zym/C identifier,
+so the loader can only encode a fixed alphabet — anything outside it
+falls through verbatim into the generated identifier and the
+compiler will reject the resulting module reference.
+
+The supported alphabet is:
+
+- `A`–`Z`, `a`–`z`, `0`–`9`, `_` — pass through unchanged.
+- The following punctuation, each mapped to a reversible `_<name>_`
+  escape so runtime error frames can decode the key back to the
+  original spec:
+
+  | Char  | Encoded as  | Notes                                 |
+  |-------|-------------|---------------------------------------|
+  | `/`   | `_slash_`   | path separator                        |
+  | `\`   | `_slash_`   | encode-only alias for `/` (collapses) |
+  | `.`   | `_dot_`     | extensions, dotted segments           |
+  | `-`   | `_dash_`    | kebab-case                            |
+  | ` `   | `_space_`   | space                                 |
+  | `:`   | `_colon_`   | scheme/namespace separator, e.g. `pkg:foo` |
+  | `@`   | `_at_`      | project-root sigil, e.g. `@/foo`      |
+  | `$`   | `_dollar_`  | sigil                                 |
+  | `#`   | `_hash_`    | sigil                                 |
+  | `%`   | `_pct_`     | sigil                                 |
+  | `&`   | `_amp_`     | sigil                                 |
+  | `*`   | `_star_`    | sigil                                 |
+  | `~`   | `_tilde_`   | home-style sigil                      |
+  | `!`   | `_bang_`    | sigil                                 |
+
+Characters **not** in this set (e.g. `?`, `=`, `+`, `(`, `)`, `,`,
+`<`, `>`, `'`, `"`, `;`, `|`, `^`, non-ASCII bytes, etc.) are
+currently passed through one-byte-for-one-byte by the encoder; the
+generated `__module_...` identifier will then be syntactically
+invalid and the compile of any module that references such a key
+will fail. If you need to expose a spec that contains them, do the
+mapping inside your resolver — e.g. turn `pkg:foo?v=2` into
+`pkg:foo/v2` before returning it. `\` collapses to `/` by design
+(Windows-style separators canonicalize to POSIX), so don't rely on
+`a\b` and `a/b` being distinguishable keys.
 
 #### MCU / runtime-only builds
 

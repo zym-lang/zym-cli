@@ -1,0 +1,152 @@
+// Count digits in a positive integer (min 1) for gutter alignment.
+// Note: Zym `/` is float division, so we have to threshold against 1
+// rather than 0 — otherwise 1/10=0.1>0 and the loop never terminates.
+func countDigits(n)
+{
+    if (n <= 0) { return 1 }
+    var d = 0
+    while (n >= 1) { d = d + 1; n = n / 10 }
+    return d
+}
+
+// Stringify the severity enum for headers.
+func severityLabel(sev)
+{
+    switch (sev)
+    {
+        case "warning": return "warning"
+        case "info":    return "info"
+        case "hint":    return "hint"
+        case "error":   return "error"
+        default:        return str("%v", sev)
+    }
+    return "error"
+}
+
+// Extract the 1-based `lineNo` from `source`, returning the raw line text
+// (no trailing newline). Returns null if the line is past EOF.
+func getSourceLine(source, lineNo)
+{
+    if (!source || lineNo <= 0) { return null }
+    var lines = split(source, "\n")
+    var n = length(lines)
+    if (lineNo > n) { return null }
+    return lines[lineNo - 1]
+}
+
+// rustc-style single-diagnostic renderer:
+//
+//     error: <message>
+//      --> <file>:<line>:<col>
+//       |
+//     N | <source line>
+//       |       ^^^^ (length carets at column)
+//
+// `gutterW` is the shared width across the whole batch so multiple
+// diagnostics line up. `sources` is a map keyed by file name returning
+// the raw source text we already read in compileSource — used here to
+// reconstruct the offending line; absent files just skip the snippet.
+func renderDiagnostic(diag, gutterW, sources)
+{
+    var label = severityLabel(diag.severity)
+    var msg   = diag.message ? diag.message : ""
+
+    // Header.
+    print("%v: %v", label, msg)
+
+    // --> file:line:col   (always emitted when we have any locator)
+    var hasLoc = (diag.file && diag.file != "") || (diag.line && diag.line > 0)
+    if (hasLoc) {
+        var path = (diag.file && diag.file != "") ? diag.file : "<source>"
+        var locTail = ""
+        if (diag.line && diag.line > 0) {
+            locTail = str(":%v", diag.line)
+            if (diag.column && diag.column > 0) {
+                locTail = locTail + str(":%v", diag.column)
+            }
+        }
+        // gutterW spaces before the `-->` so it lines up with the gutter.
+        print("%v --> %v%v", repeat(" ", gutterW), path, locTail)
+    }
+
+    // Source snippet + caret line.
+    var src = (sources && diag.file) ? sources[diag.file] : null
+    if (src && diag.line && diag.line > 0) {
+        var line = getSourceLine(src, diag.line)
+        if (line != null) {
+            // Empty gutter divider.
+            print("%v |", repeat(" ", gutterW))
+
+            // Source line — pad the line number so the bar lines up.
+            var lineNumStr = padStart(str("%v", diag.line), gutterW, " ")
+            print("%v | %v", lineNumStr, line)
+
+            // Caret(s).
+            var col = (diag.column && diag.column > 0) ? diag.column : 1
+            var span = (diag.length && diag.length > 0) ? diag.length : 1
+            // Clamp span so it doesn't run past line end.
+            var lineLen = length(line)
+            if ((col - 1) + span > lineLen) {
+                span = lineLen - (col - 1)
+                if (span < 1) { span = 1 }
+            }
+            // Preserve tabs in the leading run so the caret aligns visually.
+            var lead = ""
+            var i = 0
+            while (i < col - 1 && i < lineLen) {
+                var ch = substr(line, i, i + 1)
+                lead = lead + (ch == "\t" ? "\t" : " ")
+                i = i + 1
+            }
+            print("%v | %v%v", repeat(" ", gutterW), lead, repeat("^", span))
+        }
+    }
+}
+
+func drainAndPrintDiagnostics(vm, sources)
+{
+    var diags = vm.diagnostics()
+    var n = length(diags)
+    if (n == 0) { return }
+
+    // Compute a shared gutter width: enough to fit the widest line number,
+    // floored at 2 to keep narrow ranges from looking cramped.
+    var maxLine = 0
+    for (var i = 0; i < n; i++) {
+        var ln = diags[i].line
+        if (ln && ln > maxLine) { maxLine = ln }
+    }
+    var gutterW = countDigits(maxLine > 0 ? maxLine : 1)
+    if (gutterW < 2) { gutterW = 2 }
+
+    // Render each diagnostic, blank line between for readability.
+    var errors = 0
+    var warnings = 0
+    for (var i = 0; i < n; i++) {
+        var d = diags[i]
+        if (d.severity == "error")   { errors = errors + 1 }
+        if (d.severity == "warning") { warnings = warnings + 1 }
+        renderDiagnostic(d, gutterW, sources)
+        if (i + 1 < n) { print("") }
+    }
+
+    // Summary line when there's more than one diagnostic.
+    if (n > 1) {
+        print("")
+        print("= %v diagnostic%v (%v error%v, %v warning%v)",
+              n, n == 1 ? "" : "s",
+              errors, errors == 1 ? "" : "s",
+              warnings, warnings == 1 ? "" : "s")
+    }
+
+    //print("")
+    //print("RAW DIAGNOSTICS:")
+    //for (var i = 0; i < n; i++) {
+    //    print(diags[i])
+    //}
+    //print("")
+}
+
+return {
+    drainAndPrintDiagnostics,
+}

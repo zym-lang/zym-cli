@@ -1,0 +1,469 @@
+#define DEBUG_RESOLUTION 0
+
+var drainAndPrintDiagnostics = import("diagnostics.zym").drainAndPrintDiagnostics
+
+var ZYM_VERSION = "0.3.0"
+var RUNNING_BINARY_PATH
+var RUNNING_BINARY_PLATFORM
+
+
+var MODULE_PATH = Path.join(System.dataDir(), "zym", "modules")
+if (!Dir.exists(MODULE_PATH)) Dir.makeDirRecursive(MODULE_PATH)
+
+var SCRIPT_PATH
+
+func readFile(path)
+{
+    if (!File.exists(path)) { print("Error: file not found: %v", path); return null}
+    var source = File.readBytes(path)
+    if (!source || File.size(path) != source.size()) { print("Error: Unable to read file: %v", path); return null}
+    return source.toUtf8()
+}
+
+func readBinaryFile(path)
+{
+    if (!File.exists(path)) { print("Error: file not found: %v", path); return null}
+    var buf = File.readBytes(path)
+    if (!buf || File.size(path) != buf.size()) { print("Error: Unable to read file: %v", path); return null}
+    return buf
+}
+
+func compileSource(fileName, source)
+{
+    var vm = Zym.newVM()
+    vm.registerCliNative("ALL")
+
+    var sources = {}
+    sources[fileName] = source
+
+    var sm = vm.newSourceMap()
+    var fid = vm.registerSourceFile(fileName, source)
+    var ps = vm.preprocess(source, sm, fid)
+
+    var loaded = vm.loadModules(ps.source, sm, fileName, readAndPreprocessCallback, {
+        debugNames: true,
+        resolveCallback,
+    })
+    if (loaded.status == Zym.STATUS.OK) {
+        var chunk = vm.newChunk()
+        var status = vm.compile(loaded.combinedSource, chunk, loaded.combinedSourceMap, fileName, { includeLineInfo: true })
+        if (status == Zym.STATUS.OK) {
+            //print("COMPILATION SUCCEEDED")
+            var zbcBuf = vm.serializeChunk(chunk, { includeLineInfo: true }).bytes
+            //print(" > bytecode size: %v bytes", zbcBuf.size())
+            return zbcBuf
+        } else {
+            print(" -- COMPILATION FAILED --")
+            drainAndPrintDiagnostics(vm, sources)
+        }
+    } else {
+        print(" -- MODULE LOADING FAILED --")
+        if (loaded.error != null) {
+            print("%v", loaded.error)
+        }
+        drainAndPrintDiagnostics(vm, sources)
+    }
+
+    return null
+
+    func resolveCallback(spec, importer) {
+#if DEBUG_RESOLUTION
+        print("*** RESOLVE **************************************************************")
+        print("[ spec , importer ]: [ %v , %v ]", spec, importer)
+#endif
+        
+        if (startsWith(spec, "@/")) {
+            var relativePart = slice(spec, 2, length(spec))
+            
+            if (Path.extension(relativePart) == "") {
+                relativePart = relativePart + ".zym"
+            }
+#if DEBUG_RESOLUTION
+            print("Resolved Import: [%v]", "ROOT::./" + relativePart)
+            print("**************************************************************************")
+#endif
+            return "ROOT::./" + relativePart
+        }
+
+        if (Path.extension(spec) == "") {
+#if DEBUG_RESOLUTION
+            print("Resolved Import: [%v]", "MODULES::" + spec + ".zym")
+            print("**************************************************************************")
+#endif
+            return "MODULES::" + spec + ".zym"
+        }
+
+        var prefix = "ROOT::" 
+        var rawPath = ""
+
+        if (importer != null) {
+            if (startsWith(importer, "MODULES::")) {
+                prefix = "MODULES::"
+                rawPath = slice(importer, length("MODULES::"), length(importer))
+            } else if (startsWith(importer, "ROOT::")) {
+                prefix = "ROOT::"
+                rawPath = slice(importer, length("ROOT::"), length(importer))
+            } else {
+                rawPath = importer
+            }
+        }
+
+        var baseDir = Path.dirname(rawPath)
+        var joined = Path.join(baseDir, spec)
+
+        if (startsWith(joined, "/")) {
+            joined = slice(joined, 1, length(joined))
+        }
+#if DEBUG_RESOLUTION
+        print("Resolved Import: [%v]", prefix + joined)
+        print("**************************************************************************")
+#endif
+        return prefix + joined
+    }
+
+    func readAndPreprocessCallback(virtualPath)
+    {
+#if DEBUG_RESOLUTION
+        print("*** READ AND PREPROCESS **************************************************")
+        print("Virtual Path: %v", virtualPath)
+        print("Import Parent: %v", vm.moduleLoader.getCaller())
+        print("Import Stack: %v", vm.moduleLoader.getStack())
+        print("**************************************************************************")
+#endif
+        var physicalPath = ""
+
+        if (startsWith(virtualPath, "ROOT::")) {
+            var rel = slice(virtualPath, length("ROOT::"), length(virtualPath))
+            physicalPath = Path.normalize(Path.join(SCRIPT_PATH, rel))
+        } else if (startsWith(virtualPath, "MODULES::")) {
+            var rel = slice(virtualPath, length("MODULES::"), length(virtualPath))
+            physicalPath = Path.normalize(Path.join(MODULE_PATH, rel))
+        } else {
+            return null
+        }
+
+        var source = readFile(physicalPath)
+        if (!source) { return null }
+
+        sources[physicalPath] = source
+
+        var sm = vm.newSourceMap()
+        var fid = vm.registerSourceFile(physicalPath, source)
+        var ps = vm.preprocess(source, sm, fid)
+
+        return {
+            source: ps.source,
+            sourceMap: sm,
+            fileId: fid,
+        }
+    }
+}
+
+func runBytecode(bytecode, scriptArgs)
+{
+    var vm = Zym.newVM()
+    vm.registerCliNative("ALL")
+
+    var chunk = vm.newChunk()
+    if (vm.deserializeChunk(chunk, bytecode) == Zym.STATUS.OK) {
+        if (vm.runChunk(chunk) == Zym.STATUS.OK) {
+            if (vm.hasFunc("main", 1)) {
+                var mainFunc = vm.getFunc("main")
+                var res = mainFunc([RUNNING_BINARY_PATH, ...scriptArgs])
+            }
+        } else {
+            //runtime error logged internally
+        }
+    } else {
+        print("Error: failed to deserialize bytecode.")
+    }
+
+    return null
+}
+
+func packBinary(fileName, outPath, stubPath, bytecode)
+{
+    var ok = Pack.build({
+        output: outPath,
+        stub: stubPath,
+        setExecutable: true,
+        compression: true,
+        level: 22,
+        entries: [{
+            name: fileName,
+            kind: "entry_bytecode",
+            data: bytecode,
+        }]
+    })
+
+    if (ok && File.exists(outPath)) {
+        print("Wrote %v bytes to output file: '%v'", File.size(outPath), outPath)
+        return true
+    } else {
+        print("Error: Failed to write output file: '%v'", outPath)
+        return null
+    }
+}
+
+func validateOutputPath(path)
+{
+    var sep = lastIndexOf(path, "/")
+    var dir = sep > -1 ? slice(path, 0, sep) : ""
+    var name = sep > -1 ? slice(path, sep + 1, length(path)) : path
+
+    if (dir != "") {
+        if (!Dir.exists(dir)) {
+            print("Error: output directory does not exist: '%v'", dir)
+            return false
+        }
+        var d = Dir.open(dir)
+        if (d == null) {
+            print("Error: output directory is not writable: '%v'", dir)
+            return false
+        }
+        if (!d.isWritable(".")) {
+            print("Error: output directory is not writable: '%v'", dir)
+            return false
+        }
+    }
+
+    var dot = lastIndexOf(name, ".")
+    if (dot == -1) { return true }
+    var ext = slice(name, dot + 1, length(name))
+
+    if (ext != "exe" && ext != "zbc" && ext != "zpk") {
+        print("Error: unsupported output type: '.%v'", ext)
+        return false
+    }
+
+    return true
+}
+
+func main(argv)
+{
+    RUNNING_BINARY_PATH = argv[0]
+    RUNNING_BINARY_PLATFORM = (Path.extension(RUNNING_BINARY_PATH) == "exe") ? "WINDOWS" : "LINUX"
+    var args = [...argv]; shift(args)
+    var argsLength = length(args)
+
+    var isScriptArgs = false
+
+    if (argsLength == 0) {  print(""); printHeader(); print("") }
+    else if (args[0] == "-v" || args[0] == "--version") { print("ZYM %v (c) 2025-2026 Anatole DP" , ZYM_VERSION) }
+    else if (args[0] == "-h" || args[0] == "--help") { print(""); printHeader(); print(""); printUseage(); print("") }
+    else if (startsWith(args[0], "-") || startsWith(args[0], "--")) { print("Error: unknown argument: '%v'", args[0]) }
+    else {
+        var cliArgs = []
+        var scriptArgs = []
+        
+        for (var i = 0; i < argsLength; i++) {
+            var arg = shift(args)
+            if (arg == "--") { isScriptArgs = true; continue }
+            isScriptArgs ?  push(scriptArgs, arg) : push(cliArgs, arg)
+        }
+
+        var entryArg = shift(cliArgs)
+        if (contains([], entryArg)) {
+            print("Arg Path")
+        } else {
+            var source = null
+            var bytecode = null
+
+            var fileName = Path.filename(entryArg)
+            var fileExt = Path.extension(entryArg)
+
+            SCRIPT_PATH = Path.dirname(Path.normalize(Path.join(Process.getCwd(), entryArg)))
+
+            switch (fileExt)
+            {
+                case "zym": {
+                    source = readFile(entryArg)
+                    if (!source) { return null }
+                    break
+                }
+                case "zbc": {
+                    bytecode = readBinaryFile(entryArg)
+                    if (!bytecode) { return null }
+                    break
+                }
+                case "zpk":{
+                    if (File.exists(entryArg)) {
+                        var packInfo = Pack.inspectBin(entryArg)
+                        if (packInfo) {
+                            if (!packInfo.hasEntry) { print("Error: zpk file does not contain a zym entry point: '%v'", entryArg); return null }
+                        } else { print("Error: Failed to inspect .zpk file: '%v'", entryArg); return null }
+
+                        var zpk = Pack.openFile(entryArg)
+                        if (zpk) {
+                            if (zpk.verify(zpk.entryIndex())) {
+                                var entryInfo = zpk.info(zpk.entryIndex())
+                                if (entryInfo.kind == "entry_source") {
+                                    source = zpk.open(zpk.entryIndex())
+                                    if (!source) { print("Error: Unable to read zpk entry source: '%v'", entryArg); return null }
+                                } else if (entryInfo.kind == "entry_bytecode") {
+                                    bytecode = zpk.open(zpk.entryIndex())
+                                    if (!bytecode) { print("Error: Unable to read zpk entry bytecode: '%v'", entryArg); return null }
+                                } else { print("Error: zpk entry index is not a zym source or bytecode: '%v'", entryArg); return null }
+                            } else { print("Error: zpk entry index corrupted: '%v'", entryArg); return null }
+                        } else { print("Error: Failed to open .zpk file: '%v'", entryArg); return null }
+                    } else { print("Error: file not found: %v", entryArg); return null }
+                    break
+                }
+                default:{
+                    print("Error: File extension not supported [.zym, .zbc, .zpk].")
+                    return null
+                    break
+                }
+            }
+
+            if (length(cliArgs) == 0) {
+                if (source && !bytecode) {
+                    bytecode = compileSource(fileName, source)
+                    if (!bytecode) { return null }
+                }
+                runBytecode(bytecode, scriptArgs)
+            } else {
+                var argMap = {}
+                
+                var argLength = length(cliArgs)
+                for (var i = 0; i < argLength; i++) {
+                    var arg = shift(cliArgs)
+                    if (arg == "-o" || arg == "--output") {
+                        if (!argMap.hasOutput) {
+                            argMap.hasOutput = true
+                            if (length(cliArgs) == 0) { print("Error: -o/--output requires a file name."); return null }
+                            argMap.outPath = shift(cliArgs); i++
+                            if (!validateOutputPath(argMap.outPath)) { return null }
+                            var extension = Path.extension(argMap.outPath)
+                            if (extension == "zbc" && fileExt != "zym") { print("Error: -o/--output cannot create .zbc from input file: '%v'", fileName); return null }
+                            if ((extension == "zpk" && fileExt != "zbc") && (extension == "zpk" && fileExt != "zym")) { print("Error: -o/--output cannot create .zpk from input file: '%v'", fileName); return null }
+                        } else { print("Error: Multiple -o/--output args not allowed."); return null }
+                    } else if (arg == "-r" || arg == "--runtime") {
+                        if (!argMap.hasRuntime) {
+                            argMap.hasRuntime = true
+                            if (length(cliArgs) == 0) { print("Error: -r/--runtime requires a file name."); return null }
+                            argMap.runtimePath = shift(cliArgs); i++
+                            if (!File.exists(argMap.runtimePath)) { print("Error: -r/--runtime file not found: '%v'", argMap.runtimePath); return null }
+                        } else { print("Error: Multiple -r/--runtime args not allowed."); return null }
+                    } else {
+                        print("Error: unknown argument: '%v'", arg)
+                        return null
+                    }
+                }
+
+                if (argMap.hasOutput) {
+                    if (source && !bytecode) {
+                        bytecode = compileSource(fileName, source)
+                        if (!bytecode) { return null }
+                        print("ByteCode compiled: %v bytes.", bytecode.size())
+                    }
+
+                    switch (Path.extension(argMap.outPath)) {
+                        case "zbc": {
+                            if(!File.writeBytes(argMap.outPath, bytecode)) {
+                                print("Error: Failed to write output file: '%v'", argMap.outPath)
+                                return null
+                            } else {
+                                print("Wrote %v bytes to output file: '%v'", bytecode.size(), argMap.outPath)
+                            }
+                            break
+                        }
+                        case "zpk": {
+                            var ok = Pack.build({
+                                output: argMap.outPath,
+                                compression: true,
+                                level: 22,
+                                entries: [{
+                                    name: fileName,
+                                    kind: "entry_bytecode",
+                                    data: bytecode,
+                                }]
+                            })
+
+                            if (ok && File.exists(argMap.outPath)) {
+                                print("Wrote %v bytes to output file: '%v'", File.size(argMap.outPath), argMap.outPath)
+                            } else {
+                                print("Error: Failed to write output file: '%v'", argMap.outPath)
+                                return null
+                            }
+                            break
+                        }
+                        case "exe": {
+                            if (argMap.hasRuntime && (Path.extension(argMap.runtimePath) == "exe")) {
+                                packBinary(fileName, argMap.outPath, argMap.runtimePath, bytecode)
+                            } else if (argMap.hasRuntime && (Path.extension(argMap.runtimePath) != "exe")) {
+                                print("Error: -r/--runtime not a windows binary: '%v'", argMap.runtimePath); return null
+                            } else if (RUNNING_BINARY_PLATFORM == "WINDOWS") {
+                                packBinary(fileName, argMap.outPath, RUNNING_BINARY_PATH, bytecode)
+                            } else {
+                                if (Path.filename(argMap.outPath) == "windowsRuntime.exe") { print("Error: -o/--output cannot name file 'windowsRuntime.exe'"); return null }
+                                var selfBundle = Pack.openFile(RUNNING_BINARY_PATH)
+                                var runtimeBuf = selfBundle.open("windowsRuntime")
+                                File.writeBytes("windowsRuntime.exe", runtimeBuf)
+                                if (!File.exists("windowsRuntime.exe")) {  print("Error: Failed to write output file: '%v'", argMap.outPath); return null }
+                                selfBundle.close()
+                                packBinary(fileName, argMap.outPath, "windowsRuntime.exe", bytecode)
+                                File.remove("windowsRuntime.exe")
+                            }
+                            break
+                        }
+                        default: {
+                            if (argMap.hasRuntime && (Path.extension(argMap.runtimePath) != "exe")) {
+                                packBinary(fileName, argMap.outPath, argMap.runtimePath, bytecode)
+                            } else if (argMap.hasRuntime && (Path.extension(argMap.runtimePath) == "exe")) {
+                                print("Error: -r/--runtime not a linux binary: '%v'", argMap.runtimePath); return null
+                            } else if (RUNNING_BINARY_PLATFORM == "LINUX") {
+                                packBinary(fileName, argMap.outPath, RUNNING_BINARY_PATH, bytecode)
+                            } else {
+                                if (Path.filename(argMap.outPath) == "linuxRuntime") { print("Error: -o/--output cannot name file 'linuxRuntime'"); return null }
+                                var selfBundle = Pack.openFile(RUNNING_BINARY_PATH)
+                                var runtimeBuf = selfBundle.open("linuxRuntime")
+                                File.writeBytes("linuxRuntime", runtimeBuf)
+                                if (!File.exists("linuxRuntime")) {  print("Error: Failed to write output file: '%v'", argMap.outPath); return null }
+                                selfBundle.close()
+                                packBinary(fileName, argMap.outPath, "linuxRuntime", bytecode)
+                                File.remove("linuxRuntime")
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+func printHeader()
+{
+    print("  ====================================================================================")
+    print("  |                                                                                  |")
+    print("  |           ########  ##    ##  ##     ##              v0.3.0                      |")
+    print("  |              ##      ##  ##   ###   ###                                          |")
+    print("  |             ##        ####    #### ####         Programming Language             |")
+    print("  |            ##          ##     ## ### ##                                          |")
+    print("  |           ########     ##     ##     ##         Fast. Simple. Powerful.          |")
+    print("  |                                                                                  |")
+    print("  ====================================================================================")
+}
+
+func printUseage()
+{
+    print("  = USAGE ============================================================================")
+    print("  |                                                                                  |")
+    print("  |  Info Commands:                                                                  |")
+    print("  |    zym -v, --version                          Print ZYM version                  |")
+    print("  |    zym -h, --help                             Print this help                    |")
+    print("  |                                                                                  |")
+    print("  |  Run Commands:                                                                   |")
+    print("  |    zym <file.[zym|zbc|zpk]>                   Run file                           |")
+    print("  |                                                                                  |")
+    print("  |  Output Commands (-o, --output):                                                 |")
+    print("  |    zym <file.zym> -o <out.[zbc|zpk]>          Compile .zym to bytecode or pkg    |")
+    print("  |    zym <file.zbc> -o <out.zpk>                Pack .zbc into a .zpk package      |")
+    print("  |    zym <file.[zym|zbc|zpk]> -o <out[.exe]>    Compile to standalone binary       |")
+    print("  |                                                                                  |")
+    print("  |  Cross-Platform Packing (-r, --runtime):                                         |")
+    print("  |    zym <file> -o <out> -r <runtime>           Use explicit runtime for output    |")
+    print("  |                                                                                  |")
+    print("  ====================================================================================")
+}

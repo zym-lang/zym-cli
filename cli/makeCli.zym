@@ -1,0 +1,102 @@
+func readFile(path)
+{
+    if (!File.exists(path)) { print("Error: file not found: %v", path); return null}
+    var source = File.readBytes(path)
+    if (!source || File.size(path) != source.size()) { print("Error: Unable to read file: %v", path); return null}
+    return source.toUtf8()
+}
+
+func compileSource(fileName, source)
+{
+    var vm = Zym.newVM()
+    vm.registerCliNative("ALL")
+
+    var sources = {}
+    sources[fileName] = source
+
+    var sm = vm.newSourceMap()
+    var fid = vm.registerSourceFile(fileName, source)
+    var ps = vm.preprocess(source, sm, fid)
+
+    var loaded = vm.loadModules(ps.source, sm, fileName, readAndPreprocessCallback, { debugNames: true })
+    if (loaded.status == Zym.STATUS.OK) {
+        var chunk = vm.newChunk()
+        var status = vm.compile(loaded.combinedSource, chunk, loaded.combinedSourceMap, fileName, { includeLineInfo: true })
+        if (status == Zym.STATUS.OK) {
+            //print("COMPILATION SUCCEEDED")
+            var zbcBuf = vm.serializeChunk(chunk, { includeLineInfo: true }).bytes
+            //print(" > bytecode size: %v bytes", zbcBuf.size())
+            return zbcBuf
+        } else {
+            print(" -- COMPILATION FAILED --")
+            //drainAndPrintDiagnostics(vm, sources)
+        }
+    } else {
+        print(" -- COMPILATION FAILED --")
+        //drainAndPrintDiagnostics(vm, sources)
+    }
+
+    return null
+
+    func readAndPreprocessCallback(path)
+    {
+        var source = readFile(path)
+        if (!source) { return null }
+
+        sources[path] = source
+
+        var sm = vm.newSourceMap()
+        var fid = vm.registerSourceFile(path, source)
+        var ps = vm.preprocess(source, sm, fid)
+
+        return {
+            source: ps.source,
+            sourceMap: sm,
+            fileId: fid,
+        }
+    }
+}
+
+func packBinaries(bytecode)
+{
+    Pack.build({
+        output: "bin/zym",
+        stub: "runtimes/linux",
+        setExecutable: true,
+        compression: true,
+        level: 22,
+        entries: [
+            {
+                name: "cli",
+                kind: "entry_bytecode",
+                data: bytecode,
+            },{
+                name: "windowsRuntime",
+                kind: "file",
+                path: "runtimes/windows.exe",
+            }
+        ]
+    })
+
+    Pack.build({
+        output: "bin/zym.exe",
+        stub: "runtimes/windows.exe",
+        setExecutable: true,
+        compression: true,
+        level: 22,
+        entries: [
+            {
+                name: "cli",
+                kind: "entry_bytecode",
+                data: bytecode,
+            },{
+                name: "linuxRuntime",
+                kind: "file",
+                path: "runtimes/linux",
+            }
+        ]
+    })
+}
+
+var bytecode = compileSource("src/cli.zym", readFile("src/cli.zym"))
+packBinaries(bytecode)

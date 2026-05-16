@@ -147,6 +147,21 @@ target_link_libraries(zym PRIVATE zym_core)
 if(RUNTIME_ONLY)
     message(STATUS ">> RUNTIME_ONLY: ON - excluding full_executor; runtime_loader path only")
     target_compile_definitions(zym PRIVATE ZYM_RUNTIME_ONLY=1)
+    # Emit the runtime-only binary into cli/runtimes/ with a platform name
+    # the loader can pick up: `windows.exe` on Windows, `linux` elsewhere.
+    set_target_properties(zym PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/cli/runtimes"
+    )
+    foreach(_cfg "" _DEBUG _RELEASE _TINY _RELWITHDEBINFO _MINSIZEREL)
+        set_target_properties(zym PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY${_cfg} "${CMAKE_SOURCE_DIR}/cli/runtimes"
+        )
+    endforeach()
+    if(WIN32)
+        set_target_properties(zym PROPERTIES OUTPUT_NAME "windows" SUFFIX ".exe")
+    else()
+        set_target_properties(zym PROPERTIES OUTPUT_NAME "linux" SUFFIX "")
+    endif()
 else()
     target_compile_definitions(zym PRIVATE ZYM_RUNTIME_ONLY=0)
 endif()

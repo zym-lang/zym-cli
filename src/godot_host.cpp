@@ -93,19 +93,33 @@ bool init() {
     // `GLOBAL_GET("network/limits/tcp/connect_timeout_seconds")`. Leaving
     // the singleton null causes a SIGSEGV on the very first `TCP.connect`.
     g_project_settings = memnew(ProjectSettings);
-    // register_core_settings() intentionally NOT called: its 6 GLOBAL_DEFs
-    // configure (a) network/limits/{tcp,unix,packet_peer_stream} +
-    // network/tls/certificate_bundle_override -- consumed only by the
+    // The stock engine's `register_core_settings()` is NOT called as-is
+    // (its 6 GLOBAL_DEFs configure network/limits/{unix,packet_peer_stream}
+    // + network/tls/certificate_bundle_override -- consumed only by the
     // network/TLS class graph already permanently skipped via the 8
-    // register_custom_instance_class<T>() deletions (HTTPClient, Crypto,
-    // StreamPeerTLS, PacketPeerDTLS, ...), and (b) threading/worker_pool/*
-    // -- consumed only by WorkerThreadPool::init(), which zym never reaches
-    // because zym::boot::register_core_types() does not memnew the
-    // WorkerThreadPool singleton (engine register_core_types.cpp:341 was
-    // its only construction site). Nothing in zym's link graph queries
-    // any of these keys, so the GLOBAL_DEFs would be orphaned defaults.
-    // Skipping the call lets --gc-sections evict register_core_settings()
-    // itself plus the 4 PropertyInfo ctors it constructs.
+    // register_custom_instance_class<T>() deletions, and
+    // threading/worker_pool/* -- consumed only by WorkerThreadPool::init(),
+    // which zym never reaches because zym::boot::register_core_types() does
+    // not memnew the WorkerThreadPool singleton). Skipping the stock call
+    // lets --gc-sections evict the unused GLOBAL_DEFs and their
+    // PropertyInfo ctors.
+    //
+    // HOWEVER: two of those keys are actually live in zym's link graph and
+    // their absence causes silent runtime failures:
+    //   - network/limits/tcp/connect_timeout_seconds -> read by
+    //     `StreamPeerTCP::connect_to_host` at stream_peer_tcp.cpp:78.
+    //     Missing -> 0s deadline -> every non-LAN TCP connect aborts on
+    //     the first poll() iteration. Symptom: TCP/TLS.connect silently
+    //     returns null for any remote that isn't sub-ms-RTT.
+    //   - network/tls/enable_tls_v1.3 -> read by
+    //     `TLSContextMbedTLS::init_client` at tls_context_mbedtls.cpp:218.
+    //     Missing -> cap to TLS 1.2.
+    // Both are registered by `zym::boot::register_core_settings()` below,
+    // which MUST run after `memnew(ProjectSettings)` because GLOBAL_DEF
+    // dereferences `ProjectSettings::get_singleton()` (this exact ordering
+    // trap previously turned a one-line patch into a SIGSEGV when the
+    // GLOBAL_DEF was placed inside `register_core_types()` instead).
+    zym::boot::register_core_settings();
     //
     // register_early_core_singletons() / register_core_singletons() are
     // intentionally NOT called: they wire CoreBind::Engine / OS / OS_Time /

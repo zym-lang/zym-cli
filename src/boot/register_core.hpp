@@ -24,6 +24,21 @@ namespace zym::boot {
 void register_core_types();
 void unregister_core_types();
 
+// Registers the small subset of `network/*` ProjectSettings that zym's
+// link graph actually queries. MUST be called AFTER `memnew(ProjectSettings)`
+// because GLOBAL_DEF dereferences `ProjectSettings::get_singleton()`.
+//
+// Currently registered:
+//   - network/limits/tcp/connect_timeout_seconds (default 30) -- consumed by
+//     `StreamPeerTCP::connect_to_host` (stream_peer_tcp.cpp:78). Missing
+//     key -> null Variant -> 0s deadline -> every non-LAN TCP connect
+//     trips the timeout on the first poll() and silently fails.
+//   - network/tls/enable_tls_v1.3 (default true) -- consumed by
+//     `TLSContextMbedTLS::init_client` (tls_context_mbedtls.cpp:218).
+//     Missing key -> null Variant -> .operator bool() == false -> cap to
+//     TLS 1.2.
+void register_core_settings();
+
 // Lazily load the system CA chain (system trust store) on first use. Safe
 // to call repeatedly and from any thread; the underlying
 // `Crypto::load_default_certificates(String())` is invoked exactly once

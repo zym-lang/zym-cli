@@ -62,12 +62,14 @@
 //
 // Confined to this TU so the access-widening can't leak ODR-wise
 // elsewhere in the build.
+#include "core/config/project_settings.h"
 #include "core/core_globals.h"
 #include "core/core_string_names.h"
 #include "core/io/ip.h"
 #include "core/object/object.h"
 #include "core/os/memory.h"
 #include "core/string/string_name.h"
+#include "core/variant/variant.h"
 
 // mbedtls module owns the `_create` factories for `Crypto`, `CryptoKey`,
 // `X509Certificate`, and `HMACContext`. We deliberately do NOT call the
@@ -231,6 +233,37 @@ void unregister_core_types() {
 	CoreStringNames::free();
 	StringName::cleanup();
 	ObjectDB::cleanup();
+}
+
+void register_core_settings() {
+	// Mirrors the two GLOBAL_DEFs from stock Godot that zym's link graph
+	// actually consumes. MUST run AFTER `memnew(ProjectSettings)` because
+	// GLOBAL_DEF dereferences `ProjectSettings::get_singleton()`.
+	//
+	// 1. network/limits/tcp/connect_timeout_seconds (engine reference:
+	//    `register_core_settings()` in godot/core/register_core_types.cpp).
+	//    Read by `StreamPeerTCP::connect_to_host` at stream_peer_tcp.cpp:78
+	//    to compute the connect-phase deadline. Without this, GLOBAL_GET
+	//    returns a null Variant which casts to uint64_t(0), so the deadline
+	//    equals `now` and every non-instant TCP SYN/SYN-ACK gets aborted
+	//    by `StreamPeerSocket::poll()` on the very first poll iteration.
+	//    Symptom: `TCP.connect`/`TLS.connect` returns null for any remote
+	//    that isn't already in the kernel's connect-cache (e.g. GitHub
+	//    works in curl but fails here).
+	//
+	// 2. network/tls/enable_tls_v1.3 (engine reference: the matching
+	//    GLOBAL_DEF in godot/modules/mbedtls/register_types.cpp, which
+	//    zym's `register_core_types()` deliberately bypasses to avoid
+	//    that wrapper's ProjectSettings-before-init segfault). Read by
+	//    `TLSContextMbedTLS::init_client` at tls_context_mbedtls.cpp:218
+	//    -- when the key is missing the gate `!GLOBAL_GET(...).operator bool()`
+	//    evaluates to true and caps the connection to TLS 1.2. Setting
+	//    the default to `true` lets mbedTLS negotiate TLS 1.3 as Godot
+	//    intends.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "network/limits/tcp/connect_timeout_seconds",
+						   PROPERTY_HINT_RANGE, "1,1800,1"),
+			30);
+	GLOBAL_DEF_BASIC("network/tls/enable_tls_v1.3", true);
 }
 
 void ensure_default_certificates_loaded() {

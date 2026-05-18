@@ -140,22 +140,7 @@ ZymValue nativePrint(ZymVM* vm, ZymValue* args, int argc) {
     }
 
     if (argc == 1) {
-        ZymValue value = args[0];
-        if (zym_isString(value)) {
-            const char* str = zym_asCString(value);
-            bool has_format = false;
-            for (const char* p = str; *p; p++) {
-                if (*p == '%' && *(p + 1) != '%') {
-                    has_format = true;
-                    break;
-                }
-            }
-            if (has_format) {
-                return print_impl(vm, str, nullptr, 0);
-            }
-        }
-
-        ZymValue s = zym_valueToString(vm, value);
+        ZymValue s = zym_valueToString(vm, args[0]);
         if (zym_isString(s)) {
             print_line(String::utf8(zym_asCString(s)));
         } else {

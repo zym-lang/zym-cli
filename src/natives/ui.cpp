@@ -2083,6 +2083,63 @@ ZymValue u_withFont(ZymVM* vm, ZymValue, ZymValue fontV, ZymValue bodyV) {
 }
 
 
+// ---- PR 3: DrawList handle (full ImGui drawing capability) -------------
+//
+// A DrawList value is a Zym map carrying a `__drawlist__` native context
+// whose userdata is an `ImDrawList*`. The draw list itself is owned by
+// the ImGui context (per-window foreground / viewport background /
+// foreground), so no per-handle finalizer is needed. Each instance map
+// is populated with method closures that take the handle's ctx as
+// `self` and forward to the underlying `ImDrawList*`.
+//
+// Image-touching APIs (AddImage, AddImageQuad, AddImageRounded,
+// PathImageRect, PushTextureID) are intentionally NOT exposed — they
+// will land alongside the SDL image / texture layer.
+
+ImDrawList* unwrapDrawList(ZymValue ctx) {
+    return static_cast<ImDrawList*>(zym_getNativeData(ctx));
+}
+
+bool reqDL(ZymVM* vm, ZymValue ctx, const char* where, ImDrawList** out) {
+    auto* dl = unwrapDrawList(ctx);
+    if (!dl) { zym_runtimeError(vm, "%s: invalid DrawList handle", where); return false; }
+    *out = dl;
+    return true;
+}
+
+// Read a list of points: `[[x1,y1],[x2,y2],...]` or flat `[x1,y1,x2,y2,...]`.
+// Returns the number of points written into `out`, or -1 on type error.
+int readPointList(ZymVM* vm, ZymValue v, std::vector<ImVec2>* out) {
+    out->clear();
+    if (!zym_isList(v)) return -1;
+    int n = zym_listLength(v);
+    if (n == 0) return 0;
+    ZymValue first = zym_listGet(vm, v, 0);
+    if (zym_isList(first)) {
+        // nested form: [[x,y], ...]
+        out->reserve(n);
+        for (int i = 0; i < n; ++i) {
+            ZymValue p = zym_listGet(vm, v, i);
+            if (!zym_isList(p) || zym_listLength(p) < 2) return -1;
+            ZymValue xv = zym_listGet(vm, p, 0);
+            ZymValue yv = zym_listGet(vm, p, 1);
+            if (!zym_isNumber(xv) || !zym_isNumber(yv)) return -1;
+            out->push_back(ImVec2((float)zym_asNumber(xv), (float)zym_asNumber(yv)));
+        }
+        return (int)out->size();
+    }
+    // flat form: [x,y,x,y,...]
+    if (n % 2 != 0) return -1;
+    out->reserve(n / 2);
+    for (int i = 0; i < n; i += 2) {
+        ZymValue xv = zym_listGet(vm, v, i);
+        ZymValue yv = zym_listGet(vm, v, i + 1);
+        if (!zym_isNumber(xv) || !zym_isNumber(yv)) return -1;
+        out->push_back(ImVec2((float)zym_asNumber(xv), (float)zym_asNumber(yv)));
+    }
+    return (int)out->size();
+}
+
 // ---- PR 2d: widget parity (broader ImGui surface) ----------------------
 //
 // Added in this batch:
@@ -2973,6 +3030,554 @@ ZymValue u_lastError(ZymVM* vm, ZymValue /*self*/) {
                           (int)g_ui_lastError.size());
 }
 
+// ---- ImGui recoverable-error diagnostics toggles -------------------------
+// ImGui prints messages like "[imgui-error] In window '...': Code uses
+// SetCursorPos() ..." through its recoverable-error path. The output is
+// gated on two ImGuiIO flags (ConfigErrorRecoveryEnableDebugLog for the
+// stderr/printf line and ConfigErrorRecoveryEnableTooltip for the in-app
+// tooltip). Both default to true. Scripts can silence them per-frame via
+// `UI.silent(true)` (kills both) or surgically via setErrorLogging /
+// setErrorTooltip. We do not touch ConfigErrorRecovery itself — disabling
+// recovery turns the same conditions into hard asserts, which is the
+// opposite of what scripts asking to "silence warnings" want.
+ZymValue u_setErrorLogging(ZymVM* vm, ZymValue, ZymValue onV) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.setErrorLogging: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    bool on; if (!reqBool(vm, onV, "ui.setErrorLogging", &on)) return ZYM_ERROR;
+    ImGui::GetIO().ConfigErrorRecoveryEnableDebugLog = on;
+    return zym_newNull();
+}
+
+ZymValue u_setErrorTooltip(ZymVM* vm, ZymValue, ZymValue onV) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.setErrorTooltip: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    bool on; if (!reqBool(vm, onV, "ui.setErrorTooltip", &on)) return ZYM_ERROR;
+    ImGui::GetIO().ConfigErrorRecoveryEnableTooltip = on;
+    return zym_newNull();
+}
+
+ZymValue u_silent(ZymVM* vm, ZymValue, ZymValue onV) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.silent: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    bool on; if (!reqBool(vm, onV, "ui.silent", &on)) return ZYM_ERROR;
+    ImGuiIO& io = ImGui::GetIO();
+    // `on == true` => silence: turn both diagnostics OFF.
+    io.ConfigErrorRecoveryEnableDebugLog = !on;
+    io.ConfigErrorRecoveryEnableTooltip  = !on;
+    return zym_newNull();
+}
+
+// ===== PR 3: DrawList method closures =====================================
+// All `dl_*` closures receive the DrawList's native context as `self`.
+
+#define DL_PROLOGUE(WHERE) \
+    ImDrawList* dl; if (!reqDL(vm, self, WHERE, &dl)) return ZYM_ERROR
+
+// --- primitives -----------------------------------------------------------
+
+ZymValue dl_addLine(ZymVM* vm, ZymValue self, ZymValue x1V, ZymValue y1V,
+                    ZymValue x2V, ZymValue y2V, ZymValue colV, ZymValue thV) {
+    DL_PROLOGUE("DrawList.addLine");
+    dl->AddLine(ImVec2((float)optNum(x1V,0), (float)optNum(y1V,0)),
+                ImVec2((float)optNum(x2V,0), (float)optNum(y2V,0)),
+                optU32(colV, 0xFFFFFFFFu), (float)optNum(thV, 1.0));
+    return zym_newNull();
+}
+
+ZymValue dl_addRect(ZymVM* vm, ZymValue self, ZymValue xV, ZymValue yV,
+                    ZymValue wV, ZymValue hV, ZymValue colV,
+                    ZymValue rV, ZymValue thV, ZymValue flV) {
+    DL_PROLOGUE("DrawList.addRect");
+    float x = (float)optNum(xV,0), y = (float)optNum(yV,0);
+    float w = (float)optNum(wV,0), h = (float)optNum(hV,0);
+    dl->AddRect(ImVec2(x,y), ImVec2(x+w,y+h), optU32(colV, 0xFFFFFFFFu),
+                (float)optNum(rV,0), (float)optNum(thV,1.0),
+                (ImDrawFlags)optU32(flV, 0));
+    return zym_newNull();
+}
+
+ZymValue dl_addRectFilled(ZymVM* vm, ZymValue self, ZymValue xV, ZymValue yV,
+                          ZymValue wV, ZymValue hV, ZymValue colV,
+                          ZymValue rV, ZymValue flV) {
+    DL_PROLOGUE("DrawList.addRectFilled");
+    float x = (float)optNum(xV,0), y = (float)optNum(yV,0);
+    float w = (float)optNum(wV,0), h = (float)optNum(hV,0);
+    dl->AddRectFilled(ImVec2(x,y), ImVec2(x+w,y+h), optU32(colV, 0xFFFFFFFFu),
+                      (float)optNum(rV,0), (ImDrawFlags)optU32(flV, 0));
+    return zym_newNull();
+}
+
+ZymValue dl_addRectFilledMultiColor(ZymVM* vm, ZymValue self,
+        ZymValue xV, ZymValue yV, ZymValue wV, ZymValue hV,
+        ZymValue cTL, ZymValue cTR, ZymValue cBR, ZymValue cBL) {
+    DL_PROLOGUE("DrawList.addRectFilledMultiColor");
+    float x = (float)optNum(xV,0), y = (float)optNum(yV,0);
+    float w = (float)optNum(wV,0), h = (float)optNum(hV,0);
+    dl->AddRectFilledMultiColor(ImVec2(x,y), ImVec2(x+w,y+h),
+                                optU32(cTL,0xFFFFFFFFu), optU32(cTR,0xFFFFFFFFu),
+                                optU32(cBR,0xFFFFFFFFu), optU32(cBL,0xFFFFFFFFu));
+    return zym_newNull();
+}
+
+ZymValue dl_addQuad(ZymVM* vm, ZymValue self,
+        ZymValue x1, ZymValue y1, ZymValue x2, ZymValue y2,
+        ZymValue x3, ZymValue y3, ZymValue x4, ZymValue y4,
+        ZymValue colV, ZymValue thV) {
+    DL_PROLOGUE("DrawList.addQuad");
+    dl->AddQuad(ImVec2((float)optNum(x1,0),(float)optNum(y1,0)),
+                ImVec2((float)optNum(x2,0),(float)optNum(y2,0)),
+                ImVec2((float)optNum(x3,0),(float)optNum(y3,0)),
+                ImVec2((float)optNum(x4,0),(float)optNum(y4,0)),
+                optU32(colV,0xFFFFFFFFu), (float)optNum(thV,1.0));
+    return zym_newNull();
+}
+
+ZymValue dl_addQuadFilled(ZymVM* vm, ZymValue self,
+        ZymValue x1, ZymValue y1, ZymValue x2, ZymValue y2,
+        ZymValue x3, ZymValue y3, ZymValue x4, ZymValue y4,
+        ZymValue colV) {
+    DL_PROLOGUE("DrawList.addQuadFilled");
+    dl->AddQuadFilled(ImVec2((float)optNum(x1,0),(float)optNum(y1,0)),
+                      ImVec2((float)optNum(x2,0),(float)optNum(y2,0)),
+                      ImVec2((float)optNum(x3,0),(float)optNum(y3,0)),
+                      ImVec2((float)optNum(x4,0),(float)optNum(y4,0)),
+                      optU32(colV,0xFFFFFFFFu));
+    return zym_newNull();
+}
+
+ZymValue dl_addTriangle(ZymVM* vm, ZymValue self,
+        ZymValue x1, ZymValue y1, ZymValue x2, ZymValue y2,
+        ZymValue x3, ZymValue y3, ZymValue colV, ZymValue thV) {
+    DL_PROLOGUE("DrawList.addTriangle");
+    dl->AddTriangle(ImVec2((float)optNum(x1,0),(float)optNum(y1,0)),
+                    ImVec2((float)optNum(x2,0),(float)optNum(y2,0)),
+                    ImVec2((float)optNum(x3,0),(float)optNum(y3,0)),
+                    optU32(colV,0xFFFFFFFFu), (float)optNum(thV,1.0));
+    return zym_newNull();
+}
+
+ZymValue dl_addTriangleFilled(ZymVM* vm, ZymValue self,
+        ZymValue x1, ZymValue y1, ZymValue x2, ZymValue y2,
+        ZymValue x3, ZymValue y3, ZymValue colV) {
+    DL_PROLOGUE("DrawList.addTriangleFilled");
+    dl->AddTriangleFilled(ImVec2((float)optNum(x1,0),(float)optNum(y1,0)),
+                          ImVec2((float)optNum(x2,0),(float)optNum(y2,0)),
+                          ImVec2((float)optNum(x3,0),(float)optNum(y3,0)),
+                          optU32(colV,0xFFFFFFFFu));
+    return zym_newNull();
+}
+
+ZymValue dl_addCircle(ZymVM* vm, ZymValue self, ZymValue cxV, ZymValue cyV,
+                      ZymValue rV, ZymValue colV, ZymValue segV, ZymValue thV) {
+    DL_PROLOGUE("DrawList.addCircle");
+    dl->AddCircle(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                  (float)optNum(rV,0), optU32(colV,0xFFFFFFFFu),
+                  (int)optNum(segV,0), (float)optNum(thV,1.0));
+    return zym_newNull();
+}
+
+ZymValue dl_addCircleFilled(ZymVM* vm, ZymValue self, ZymValue cxV, ZymValue cyV,
+                            ZymValue rV, ZymValue colV, ZymValue segV) {
+    DL_PROLOGUE("DrawList.addCircleFilled");
+    dl->AddCircleFilled(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                        (float)optNum(rV,0), optU32(colV,0xFFFFFFFFu),
+                        (int)optNum(segV,0));
+    return zym_newNull();
+}
+
+ZymValue dl_addNgon(ZymVM* vm, ZymValue self, ZymValue cxV, ZymValue cyV,
+                    ZymValue rV, ZymValue colV, ZymValue segV, ZymValue thV) {
+    DL_PROLOGUE("DrawList.addNgon");
+    dl->AddNgon(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                (float)optNum(rV,0), optU32(colV,0xFFFFFFFFu),
+                (int)optNum(segV,0), (float)optNum(thV,1.0));
+    return zym_newNull();
+}
+
+ZymValue dl_addNgonFilled(ZymVM* vm, ZymValue self, ZymValue cxV, ZymValue cyV,
+                          ZymValue rV, ZymValue colV, ZymValue segV) {
+    DL_PROLOGUE("DrawList.addNgonFilled");
+    dl->AddNgonFilled(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                      (float)optNum(rV,0), optU32(colV,0xFFFFFFFFu),
+                      (int)optNum(segV,0));
+    return zym_newNull();
+}
+
+ZymValue dl_addEllipse(ZymVM* vm, ZymValue self, ZymValue cxV, ZymValue cyV,
+                       ZymValue rxV, ZymValue ryV, ZymValue colV,
+                       ZymValue rotV, ZymValue segV, ZymValue thV) {
+    DL_PROLOGUE("DrawList.addEllipse");
+    dl->AddEllipse(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                   ImVec2((float)optNum(rxV,0),(float)optNum(ryV,0)),
+                   optU32(colV,0xFFFFFFFFu), (float)optNum(rotV,0),
+                   (int)optNum(segV,0), (float)optNum(thV,1.0));
+    return zym_newNull();
+}
+
+ZymValue dl_addEllipseFilled(ZymVM* vm, ZymValue self, ZymValue cxV, ZymValue cyV,
+                             ZymValue rxV, ZymValue ryV, ZymValue colV,
+                             ZymValue rotV, ZymValue segV) {
+    DL_PROLOGUE("DrawList.addEllipseFilled");
+    dl->AddEllipseFilled(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                         ImVec2((float)optNum(rxV,0),(float)optNum(ryV,0)),
+                         optU32(colV,0xFFFFFFFFu), (float)optNum(rotV,0),
+                         (int)optNum(segV,0));
+    return zym_newNull();
+}
+
+ZymValue dl_addText(ZymVM* vm, ZymValue self, ZymValue xV, ZymValue yV,
+                    ZymValue colV, ZymValue sV) {
+    std::string s;
+    if (!reqStr(vm, sV, "DrawList.addText(x, y, color, s)", &s)) return ZYM_ERROR;
+    DL_PROLOGUE("DrawList.addText");
+    dl->AddText(ImVec2((float)optNum(xV,0),(float)optNum(yV,0)),
+                optU32(colV,0xFFFFFFFFu), s.c_str());
+    return zym_newNull();
+}
+
+// addBezierCubic takes 11 native args (self + 10 named), one past the
+// fixed-arity native dispatcher cap. Registered as a variadic closure
+// so it parses cleanly and accepts the full positional arg list; the
+// body unpacks them by index. Required args: x1,y1,x2,y2,x3,y3,x4,y4,
+// color, thickness. Optional 11th: segments (0 = auto).
+ZymValue dl_addBezierCubic(ZymVM* vm, ZymValue self,
+                           ZymValue* vargs, int vargc) {
+    DL_PROLOGUE("DrawList.addBezierCubic");
+    if (vargc < 10) {
+        zym_runtimeError(vm, "DrawList.addBezierCubic expects 10 or 11 args, got %d", vargc);
+        return ZYM_ERROR;
+    }
+    int seg = (vargc >= 11) ? (int)optNum(vargs[10], 0) : 0;
+    dl->AddBezierCubic(ImVec2((float)optNum(vargs[0],0),(float)optNum(vargs[1],0)),
+                       ImVec2((float)optNum(vargs[2],0),(float)optNum(vargs[3],0)),
+                       ImVec2((float)optNum(vargs[4],0),(float)optNum(vargs[5],0)),
+                       ImVec2((float)optNum(vargs[6],0),(float)optNum(vargs[7],0)),
+                       optU32(vargs[8],0xFFFFFFFFu),
+                       (float)optNum(vargs[9],1.0), seg);
+    return zym_newNull();
+}
+
+ZymValue dl_addBezierQuadratic(ZymVM* vm, ZymValue self,
+        ZymValue x1, ZymValue y1, ZymValue x2, ZymValue y2,
+        ZymValue x3, ZymValue y3,
+        ZymValue colV, ZymValue thV, ZymValue segV) {
+    DL_PROLOGUE("DrawList.addBezierQuadratic");
+    dl->AddBezierQuadratic(ImVec2((float)optNum(x1,0),(float)optNum(y1,0)),
+                           ImVec2((float)optNum(x2,0),(float)optNum(y2,0)),
+                           ImVec2((float)optNum(x3,0),(float)optNum(y3,0)),
+                           optU32(colV,0xFFFFFFFFu), (float)optNum(thV,1.0),
+                           (int)optNum(segV,0));
+    return zym_newNull();
+}
+
+ZymValue dl_addPolyline(ZymVM* vm, ZymValue self, ZymValue ptsV, ZymValue colV,
+                        ZymValue closedV, ZymValue thV, ZymValue flV) {
+    DL_PROLOGUE("DrawList.addPolyline");
+    std::vector<ImVec2> pts;
+    int n = readPointList(vm, ptsV, &pts);
+    if (n < 0) { zym_runtimeError(vm, "DrawList.addPolyline: invalid point list"); return ZYM_ERROR; }
+    if (n < 2) return zym_newNull();
+    ImDrawFlags flags = (ImDrawFlags)optU32(flV, 0);
+    bool closed = false;
+    if (zym_isBool(closedV)) closed = zym_asBool(closedV);
+    if (closed) flags |= ImDrawFlags_Closed;
+    dl->AddPolyline(pts.data(), n, optU32(colV,0xFFFFFFFFu),
+                    (float)optNum(thV,1.0), flags);
+    return zym_newNull();
+}
+
+ZymValue dl_addConvexPolyFilled(ZymVM* vm, ZymValue self, ZymValue ptsV, ZymValue colV) {
+    DL_PROLOGUE("DrawList.addConvexPolyFilled");
+    std::vector<ImVec2> pts;
+    int n = readPointList(vm, ptsV, &pts);
+    if (n < 0) { zym_runtimeError(vm, "DrawList.addConvexPolyFilled: invalid point list"); return ZYM_ERROR; }
+    if (n < 3) return zym_newNull();
+    dl->AddConvexPolyFilled(pts.data(), n, optU32(colV,0xFFFFFFFFu));
+    return zym_newNull();
+}
+
+ZymValue dl_addConcavePolyFilled(ZymVM* vm, ZymValue self, ZymValue ptsV, ZymValue colV) {
+    DL_PROLOGUE("DrawList.addConcavePolyFilled");
+    std::vector<ImVec2> pts;
+    int n = readPointList(vm, ptsV, &pts);
+    if (n < 0) { zym_runtimeError(vm, "DrawList.addConcavePolyFilled: invalid point list"); return ZYM_ERROR; }
+    if (n < 3) return zym_newNull();
+    dl->AddConcavePolyFilled(pts.data(), n, optU32(colV,0xFFFFFFFFu));
+    return zym_newNull();
+}
+
+// --- path API -------------------------------------------------------------
+
+ZymValue dl_pathClear(ZymVM* vm, ZymValue self) {
+    DL_PROLOGUE("DrawList.pathClear");
+    dl->PathClear(); return zym_newNull();
+}
+
+ZymValue dl_pathLineTo(ZymVM* vm, ZymValue self, ZymValue xV, ZymValue yV) {
+    DL_PROLOGUE("DrawList.pathLineTo");
+    dl->PathLineTo(ImVec2((float)optNum(xV,0),(float)optNum(yV,0)));
+    return zym_newNull();
+}
+
+ZymValue dl_pathLineToMergeDuplicate(ZymVM* vm, ZymValue self, ZymValue xV, ZymValue yV) {
+    DL_PROLOGUE("DrawList.pathLineToMergeDuplicate");
+    dl->PathLineToMergeDuplicate(ImVec2((float)optNum(xV,0),(float)optNum(yV,0)));
+    return zym_newNull();
+}
+
+ZymValue dl_pathFillConvex(ZymVM* vm, ZymValue self, ZymValue colV) {
+    DL_PROLOGUE("DrawList.pathFillConvex");
+    dl->PathFillConvex(optU32(colV,0xFFFFFFFFu));
+    return zym_newNull();
+}
+
+ZymValue dl_pathFillConcave(ZymVM* vm, ZymValue self, ZymValue colV) {
+    DL_PROLOGUE("DrawList.pathFillConcave");
+    dl->PathFillConcave(optU32(colV,0xFFFFFFFFu));
+    return zym_newNull();
+}
+
+ZymValue dl_pathStroke(ZymVM* vm, ZymValue self, ZymValue colV,
+                       ZymValue closedV, ZymValue thV, ZymValue flV) {
+    DL_PROLOGUE("DrawList.pathStroke");
+    ImDrawFlags flags = (ImDrawFlags)optU32(flV, 0);
+    if (zym_isBool(closedV) && zym_asBool(closedV)) flags |= ImDrawFlags_Closed;
+    dl->PathStroke(optU32(colV,0xFFFFFFFFu), flags, (float)optNum(thV,1.0));
+    return zym_newNull();
+}
+
+ZymValue dl_pathArcTo(ZymVM* vm, ZymValue self, ZymValue cxV, ZymValue cyV,
+                      ZymValue rV, ZymValue aMinV, ZymValue aMaxV, ZymValue segV) {
+    DL_PROLOGUE("DrawList.pathArcTo");
+    dl->PathArcTo(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                  (float)optNum(rV,0), (float)optNum(aMinV,0),
+                  (float)optNum(aMaxV,0), (int)optNum(segV,0));
+    return zym_newNull();
+}
+
+ZymValue dl_pathArcToFast(ZymVM* vm, ZymValue self, ZymValue cxV, ZymValue cyV,
+                          ZymValue rV, ZymValue aMinV, ZymValue aMaxV) {
+    DL_PROLOGUE("DrawList.pathArcToFast");
+    dl->PathArcToFast(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                      (float)optNum(rV,0), (int)optNum(aMinV,0),
+                      (int)optNum(aMaxV,12));
+    return zym_newNull();
+}
+
+ZymValue dl_pathEllipticalArcTo(ZymVM* vm, ZymValue self,
+        ZymValue cxV, ZymValue cyV, ZymValue rxV, ZymValue ryV,
+        ZymValue rotV, ZymValue aMinV, ZymValue aMaxV, ZymValue segV) {
+    DL_PROLOGUE("DrawList.pathEllipticalArcTo");
+    dl->PathEllipticalArcTo(ImVec2((float)optNum(cxV,0),(float)optNum(cyV,0)),
+                            ImVec2((float)optNum(rxV,0),(float)optNum(ryV,0)),
+                            (float)optNum(rotV,0), (float)optNum(aMinV,0),
+                            (float)optNum(aMaxV,0), (int)optNum(segV,0));
+    return zym_newNull();
+}
+
+ZymValue dl_pathBezierCubicCurveTo(ZymVM* vm, ZymValue self,
+        ZymValue x2, ZymValue y2, ZymValue x3, ZymValue y3,
+        ZymValue x4, ZymValue y4, ZymValue segV) {
+    DL_PROLOGUE("DrawList.pathBezierCubicCurveTo");
+    dl->PathBezierCubicCurveTo(ImVec2((float)optNum(x2,0),(float)optNum(y2,0)),
+                               ImVec2((float)optNum(x3,0),(float)optNum(y3,0)),
+                               ImVec2((float)optNum(x4,0),(float)optNum(y4,0)),
+                               (int)optNum(segV,0));
+    return zym_newNull();
+}
+
+ZymValue dl_pathBezierQuadraticCurveTo(ZymVM* vm, ZymValue self,
+        ZymValue x2, ZymValue y2, ZymValue x3, ZymValue y3, ZymValue segV) {
+    DL_PROLOGUE("DrawList.pathBezierQuadraticCurveTo");
+    dl->PathBezierQuadraticCurveTo(ImVec2((float)optNum(x2,0),(float)optNum(y2,0)),
+                                   ImVec2((float)optNum(x3,0),(float)optNum(y3,0)),
+                                   (int)optNum(segV,0));
+    return zym_newNull();
+}
+
+ZymValue dl_pathRect(ZymVM* vm, ZymValue self, ZymValue xV, ZymValue yV,
+                     ZymValue wV, ZymValue hV, ZymValue rV, ZymValue flV) {
+    DL_PROLOGUE("DrawList.pathRect");
+    float x = (float)optNum(xV,0), y = (float)optNum(yV,0);
+    float w = (float)optNum(wV,0), h = (float)optNum(hV,0);
+    dl->PathRect(ImVec2(x,y), ImVec2(x+w,y+h),
+                 (float)optNum(rV,0), (ImDrawFlags)optU32(flV,0));
+    return zym_newNull();
+}
+
+// --- clip rect ------------------------------------------------------------
+
+ZymValue dl_pushClipRect(ZymVM* vm, ZymValue self, ZymValue xV, ZymValue yV,
+                         ZymValue wV, ZymValue hV, ZymValue intersectV) {
+    DL_PROLOGUE("DrawList.pushClipRect");
+    float x = (float)optNum(xV,0), y = (float)optNum(yV,0);
+    float w = (float)optNum(wV,0), h = (float)optNum(hV,0);
+    bool intersect = zym_isBool(intersectV) ? zym_asBool(intersectV) : false;
+    dl->PushClipRect(ImVec2(x,y), ImVec2(x+w,y+h), intersect);
+    return zym_newNull();
+}
+
+ZymValue dl_pushClipRectFullScreen(ZymVM* vm, ZymValue self) {
+    DL_PROLOGUE("DrawList.pushClipRectFullScreen");
+    dl->PushClipRectFullScreen(); return zym_newNull();
+}
+
+ZymValue dl_popClipRect(ZymVM* vm, ZymValue self) {
+    DL_PROLOGUE("DrawList.popClipRect");
+    dl->PopClipRect(); return zym_newNull();
+}
+
+ZymValue dl_getClipRectMin(ZymVM* vm, ZymValue self) {
+    DL_PROLOGUE("DrawList.getClipRectMin");
+    ImVec2 p = dl->GetClipRectMin();
+    ZymValue m = zym_newMap(vm); zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "x", zym_newNumber(p.x));
+    zym_mapSet(vm, m, "y", zym_newNumber(p.y));
+    zym_popRoot(vm); return m;
+}
+
+ZymValue dl_getClipRectMax(ZymVM* vm, ZymValue self) {
+    DL_PROLOGUE("DrawList.getClipRectMax");
+    ImVec2 p = dl->GetClipRectMax();
+    ZymValue m = zym_newMap(vm); zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "x", zym_newNumber(p.x));
+    zym_mapSet(vm, m, "y", zym_newNumber(p.y));
+    zym_popRoot(vm); return m;
+}
+
+// --- channel splitter -----------------------------------------------------
+
+ZymValue dl_channelsSplit(ZymVM* vm, ZymValue self, ZymValue nV) {
+    DL_PROLOGUE("DrawList.channelsSplit");
+    dl->ChannelsSplit((int)optNum(nV, 2)); return zym_newNull();
+}
+
+ZymValue dl_channelsMerge(ZymVM* vm, ZymValue self) {
+    DL_PROLOGUE("DrawList.channelsMerge");
+    dl->ChannelsMerge(); return zym_newNull();
+}
+
+ZymValue dl_channelsSetCurrent(ZymVM* vm, ZymValue self, ZymValue nV) {
+    DL_PROLOGUE("DrawList.channelsSetCurrent");
+    dl->ChannelsSetCurrent((int)optNum(nV, 0)); return zym_newNull();
+}
+
+#undef DL_PROLOGUE
+
+// --- DrawList instance factory --------------------------------------------
+
+ZymValue makeDrawListInstance(ZymVM* vm, ImDrawList* dl) {
+    ZymValue ctx = zym_createNativeContext(vm, dl, nullptr);
+    zym_pushRoot(vm, ctx);
+    ZymValue obj = zym_newMap(vm);
+    zym_pushRoot(vm, obj);
+    zym_mapSet(vm, obj, "__drawlist__", ctx);
+
+#define DLM(name, sig, fn) do { \
+    ZymValue cl = zym_createNativeClosure(vm, sig, (void*)fn, ctx); \
+    zym_pushRoot(vm, cl); zym_mapSet(vm, obj, name, cl); zym_popRoot(vm); \
+} while (0)
+
+    DLM("addLine",                 "addLine(x1,y1,x2,y2,color,thickness)",                dl_addLine);
+    DLM("addRect",                 "addRect(x,y,w,h,color,rounding,thickness,flags)",      dl_addRect);
+    DLM("addRectFilled",           "addRectFilled(x,y,w,h,color,rounding,flags)",          dl_addRectFilled);
+    DLM("addRectFilledMultiColor", "addRectFilledMultiColor(x,y,w,h,cTL,cTR,cBR,cBL)",     dl_addRectFilledMultiColor);
+    DLM("addQuad",                 "addQuad(x1,y1,x2,y2,x3,y3,x4,y4,color,thickness)",     dl_addQuad);
+    DLM("addQuadFilled",           "addQuadFilled(x1,y1,x2,y2,x3,y3,x4,y4,color)",         dl_addQuadFilled);
+    DLM("addTriangle",             "addTriangle(x1,y1,x2,y2,x3,y3,color,thickness)",       dl_addTriangle);
+    DLM("addTriangleFilled",       "addTriangleFilled(x1,y1,x2,y2,x3,y3,color)",           dl_addTriangleFilled);
+    DLM("addCircle",               "addCircle(cx,cy,r,color,segments,thickness)",          dl_addCircle);
+    DLM("addCircleFilled",         "addCircleFilled(cx,cy,r,color,segments)",              dl_addCircleFilled);
+    DLM("addNgon",                 "addNgon(cx,cy,r,color,sides,thickness)",               dl_addNgon);
+    DLM("addNgonFilled",           "addNgonFilled(cx,cy,r,color,sides)",                   dl_addNgonFilled);
+    DLM("addEllipse",              "addEllipse(cx,cy,rx,ry,color,rot,segments,thickness)", dl_addEllipse);
+    DLM("addEllipseFilled",        "addEllipseFilled(cx,cy,rx,ry,color,rot,segments)",     dl_addEllipseFilled);
+    DLM("addText",                 "addText(x,y,color,s)",                                 dl_addText);
+    // addBezierCubic takes 10 required args + optional `segments` (total
+    // 11), one past the fixed-arity native dispatcher cap. Register it as
+    // a variadic native closure so the full set fits — the wrapper itself
+    // unpacks args by index. Signature uses `...args` per the Zym native
+    // convention (see src/natives/Zym/zym_native.cpp variadic closures).
+    {
+        ZymValue cl = zym_createNativeClosureVariadic(
+            vm,
+            "addBezierCubic(...args)",
+            (void*)dl_addBezierCubic,
+            ctx);
+        zym_pushRoot(vm, cl);
+        zym_mapSet(vm, obj, "addBezierCubic", cl);
+        zym_popRoot(vm);
+    }
+    DLM("addBezierQuadratic",      "addBezierQuadratic(x1,y1,x2,y2,x3,y3,color,thickness,segments)",  dl_addBezierQuadratic);
+    DLM("addPolyline",             "addPolyline(points,color,closed,thickness,flags)",     dl_addPolyline);
+    DLM("addConvexPolyFilled",     "addConvexPolyFilled(points,color)",                    dl_addConvexPolyFilled);
+    DLM("addConcavePolyFilled",    "addConcavePolyFilled(points,color)",                   dl_addConcavePolyFilled);
+
+    DLM("pathClear",                  "pathClear()",                                       dl_pathClear);
+    DLM("pathLineTo",                 "pathLineTo(x,y)",                                   dl_pathLineTo);
+    DLM("pathLineToMergeDuplicate",   "pathLineToMergeDuplicate(x,y)",                     dl_pathLineToMergeDuplicate);
+    DLM("pathFillConvex",             "pathFillConvex(color)",                             dl_pathFillConvex);
+    DLM("pathFillConcave",            "pathFillConcave(color)",                            dl_pathFillConcave);
+    DLM("pathStroke",                 "pathStroke(color,closed,thickness,flags)",          dl_pathStroke);
+    DLM("pathArcTo",                  "pathArcTo(cx,cy,r,aMin,aMax,segments)",             dl_pathArcTo);
+    DLM("pathArcToFast",              "pathArcToFast(cx,cy,r,aMinOf12,aMaxOf12)",          dl_pathArcToFast);
+    DLM("pathEllipticalArcTo",        "pathEllipticalArcTo(cx,cy,rx,ry,rot,aMin,aMax,segments)", dl_pathEllipticalArcTo);
+    DLM("pathBezierCubicCurveTo",     "pathBezierCubicCurveTo(x2,y2,x3,y3,x4,y4,segments)",      dl_pathBezierCubicCurveTo);
+    DLM("pathBezierQuadraticCurveTo", "pathBezierQuadraticCurveTo(x2,y2,x3,y3,segments)",        dl_pathBezierQuadraticCurveTo);
+    DLM("pathRect",                   "pathRect(x,y,w,h,rounding,flags)",                  dl_pathRect);
+
+    DLM("pushClipRect",           "pushClipRect(x,y,w,h,intersect)",                        dl_pushClipRect);
+    DLM("pushClipRectFullScreen", "pushClipRectFullScreen()",                               dl_pushClipRectFullScreen);
+    DLM("popClipRect",            "popClipRect()",                                          dl_popClipRect);
+    DLM("getClipRectMin",         "getClipRectMin()",                                       dl_getClipRectMin);
+    DLM("getClipRectMax",         "getClipRectMax()",                                       dl_getClipRectMax);
+
+    DLM("channelsSplit",      "channelsSplit(count)",          dl_channelsSplit);
+    DLM("channelsMerge",      "channelsMerge()",               dl_channelsMerge);
+    DLM("channelsSetCurrent", "channelsSetCurrent(n)",         dl_channelsSetCurrent);
+
+#undef DLM
+
+    zym_popRoot(vm); // obj
+    zym_popRoot(vm); // ctx
+    return obj;
+}
+
+// --- module-level DrawList factories --------------------------------------
+
+ZymValue u_drawListHandle(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.drawList")) return ZYM_ERROR;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (!dl) { zym_runtimeError(vm, "ui.drawList: no current draw list"); return ZYM_ERROR; }
+    return makeDrawListInstance(vm, dl);
+}
+
+ZymValue u_backgroundDrawList(ZymVM* vm, ZymValue) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.backgroundDrawList: no active ImGui context (call inside ui.frame)");
+        return ZYM_ERROR;
+    }
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    if (!dl) return zym_newNull();
+    return makeDrawListInstance(vm, dl);
+}
+
+ZymValue u_foregroundDrawList(ZymVM* vm, ZymValue) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.foregroundDrawList: no active ImGui context (call inside ui.frame)");
+        return ZYM_ERROR;
+    }
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    if (!dl) return zym_newNull();
+    return makeDrawListInstance(vm, dl);
+}
+
 } // namespace
 
 // ---- module assembly -----------------------------------------------------
@@ -2992,6 +3597,9 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     MOD(frame,     "frame(win, body)",  u_frame)
     MOD(lastError, "lastError()",       u_lastError)
+    MOD(silent,           "silent(on)",           u_silent)
+    MOD(setErrorLogging,  "setErrorLogging(on)",  u_setErrorLogging)
+    MOD(setErrorTooltip,  "setErrorTooltip(on)",  u_setErrorTooltip)
 
     // window: 2-arg (name, body) or 3-arg (name, flags, body) via dispatcher
     ZymValue window2 = zym_createNativeClosure(vm, "window(name, body)",        (void*)u_window,      context);
@@ -3395,6 +4003,12 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(drawTriangle,       "drawTriangle(x1,y1,x2,y2,x3,y3, color)",    u_drawTriangle)
     MOD(drawTriangleFilled, "drawTriangleFilled(x1,y1,x2,y2,x3,y3, c)",  u_drawTriangleFilled)
 
+    // PR 3: DrawList handle factories — return a DrawList map handle
+    // bound to the window draw list / viewport background / foreground.
+    MOD(drawList,           "drawList()",            u_drawListHandle)
+    MOD(backgroundDrawList, "backgroundDrawList()",  u_backgroundDrawList)
+    MOD(foregroundDrawList, "foregroundDrawList()",  u_foregroundDrawList)
+
     // position / state helpers
     MOD(getCursorPos, "getCursorPos()", u_getCursorPos)
     MOD(getMousePos,  "getMousePos()",  u_getMousePos)
@@ -3596,6 +4210,9 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "setNextWindowPos",  setNextWindowPos);
     zym_mapSet(vm, obj, "setNextWindowSize", setNextWindowSize);
     zym_mapSet(vm, obj, "lastError",         lastError);
+    zym_mapSet(vm, obj, "silent",            silent);
+    zym_mapSet(vm, obj, "setErrorLogging",   setErrorLogging);
+    zym_mapSet(vm, obj, "setErrorTooltip",   setErrorTooltip);
 
     // ImGuiWindowFlags constants — exposed as plain integers so scripts
     // can OR them together for `UI.window(name, flags, body)`. Subset
@@ -3718,6 +4335,24 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "drawText",          drawText);
     zym_mapSet(vm, obj, "drawTriangle",      drawTriangle);
     zym_mapSet(vm, obj, "drawTriangleFilled",drawTriangleFilled);
+    zym_mapSet(vm, obj, "drawList",           drawList);
+    zym_mapSet(vm, obj, "backgroundDrawList", backgroundDrawList);
+    zym_mapSet(vm, obj, "foregroundDrawList", foregroundDrawList);
+
+    // ImDrawFlags_* constants for AddRect / AddRectFilled / AddPolyline /
+    // PathStroke / PathRect rounding-corner and closed-shape selection.
+    zym_mapSet(vm, obj, "DRAW_NONE",                       zym_newNumber(0));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_TOP_LEFT",     zym_newNumber(1 << 4));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_TOP_RIGHT",    zym_newNumber(1 << 5));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_BOTTOM_LEFT",  zym_newNumber(1 << 6));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_BOTTOM_RIGHT", zym_newNumber(1 << 7));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_NONE",         zym_newNumber(1 << 8));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_TOP",          zym_newNumber((1 << 4) | (1 << 5)));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_BOTTOM",       zym_newNumber((1 << 6) | (1 << 7)));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_LEFT",         zym_newNumber((1 << 4) | (1 << 6)));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_RIGHT",        zym_newNumber((1 << 5) | (1 << 7)));
+    zym_mapSet(vm, obj, "DRAW_ROUND_CORNERS_ALL",          zym_newNumber((1 << 4) | (1 << 5) | (1 << 6) | (1 << 7)));
+    zym_mapSet(vm, obj, "DRAW_CLOSED",                     zym_newNumber(1 << 9));
     zym_mapSet(vm, obj, "getCursorPos",      getCursorPos);
     zym_mapSet(vm, obj, "getMousePos",       getMousePos);
     zym_mapSet(vm, obj, "framerate",         framerate);
@@ -4025,6 +4660,10 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_popRoot(vm); // framerate
     zym_popRoot(vm); // getMousePos
     zym_popRoot(vm); // getCursorPos
+    // PR 3 DrawList factories (pushed between drawTriangleFilled and getCursorPos)
+    zym_popRoot(vm); // foregroundDrawList
+    zym_popRoot(vm); // backgroundDrawList
+    zym_popRoot(vm); // drawList
     zym_popRoot(vm); // drawTriangleFilled
     zym_popRoot(vm); // drawTriangle
     zym_popRoot(vm); // drawText
@@ -4112,8 +4751,10 @@ ZymValue nativeUi_create(ZymVM* vm) {
     // text family (7: bullet, bulletText, labelText, textDisabled, textWrapped, textColored, text)
     zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
     zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // setNextWindowSize, setNextWindowPos, window dispatcher, window3, window2, lastError, frame
+    // setNextWindowSize, setNextWindowPos, window dispatcher, window3, window2,
+    // setErrorTooltip, setErrorLogging, silent, lastError, frame
     zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
     zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
     // context
     zym_popRoot(vm);

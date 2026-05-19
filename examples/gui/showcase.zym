@@ -1,509 +1,1373 @@
-// ZYM UI showcase — a real mini-app built on the Slice 1 primitives.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Anatole DP
 //
-// This is not a binding tour. It's a small, functional task tracker
-// that uses the ImGui-via-ZYM surface to do something real:
+// ZYM UI SHOWCASE v2 — full DrawList API, custom widgets, expanded drawing modes
 //
-//   * add tasks via a modal popup (button family, input text, modal,
-//     scoped containers, ref convention via Buffer + single-elem list)
-//   * list / filter / complete tasks (table, combo, checkbox, selectable,
-//     popup context menu, disabled subtree)
-//   * track completion stats over time (plot lines / histogram fed from
-//     actual app state, progress bar)
-//   * draw a custom "card" panel via drawList primitives (real layout,
-//     not a demo grid)
-//   * theme the canvas via a colorPicker that drives draw colors
-//   * full menu bar with file / edit / view actions wired to app state
-//   * status bar with framerate + counters
-//   * keyboard-style confirmation modal on "clear completed"
-//
-// Every widget here serves the app — nothing is in this file purely
-// to "demonstrate the binding exists." For a tour of every binding
-// see `examples/gui/widgets.zym`.
-//
-// Manual run only — needs a display, so not wired into runAll.sh.
-//
-// Usage:
-//   zym run examples/gui/showcase.zym
+// Pages:
+//   1. Widgets      — every input/display primitive + DnD
+//   2. Layout       — containers, groups, scroll, trees, tabs
+//   3. Data         — animated plots, sortable/filterable/DnD table
+//   4. Drawing      — 8 parametric drawing modes using DrawList API
+//   5. Custom       — hand-crafted widgets: knob, toggle, radial progress,
+//                     bezier editor, radar chart, sparkline, gradient card
+//   6. Theme        — live accent/rounding/density editor
+//   7. About        — perf metrics, runtime info
 
-var win = SDL.createWindow("zym tasks", 960, 640, { resizable: true })
-if (win == null) { print("createWindow failed: %v", SDL.lastError()); return }
+var win = SDL.createWindow("zym ui showcase", 1280, 800, { resizable: true })
+if (win == null) { print("failed: %v", SDL.lastError()); return }
 
-// ============================================================== state ==
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
 
-// Tasks are stored as a parallel-list "table": one row per task,
-// each row is [title, priority, category, completed].
-//
-//   priority : 0=low 1=med 2=high
-//   category : index into categories
-//   completed: bool
+var accent   = [[0.38, 0.72, 0.98, 1.0]]
+var rounding = [8.0]
+var density  = [1]
 
-var categories = ["work", "personal", "shopping", "learning"]
-var prio_names = ["low", "med", "high"]
-
-var task_titles    = []
-var task_prios     = []
-var task_cats      = []
-var task_done      = []
-
-// Seed a few tasks so the app has content on first launch.
-func seedTask(title, prio, cat, done) {
-    push(task_titles, title)
-    push(task_prios,  prio)
-    push(task_cats,   cat)
-    push(task_done,   done)
+var mix = func(a, b, t) {
+    return [a[0]*(1-t)+b[0]*t, a[1]*(1-t)+b[1]*t, a[2]*(1-t)+b[2]*t, a[3]*(1-t)+b[3]*t]
 }
-seedTask("write release notes",      2, 0, false)
-seedTask("review PR #214",           1, 0, true)
-seedTask("buy coffee beans",         0, 2, false)
-seedTask("study imgui drawlist API", 1, 3, true)
-seedTask("fix segfault in batch 7",  2, 0, false)
-seedTask("call mom",                 1, 1, false)
+var black = [0,0,0,1]
+var white = [1,1,1,1]
 
-// ---- ui state refs ---------------------------------------------------
-
-var new_title_buf = Buffer.new(128)
-var new_prio      = [1]
-var new_cat       = [0]
-
-var filter_cat    = [0]      // 0 = "all", 1..N = categories[N-1]
-var filter_items  = ["all", "work", "personal", "shopping", "learning"]
-var filter_prio   = [0]      // 0 = any, 1=low, 2=med, 3=high
-var filter_prio_items = ["any priority", "low", "med", "high"]
-var hide_done     = [false]
-
-var theme_accent  = [0.30, 0.65, 0.95, 1.0]
-var theme_bg      = [0.12, 0.14, 0.18, 1.0]
-var theme_warn    = [0.95, 0.60, 0.20, 1.0]
-
-// Completion history: ratio of done/total recorded once per second.
-// Drives the plotLines + plotHistogram + progressBar widgets.
-var history_done  = []
-var history_total = []
-var history_last_t = 0.0
-
-// ---- modal/popup triggers --------------------------------------------
-
-var want_add_modal     = false
-var want_clear_confirm = false
-var pending_delete_idx = -1
-var done_flag          = false
-
-// ============================================================ helpers ==
-
-func taskCount() {
-    return length(task_titles)
+var buildColors = func() {
+    var ac = accent[0]
+    var ah = mix(ac, white, 0.18)
+    var aa = mix(ac, black, 0.18)
+    var dim = mix(ac, black, 0.55)
+    return {
+        WindowBg:              [0.06, 0.07, 0.09, 1.0],
+        ChildBg:               [0.09, 0.10, 0.13, 1.0],
+        PopupBg:               [0.10, 0.11, 0.15, 0.98],
+        Border:                [1.0, 1.0, 1.0, 0.06],
+        BorderShadow:          [0,0,0,0],
+        Text:                  [0.93, 0.95, 0.98, 1.0],
+        TextDisabled:          [0.48, 0.52, 0.60, 1.0],
+        TextSelectedBg:        mix(ac, black, 0.45),
+        FrameBg:               [1.0, 1.0, 1.0, 0.04],
+        FrameBgHovered:        [1.0, 1.0, 1.0, 0.08],
+        FrameBgActive:         mix([1,1,1,0.10], ac, 0.35),
+        TitleBg:               [0.07, 0.08, 0.11, 1.0],
+        TitleBgActive:         [0.10, 0.11, 0.15, 1.0],
+        TitleBgCollapsed:      [0.05, 0.06, 0.09, 1.0],
+        MenuBarBg:             [0.07, 0.08, 0.11, 1.0],
+        ScrollbarBg:           [0,0,0,0],
+        ScrollbarGrab:         [1,1,1,0.08],
+        ScrollbarGrabHovered:  [1,1,1,0.14],
+        ScrollbarGrabActive:   ac,
+        CheckMark:             ac,
+        CheckboxSelectedBg:    dim,
+        SliderGrab:            ac,
+        SliderGrabActive:      aa,
+        Button:                [1,1,1,0.05],
+        ButtonHovered:         mix([1,1,1,0.08], ac, 0.55),
+        ButtonActive:          ac,
+        Header:                mix(ac, black, 0.55),
+        HeaderHovered:         mix(ac, black, 0.30),
+        HeaderActive:          ac,
+        Separator:             [1,1,1,0.07],
+        SeparatorHovered:      ah,
+        SeparatorActive:       ac,
+        ResizeGrip:            [1,1,1,0.04],
+        ResizeGripHovered:     ah,
+        ResizeGripActive:      ac,
+        Tab:                   [0,0,0,0],
+        TabHovered:            mix(ac, black, 0.35),
+        TabSelected:           ac,
+        TabSelectedOverline:   ac,
+        TabDimmed:             [0,0,0,0],
+        TabDimmedSelected:     mix(ac, black, 0.50),
+        PlotLines:             ac,
+        PlotLinesHovered:      ah,
+        PlotHistogram:         ac,
+        PlotHistogramHovered:  ah,
+        TableHeaderBg:         [0.10, 0.11, 0.15, 1.0],
+        TableBorderStrong:     [1,1,1,0.07],
+        TableBorderLight:      [1,1,1,0.03],
+        TableRowBg:            [0,0,0,0],
+        TableRowBgAlt:         [1,1,1,0.02],
+        NavCursor:             ac,
+        ModalWindowDimBg:      [0,0,0,0.55],
+    }
 }
 
-func doneCount() {
-    var n = 0
+var buildVars = func() {
+    var fp = [8.0, 5.0]; var is = [8.0, 5.0]
+    if (density[0] == 1) { fp = [12.0, 8.0]; is = [10.0, 7.0] }
+    if (density[0] == 2) { fp = [16.0, 11.0]; is = [14.0, 10.0] }
+    var r = rounding[0]
+    return {
+        WindowRounding: r, ChildRounding: r, FrameRounding: r*0.6,
+        PopupRounding: r, ScrollbarRounding: r, GrabRounding: r*0.6,
+        TabRounding: r*0.5, TabBarOverlineSize: 2.0,
+        WindowPadding: [20.0, 16.0], FramePadding: fp,
+        CellPadding: [10.0, 6.0], ItemSpacing: is,
+        ItemInnerSpacing: [8.0, 6.0], IndentSpacing: 18.0,
+        ScrollbarSize: 10.0, GrabMinSize: 10.0,
+        WindowBorderSize: 0.0, FrameBorderSize: 0.0,
+        ChildBorderSize: 0.0, PopupBorderSize: 1.0,
+        SeparatorTextBorderSize: 1.0,
+        SeparatorTextAlign: [0.0, 0.5],
+        SeparatorTextPadding: [18.0, 6.0],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+var packColor = func(c) { return UI.color(c[0]*255, c[1]*255, c[2]*255, c[3]*255) }
+var secHeader = func(title, sub) {
+    UI.separatorText(title)
+    if (sub != "") { UI.textDisabled(sub) }
+    UI.dummy(0, 4)
+}
+
+var PI  = 3.14159265358979
+var PI2 = PI * 2.0
+
+var hsvToRgb = func(h, s, v) {
+    var i = floor(h * 6); var f = h*6-i
+    var p = v*(1-s); var q = v*(1-f*s); var t = v*(1-(1-f)*s)
+    var m = i % 6
+    if (m == 0) { return [v,t,p,1] } if (m == 1) { return [q,v,p,1] }
+    if (m == 2) { return [p,v,t,1] } if (m == 3) { return [p,q,v,1] }
+    if (m == 4) { return [t,p,v,1] } return [v,p,q,1]
+}
+
+var pushSample = func(buf, v) {
+    var i = 0; var n = length(buf)-1
+    while (i < n) { buf[i] = buf[i+1]; i++ }
+    buf[n] = v
+}
+
+// ---------------------------------------------------------------------------
+// Shared state
+// ---------------------------------------------------------------------------
+
+var rng        = Random.create()
+var clockStart = Time.clock()
+var drawTime   = 0.0
+var frame      = 0
+var fps_hist   = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+var lastClock  = Time.clock()
+
+// Widgets page
+var sliderI   = [42]; var sliderF = [0.73]; var dragI = [10]; var dragF = [3.14]
+var checkA    = [true]; var checkB = [false]; var checkC = [true]
+var radio     = [0]
+var combo1    = [0]; var combo1Items = ["Option A","Option B","Option C","Option D","Option E"]
+var textBuf   = Buffer.new(256); var mlBuf = Buffer.new(1024)
+var colorRef  = [0.38, 0.72, 0.98, 1.0]
+var vec2ref   = [0.5, 0.5]; var vec3ref = [1.0, 0.5, 0.0]
+var angleRef  = [0.0]; var progress = [0.0]
+var listIdx   = [0]; var listItems = ["Apple","Banana","Cherry","Date","Elderberry","Fig","Grape"]
+var showModal = false; var modalResult = ""; var modalInput = Buffer.new(128)
+var dndLeft   = ["Sword","Shield","Potion","Bow","Arrow"]
+var dndRight  = ["Helmet","Boots","Ring"]
+
+// Data page
+var signal1 = []; var signal2 = []; var signal3 = []
+var si = 0; while (si < 64) { push(signal1,0); push(signal2,0); push(signal3,0); si++ }
+var lastTick = Time.clock(); var tickRate = 0.1
+
+var tableData = [
+    { name:"Alpha",   type:"module",  size:42,  status:"active",   score:98 },
+    { name:"Beta",    type:"service", size:128, status:"idle",     score:74 },
+    { name:"Gamma",   type:"module",  size:17,  status:"active",   score:85 },
+    { name:"Delta",   type:"worker",  size:256, status:"error",    score:12 },
+    { name:"Epsilon", type:"service", size:64,  status:"active",   score:91 },
+    { name:"Zeta",    type:"module",  size:33,  status:"idle",     score:67 },
+    { name:"Eta",     type:"worker",  size:512, status:"active",   score:88 },
+    { name:"Theta",   type:"service", size:96,  status:"degraded", score:45 },
+    { name:"Iota",    type:"module",  size:8,   status:"active",   score:95 },
+    { name:"Kappa",   type:"worker",  size:384, status:"idle",     score:62 },
+]
+var tableSearch = Buffer.new(64); var tableFilter = [0]
+var tableTypes  = ["all","module","service","worker"]
+var tableSort   = [0]; var tableSortDir = [1]; var tableSelected = -1
+var dndDragIdx  = -1; var dndDropIdx = -1
+
+// Drawing page
+var drawMode   = [0]
+var drawModes  = ["Bezier ribbons","Lissajous","Spiral","Rose curve","Grid wave","Particles","Tunnel","Voronoi"]
+var drawColor1 = [0.38, 0.72, 0.98, 1.0]; var drawColor2 = [0.98, 0.42, 0.72, 1.0]
+var drawParam1 = [2.0]; var drawParam2 = [3.0]; var drawParam3 = [0.5]
+var drawSpeed  = [0.3]; var drawThick = [1.5]
+
+var particles = []
+var pii = 0
+while (pii < 100) {
+    push(particles, {
+        x: rng.randfRange(0,1), y: rng.randfRange(0,1),
+        vx: rng.randfRange(-0.003,0.003), vy: rng.randfRange(-0.003,0.003),
+        r: rng.randfRange(0.003,0.009), hue: rng.randfRange(0,1),
+    })
+    pii++
+}
+
+// Custom widgets page
+var knobVal      = [0.65]
+var toggleVal    = [true]
+var radialProg   = [0.72]
+var radarData    = [0.8, 0.6, 0.9, 0.4, 0.7, 0.5]
+var radarLabels  = ["STR","DEX","INT","WIS","CON","CHA"]
+var sparkData    = [12,18,14,22,19,28,24,31,27,35,30,38,33,41,36,44,39,47,42,50,45,52,48,55]
+var bezCtrlPts   = [[100.0,200.0],[180.0,80.0],[300.0,80.0],[380.0,200.0]]
+var bezDragIdx   = -1
+var gradCard1    = [0.20, 0.60, 0.95, 1.0]; var gradCard2 = [0.70, 0.20, 0.90, 1.0]
+var gradCard3    = [0.95, 0.40, 0.20, 1.0]; var gradCard4 = [0.20, 0.90, 0.60, 1.0]
+
+// ---------------------------------------------------------------------------
+// Shared sort helper
+// ---------------------------------------------------------------------------
+
+var cmpStr = func(a, b) {
+    var la = length(a); var lb = length(b); var n = la; if (lb<n){n=lb}
     var i = 0
-    while (i < length(task_done)) {
-        if (task_done[i]) { n = n + 1 }
-        i = i + 1
+    while (i < n) {
+        var ca = charCodeAt(a,i); var cb = charCodeAt(b,i)
+        if (ca<cb){return -1} if (ca>cb){return 1}
+        i++
     }
-    return n
+    if (la<lb){return -1} if (la>lb){return 1} return 0
 }
 
-func pendingCount() {
-    return taskCount() - doneCount()
-}
-
-// Filter predicate: returns true if task `i` should be visible
-// given the current filter/hide_done settings.
-func taskVisible(i) {
-    if (hide_done[0] and task_done[i]) { return false }
-    if (filter_cat[0] != 0) {
-        var want_cat = filter_cat[0] - 1
-        if (task_cats[i] != want_cat) { return false }
-    }
-    if (filter_prio[0] != 0) {
-        var want_prio = filter_prio[0] - 1
-        if (task_prios[i] != want_prio) { return false }
-    }
-    return true
-}
-
-// "Delete" by rebuilding the parallel lists without the matched index.
-// Zym doesn't ship list.removeAt, so this is the idiomatic approach
-// for the showcase — and it doubles as a "scripts can compose freely"
-// demo since the filter row uses the same shape.
-func removeTask(idx) {
-    var new_t = []
-    var new_p = []
-    var new_c = []
-    var new_d = []
-    var i = 0
-    while (i < length(task_titles)) {
-        if (i != idx) {
-            push(new_t, task_titles[i])
-            push(new_p, task_prios[i])
-            push(new_c, task_cats[i])
-            push(new_d, task_done[i])
+var sortTable = func() {
+    var col = tableSort[0]; var asc = tableSortDir[0] == 1
+    var n = length(tableData); var i = 1
+    while (i < n) {
+        var cur = tableData[i]; var j = i-1
+        while (j >= 0) {
+            var a = tableData[j]; var cmp = 0
+            if (col==0){cmp=cmpStr(a.name,cur.name)}
+            else{if(col==1){cmp=cmpStr(a.type,cur.type)}
+            else{if(col==2){if(a.size<cur.size){cmp=-1}else{if(a.size>cur.size){cmp=1}}}
+            else{if(col==3){cmp=cmpStr(a.status,cur.status)}
+            else{if(a.score<cur.score){cmp=-1}else{if(a.score>cur.score){cmp=1}}}}}}
+            if (!asc) { cmp = -cmp }
+            if (cmp <= 0) { break }
+            tableData[j+1] = a; j--
         }
-        i = i + 1
+        tableData[j+1] = cur; i++
     }
-    task_titles = new_t
-    task_prios  = new_p
-    task_cats   = new_c
-    task_done   = new_d
 }
 
-func clearCompleted() {
-    var new_t = []
-    var new_p = []
-    var new_c = []
-    var new_d = []
-    var i = 0
-    while (i < length(task_titles)) {
-        if (!task_done[i]) {
-            push(new_t, task_titles[i])
-            push(new_p, task_prios[i])
-            push(new_c, task_cats[i])
-            push(new_d, task_done[i])
+var statusColor = func(s) {
+    if (s=="active")   { return [0.30,0.80,0.50,1] }
+    if (s=="idle")     { return [0.48,0.52,0.60,1] }
+    if (s=="error")    { return [0.85,0.32,0.32,1] }
+    if (s=="degraded") { return [0.90,0.65,0.20,1] }
+    return [0.5,0.5,0.5,1]
+}
+
+// ---------------------------------------------------------------------------
+// Page: Widgets
+// ---------------------------------------------------------------------------
+
+var pageWidgets = func() {
+    var ws = win.getSize()
+    var hw = (ws.w - 80) / 2
+
+    UI.child("wl", { w: hw, h: 0, border: false }, func() {
+        secHeader("Buttons & Toggles", "")
+
+        if (UI.button("Regular")) {}
+        UI.sameLine()
+        if (UI.smallButton("Small")) {}
+        UI.sameLine()
+        if (UI.arrowButton("al",0)){} UI.sameLine()
+        if (UI.arrowButton("ar",1)){} UI.sameLine()
+        if (UI.arrowButton("au",2)){} UI.sameLine()
+        if (UI.arrowButton("ad",3)){}
+
+        UI.dummy(0,4)
+        UI.checkbox("Option A", checkA)
+        UI.checkbox("Option B", checkB)
+        UI.checkbox("Option C", checkC)
+        UI.dummy(0,4)
+        UI.radioButton("Radio 0", radio[0]==0); if(UI.isItemClicked()){radio[0]=0}
+        UI.sameLine()
+        UI.radioButton("Radio 1", radio[0]==1); if(UI.isItemClicked()){radio[0]=1}
+        UI.sameLine()
+        UI.radioButton("Radio 2", radio[0]==2); if(UI.isItemClicked()){radio[0]=2}
+        UI.dummy(0,4)
+        UI.withStyleColor({ Button:accent[0], ButtonHovered:mix(accent[0],white,0.18), ButtonActive:mix(accent[0],black,0.18) }, func() {
+            if (UI.button("Accent", 120, 0)) {}
+            UI.sameLine()
+            if (UI.button("Modal...", 100, 0)) { showModal = true }
+        })
+
+        UI.dummy(0,8)
+        secHeader("Sliders & Drags", "")
+        UI.sliderInt("Integer",   sliderI, 0, 100)
+        UI.sliderFloat("Float",   sliderF, 0.0, 1.0, "%.3f")
+        UI.sliderAngle("Angle",   angleRef, -180.0, 180.0)
+        UI.dragInt("Drag int",    dragI, 1, -100, 100)
+        UI.dragFloat("Drag float",dragF, 0.01, 0.0, 10.0)
+        UI.sliderFloat2("Vec2",   vec2ref, 0.0, 1.0)
+        UI.sliderFloat3("Vec3",   vec3ref, 0.0, 1.0)
+
+        UI.dummy(0,8)
+        secHeader("Progress", "")
+        progress[0] = progress[0] + 0.002
+        if (progress[0] > 1.0) { progress[0] = 0.0 }
+        UI.progressBar(progress[0], -1, 0, str(floor(progress[0]*100)) + "%")
+        UI.progressBar(0.42, -1, 0, "CPU 42%")
+        UI.progressBar(0.71, -1, 0, "MEM 71%")
+
+        UI.dummy(0,8)
+        secHeader("Drag & Drop", "drag items between lists")
+
+        UI.child("dnd-l", { w: 150, h: 130, border: true }, func() {
+            UI.textDisabled("Inventory")
+            UI.separator()
+            var di = 0
+            while (di < length(dndLeft)) {
+                var item = dndLeft[di]
+                UI.id("dl-"+str(di), func() {
+                    UI.selectable(item, false)
+                    if (UI.beginDragDropSource()) {
+                        UI.setDragDropPayload("ITEM","L:"+str(di))
+                        UI.text("  "+item)
+                        UI.endDragDropSource()
+                    }
+                })
+                di++
+            }
+            if (UI.beginDragDropTarget()) {
+                var p = UI.acceptDragDropPayload("ITEM")
+                if (p != null and startsWith(p,"R:")) {
+                    var idx = num(slice(p,2,length(p)))
+                    if (idx >= 0 and idx < length(dndRight)) { push(dndLeft,dndRight[idx]); remove(dndRight,idx) }
+                }
+                UI.endDragDropTarget()
+            }
+        })
+        UI.sameLine()
+        UI.child("dnd-r", { w: 150, h: 130, border: true }, func() {
+            UI.textDisabled("Equipped")
+            UI.separator()
+            var di = 0
+            while (di < length(dndRight)) {
+                var item = dndRight[di]
+                UI.id("dr-"+str(di), func() {
+                    UI.selectable(item, false)
+                    if (UI.beginDragDropSource()) {
+                        UI.setDragDropPayload("ITEM","R:"+str(di))
+                        UI.text("  "+item)
+                        UI.endDragDropSource()
+                    }
+                })
+                di++
+            }
+            if (UI.beginDragDropTarget()) {
+                var p = UI.acceptDragDropPayload("ITEM")
+                if (p != null and startsWith(p,"L:")) {
+                    var idx = num(slice(p,2,length(p)))
+                    if (idx >= 0 and idx < length(dndLeft)) { push(dndRight,dndLeft[idx]); remove(dndLeft,idx) }
+                }
+                UI.endDragDropTarget()
+            }
+        })
+    })
+
+    UI.sameLine()
+
+    UI.child("wr", { w: 0, h: 0, border: false }, func() {
+        secHeader("Text Inputs", "")
+        UI.inputText("Single line", textBuf)
+        UI.inputTextMultiline("Multi-line", mlBuf, -1, 120)
+
+        UI.dummy(0,8)
+        secHeader("Color", "")
+        UI.colorEdit("Edit RGBA", colorRef)
+        UI.colorPicker("Picker", colorRef)
+
+        UI.dummy(0,8)
+        secHeader("Combo & List", "")
+        UI.combo("Combo", combo1, combo1Items)
+        UI.dummy(0,4)
+        UI.listBox("List", listIdx, listItems)
+
+        UI.dummy(0,8)
+        secHeader("Tooltips & Context", "")
+        UI.button("Hover (rich)")
+        if (UI.isItemHovered()) {
+            UI.tooltipScope(func() {
+                UI.text("Rich tooltip")
+                UI.separator()
+                UI.textDisabled("Any widget can go here")
+                UI.progressBar(0.65, 160, 0, "progress")
+            })
         }
-        i = i + 1
+        UI.sameLine()
+        UI.button("Hover (simple)")
+        if (UI.isItemHovered()) { UI.tooltip("Simple tooltip") }
+
+        UI.child("ctx-box", { w:0, h:50, border:true }, func() {
+            UI.setCursorPos(12, 16)
+            UI.textDisabled("right-click me")
+        })
+        UI.popupContextWindow("ctx-w", func() {
+            UI.text("Context menu")
+            UI.separator()
+            if (UI.menuItem("Action A")) {}
+            if (UI.menuItem("Action B")) {}
+        })
+    })
+
+    if (showModal) { UI.openPopup("w-modal"); showModal = false }
+    UI.popupModal("w-modal", func() {
+        UI.text("Modal dialog")
+        UI.separator()
+        UI.textWrapped("Type something:")
+        UI.dummy(0,4)
+        UI.inputText("##mi", modalInput)
+        UI.dummy(0,8)
+        UI.withStyleColor({ Button:accent[0], ButtonHovered:mix(accent[0],white,0.18), ButtonActive:mix(accent[0],black,0.18) }, func() {
+            if (UI.button("Confirm", 100, 0)) { modalResult = modalInput.toUtf8(); modalInput.fill(0); UI.closeCurrentPopup() }
+        })
+        UI.sameLine()
+        if (UI.button("Cancel", 100, 0)) { UI.closeCurrentPopup() }
+        if (modalResult != "") { UI.sameLine(0,16); UI.textColored(accent[0], "Last: "+modalResult) }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Page: Layout
+// ---------------------------------------------------------------------------
+
+var pageLayout = func() {
+    var ws = win.getSize()
+    var hw = (ws.w - 80) / 2
+    var disableInputs = [false]
+
+    UI.child("ll", { w: hw, h: 340, border: false }, func() {
+        secHeader("Scrollable list", "30 items")
+        UI.child("scroll", { w: 0, h: 310, border: true }, func() {
+            var i = 0
+            while (i < 30) {
+                UI.id(i, func() {
+                    UI.textDisabled(str(i+1)+".")
+                    UI.sameLine()
+                    UI.text("Item "+str(i+1)+" — scroll to see more content here")
+                    UI.sameLine()
+                    UI.withStyleColor({ Button: mix(accent[0],black,0.5) }, func() { UI.smallButton("pick") })
+                })
+                i++
+            }
+        })
+    })
+    UI.sameLine()
+    UI.child("lr", { w: 0, h: 340, border: false }, func() {
+        secHeader("Groups & same-line", "")
+        UI.group(func() {
+            UI.text("Group A"); UI.separator()
+            UI.button("Btn 1"); UI.button("Btn 2"); UI.button("Btn 3")
+        })
+        UI.sameLine(0,24)
+        UI.group(func() {
+            UI.text("Group B"); UI.separator()
+            UI.button("Btn 4"); UI.button("Btn 5"); UI.button("Btn 6")
+        })
+        UI.sameLine(0,24)
+        UI.group(func() {
+            UI.text("Sliders"); UI.separator()
+            UI.sliderFloat("##sg1", [0.4], 0, 1)
+            UI.sliderFloat("##sg2", [0.6], 0, 1)
+            UI.sliderFloat("##sg3", [0.8], 0, 1)
+        })
+        UI.dummy(0,12)
+        secHeader("Indent levels", "")
+        UI.text("Level 0"); UI.indent()
+        UI.text("Level 1"); UI.indent()
+        UI.text("Level 2"); UI.indent()
+        UI.text("Level 3"); UI.unindent(); UI.unindent(); UI.unindent()
+        UI.dummy(0,12)
+        secHeader("Disabled region", "")
+        UI.checkbox("Enable inputs", disableInputs)
+        UI.disabled(!disableInputs[0], func() {
+            UI.inputText("##dis", Buffer.new(64))
+            UI.sliderFloat("##dis2", [0.5], 0, 1)
+            UI.button("Disabled btn")
+        })
+    })
+
+    UI.dummy(0,8)
+    secHeader("Trees & Headers", "")
+    UI.treeNode("Root", func() {
+        UI.treeNode("Child A", func() {
+            UI.bulletText("Leaf 1"); UI.bulletText("Leaf 2"); UI.bulletText("Leaf 3")
+        })
+        UI.treeNode("Child B", func() {
+            UI.treeNode("Grandchild", func() {
+                UI.bulletText("Deep leaf")
+                UI.sliderInt("##deep", [50], 0, 100)
+            })
+        })
+    })
+    UI.collapsingHeader("Collapsing header")
+    UI.dummy(0,8)
+    secHeader("Tab bar", "")
+    UI.tabBar("layout-tabs", func() {
+        UI.tabItem("Tab One", func() { UI.text("Content of Tab One"); UI.button("Action") })
+        UI.tabItem("Tab Two", func() { UI.text("Content of Tab Two"); UI.progressBar(0.55,-1,0,"55%") })
+        UI.tabItem("Tab Three", func() { UI.text("Content of Tab Three"); UI.checkbox("A checkbox",[true]) })
+        UI.tabItemButton("+")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Page: Data
+// ---------------------------------------------------------------------------
+
+var pageData = func() {
+    var ws = win.getSize()
+    var w3 = (ws.w - 100) / 3
+
+    UI.child("plots", { w:0, h:190, border:false }, func() {
+        UI.child("s1", { w:w3, h:180, border:true }, func() {
+            secHeader("Signal A", "sine + noise")
+            UI.plotLines("##sa", signal1, "", -2, 2)
+        })
+        UI.sameLine()
+        UI.child("s2", { w:w3, h:180, border:true }, func() {
+            secHeader("Signal B", "cosine")
+            UI.plotLines("##sb", signal2, "", -2, 2)
+        })
+        UI.sameLine()
+        UI.child("s3", { w:0, h:180, border:true }, func() {
+            secHeader("Signal C", "histogram")
+            UI.plotHistogram("##sc", signal3, "", 0, 3)
+        })
+    })
+
+    UI.dummy(0,6)
+    secHeader("Data table", "sortable · filterable · drag rows to reorder")
+
+    UI.setNextItemWidth(200); UI.inputText("##ts", tableSearch)
+    UI.sameLine(); UI.setNextItemWidth(130); UI.combo("##tf", tableFilter, tableTypes)
+    UI.sameLine()
+    if (UI.button("A→Z")) { tableSort[0]=0; tableSortDir[0]=1; sortTable() }
+    UI.sameLine()
+    if (UI.button("Z→A")) { tableSort[0]=0; tableSortDir[0]=-1; sortTable() }
+    UI.sameLine()
+    if (UI.button("Score↓")) { tableSort[0]=4; tableSortDir[0]=-1; sortTable() }
+    UI.dummy(0,4)
+
+    var tflags = UI.TABLE_RESIZABLE + UI.TABLE_REORDERABLE + UI.TABLE_HIDEABLE
+               + UI.TABLE_SORTABLE  + UI.TABLE_ROW_BG      + UI.TABLE_BORDERS_INNER_H
+               + UI.TABLE_BORDERS_OUTER_V + UI.TABLE_SIZING_STRETCH_PROP
+
+    UI.table("dtbl", 5, tflags, func() {
+        UI.tableSetupColumn("Name"); UI.tableSetupColumn("Type")
+        UI.tableSetupColumn("Size"); UI.tableSetupColumn("Status"); UI.tableSetupColumn("Score")
+        UI.tableHeadersRow()
+
+        var specs = UI.tableGetSortSpecs()
+        if (specs != null and length(specs) > 0) {
+            var s = specs[0]; tableSort[0] = s.column
+            tableSortDir[0] = s.direction == "asc" ? 1 : -1; sortTable()
+        }
+
+        var q = toLowerCase(tableSearch.toUtf8()); var i = 0
+        while (i < length(tableData)) {
+            var row = tableData[i]
+            var typeOk = tableFilter[0]==0 or row.type==tableTypes[tableFilter[0]]
+            var nameOk = q=="" or contains(toLowerCase(row.name+" "+row.type),q)
+            if (typeOk and nameOk) {
+                UI.tableNextRow(); UI.tableNextColumn()
+                UI.id(i, func() {
+                    if (UI.selectable(row.name, tableSelected==i)) { tableSelected = i }
+                    if (UI.beginDragDropSource()) {
+                        UI.setDragDropPayload("ROW", str(i))
+                        UI.text("⠿  "+row.name); UI.textDisabled(row.type+" · "+row.status)
+                        UI.endDragDropSource()
+                    }
+                    if (UI.beginDragDropTarget()) {
+                        var p = UI.acceptDragDropPayload("ROW")
+                        if (p != null) { dndDragIdx = num(p); dndDropIdx = i }
+                        UI.endDragDropTarget()
+                    }
+                })
+                UI.tableNextColumn(); UI.textDisabled(row.type)
+                UI.tableNextColumn(); UI.text(str(row.size)+" kb")
+                UI.tableNextColumn(); UI.textColored(statusColor(row.status), row.status)
+                UI.tableNextColumn()
+                var sc = row.score
+                var scCol = [0.85,0.32,0.32,1]
+                if (sc >= 50) { scCol = [0.90,0.65,0.20,1] }
+                if (sc >= 75) { scCol = [0.30,0.80,0.50,1] }
+                UI.textColored(scCol, str(sc))
+            }
+            i++
+        }
+    })
+
+    if (dndDragIdx >= 0 and dndDropIdx >= 0 and dndDragIdx != dndDropIdx) {
+        var tmp = tableData[dndDragIdx]; tableData[dndDragIdx] = tableData[dndDropIdx]; tableData[dndDropIdx] = tmp
+        dndDragIdx = -1; dndDropIdx = -1
     }
-    task_titles = new_t
-    task_prios  = new_p
-    task_cats   = new_c
-    task_done   = new_d
+
+    if (tableSelected >= 0 and tableSelected < length(tableData)) {
+        UI.dummy(0,6); var sel = tableData[tableSelected]
+        UI.child("rdet", { w:0, h:80, border:true }, func() {
+            secHeader("Selected: "+sel.name, sel.type+" · "+sel.status)
+            UI.progressBar(sel.score/100.0, 300, 0, "score: "+str(sel.score)+"%")
+        })
+    }
 }
 
-func addTaskFromBuffer() {
-    // Buffer.toUtf8() returns the buffer's bytes as a string, stripping
-    // trailing NULs added by InputText.
-    var title = new_title_buf.toUtf8()
-    if (length(title) == 0) { return false }
-    push(task_titles, title)
-    push(task_prios,  new_prio[0])
-    push(task_cats,   new_cat[0])
-    push(task_done,   false)
-    // Zero the bytes in place instead of `.clear()`, which would shrink
-    // the underlying buffer to size 0 and leave ImGui's inputText with
-    // no room to grow on the next edit. fill(0) keeps the capacity.
-    new_title_buf.fill(0)
-    return true
+// ---------------------------------------------------------------------------
+// Page: Drawing  (uses DrawList API throughout)
+// ---------------------------------------------------------------------------
+
+var pageDrawing = func() {
+    var ws = win.getSize()
+
+    UI.child("draw-ctrl", { w:260, h:0, border:true }, func() {
+        secHeader("Controls", "")
+        UI.combo("Mode", drawMode, drawModes)
+        UI.dummy(0,6)
+        UI.colorEdit("Color A", drawColor1)
+        UI.colorEdit("Color B", drawColor2)
+        UI.dummy(0,6)
+        UI.sliderFloat("Param 1", drawParam1, 0.5, 8.0, "%.1f")
+        UI.sliderFloat("Param 2", drawParam2, 0.5, 8.0, "%.1f")
+        UI.sliderFloat("Param 3", drawParam3, 0.0, 1.0, "%.2f")
+        UI.sliderFloat("Thickness", drawThick, 0.5, 6.0, "%.1f")
+        if (drawMode[0] == 5) {
+            UI.sliderFloat("Speed", drawSpeed, 0.0, 2.0, "%.2f")
+        }
+        UI.dummy(0,8)
+        UI.textDisabled("mode: "+drawModes[drawMode[0]])
+        UI.dummy(0,4); UI.separator(); UI.dummy(0,4)
+        UI.textDisabled("performance")
+        UI.plotLines("##fps", fps_hist, str(floor(fps_hist[length(fps_hist)-1]))+" fps", 0, 0)
+    })
+
+    UI.sameLine()
+
+    UI.child("draw-canvas", { w:0, h:0, border:true }, func() {
+        var p   = UI.getCursorPos()
+        var cw  = UI.getWindowWidth()  - 20
+        var ch  = UI.getWindowHeight() - 20
+        var cx  = p.x + cw/2; var cy = p.y + ch/2
+        var dl  = UI.drawList()
+        var t   = drawTime
+        var p1  = drawParam1[0]; var p2 = drawParam2[0]; var p3 = drawParam3[0]
+        var th  = drawThick[0]
+        var c1  = packColor(drawColor1); var c2 = packColor(drawColor2)
+        var mode = drawMode[0]
+
+        // Background
+        dl.addRectFilled(p.x, p.y, cw, ch, packColor([0.04,0.05,0.07,1]), 0.0, UI.DRAW_NONE)
+
+        switch (mode) {
+            case 0: {
+                // Bezier ribbons
+                var steps = 12; var i = 0
+                while (i < steps) {
+                    var frac = i / steps
+                    var off  = frac * ch * 0.8
+                    var hue  = (frac + t*0.05) % 1.0
+                    var col  = packColor(hsvToRgb(hue, 0.8, 0.9))
+                    var wave = sin(frac * PI2 * p1 + t * p2) * ch * 0.15 * p3
+                    dl.addBezierCubic(
+                        p.x,           p.y + off + wave,
+                        p.x + cw*0.33, p.y + off - wave*1.5,
+                        p.x + cw*0.66, p.y + off + wave*1.5,
+                        p.x + cw,      p.y + off - wave,
+                        col, th
+                    )
+                    i++
+                }
+                break
+            }
+            case 1: {
+                // Lissajous
+                var pts = []; var steps = 300; var si2 = 0
+                while (si2 <= steps) {
+                    var ang = si2 / steps * PI2
+                    push(pts, cx + cos(ang*p1 + t) * (cw*0.42))
+                    push(pts, cy + sin(ang*p2 + t*0.7) * (ch*0.42))
+                    si2++
+                }
+                var i2 = 0
+                while (i2 < length(pts) - 2) {
+                    var hue = (i2/length(pts) + t*0.08) % 1.0
+                    dl.addLine(pts[i2], pts[i2+1], pts[i2+2], pts[i2+3], packColor(hsvToRgb(hue,0.85,0.95)), th)
+                    i2 = i2 + 2
+                }
+                break
+            }
+            case 2: {
+                // Spiral
+                var steps = 800; var spx = cx; var spy = cy; var si3 = 0
+                while (si3 <= steps) {
+                    var r3 = si3 * 0.65 * p3
+                    var ang = si3 * 0.04 * p1
+                    var nx = cx + cos(ang + t*p2*0.3) * r3
+                    var ny = cy + sin(ang + t*p2*0.3) * r3
+                    if (si3 > 0) {
+                        dl.addLine(spx, spy, nx, ny, packColor(hsvToRgb((si3/steps+t*0.05)%1.0,0.9,0.95)), th)
+                    }
+                    spx = nx; spy = ny; si3++
+                }
+                break
+            }
+            case 3: {
+                // Rose curve
+                dl.pathClear()
+                var steps = 600; var si4 = 0
+                while (si4 <= steps) {
+                    var theta = si4/steps * PI2 * floor(p2)
+                    var r4 = cos(p1/p2 * theta + t*0.2) * min(cw,ch) * 0.42
+                    dl.pathLineTo(cx + cos(theta)*r4, cy + sin(theta)*r4)
+                    si4++
+                }
+                dl.pathStroke(c1, true, th, UI.DRAW_NONE)
+                dl.pathClear(); si4 = 0
+                while (si4 <= steps) {
+                    var theta = si4/steps*PI2*floor(p1) + PI/p2
+                    var r4 = cos(p2/p1*theta + t*0.3) * min(cw,ch) * 0.28
+                    dl.pathLineTo(cx + cos(theta)*r4, cy + sin(theta)*r4)
+                    si4++
+                }
+                dl.pathStroke(c2, true, th*0.7, UI.DRAW_NONE)
+                break
+            }
+            case 4: {
+                // Grid wave
+                var cols = floor(p1*4)+5; var rows = floor(p2*3)+4; var gi = 0
+                while (gi <= cols) {
+                    var gx = p.x + (gi/cols)*cw; var gj = 0
+                    while (gj <= rows) {
+                        var gy = p.y + (gj/rows)*ch
+                        var dx = sin(gj*0.5 + t*p1) * 14*p3
+                        var dy = cos(gi*0.5 + t*p2) * 14*p3
+                        if (gj > 0) {
+                            var pgy = p.y + ((gj-1)/rows)*ch
+                            dl.addLine(gx+dx, pgy+sin((gj-1)*0.5+t*p1)*14*p3, gx+dx, gy+dy, c1, th*0.7)
+                        }
+                        if (gi > 0) {
+                            var pgx = p.x + ((gi-1)/cols)*cw
+                            dl.addLine(pgx+cos((gi-1)*0.5+t*p2)*14*p3, gy+dy, gx+dx, gy+dy, c2, th*0.7)
+                        }
+                        gj++
+                    }
+                    gi++
+                }
+                break
+            }
+            case 5: {
+                // Particles
+                var dt = 1.0 / 60.0
+                var spd = drawSpeed[0]; var pri = 0
+                while (pri < length(particles)) {
+                    var pt = particles[pri]
+                    pt.x = pt.x + pt.vx*dt*60*spd; pt.y = pt.y + pt.vy*dt*60*spd
+                    if (pt.x<0 or pt.x>1) { pt.vx=-pt.vx; pt.x=pt.x<0?0:1 }
+                    if (pt.y<0 or pt.y>1) { pt.vy=-pt.vy; pt.y=pt.y<0?0:1 }
+                    pt.hue = (pt.hue + 0.001) % 1.0
+                    var sx = p.x+pt.x*cw; var sy = p.y+pt.y*ch
+                    dl.addCircleFilled(sx, sy, pt.r*cw, packColor(hsvToRgb(pt.hue,0.8,0.95)), 0)
+                    var prj = pri+1
+                    while (prj < length(particles)) {
+                        var pt2 = particles[prj]
+                        var ddx = pt.x-pt2.x; var ddy = pt.y-pt2.y
+                        var dist = sqrt(ddx*ddx+ddy*ddy)
+                        if (dist < 0.12) {
+                            dl.addLine(sx, sy, p.x+pt2.x*cw, p.y+pt2.y*ch,
+                                packColor([pt.hue,0.8,0.9,(0.12-dist)/0.12*0.5]), th*0.5)
+                        }
+                        prj++
+                    }
+                    particles[pri] = pt; pri++
+                }
+                break
+            }
+            case 6: {
+                // Tunnel
+                var rings = 18; var ri = 0
+                while (ri < rings) {
+                    var frac = ri/rings
+                    var r6 = (1.0-frac) * min(cw,ch) * 0.48
+                    var rot = t*p1*(1.0-frac)*0.5 + frac*PI/p2
+                    var sides = floor(p2*2)+3
+                    var hue = (frac + t*0.03) % 1.0
+                    dl.addNgon(cx, cy, r6, packColor(hsvToRgb(hue,0.8,0.9)), sides, th)
+                    if (ri % 3 == 0) {
+                        var si5 = 0
+                        while (si5 < sides) {
+                            var ang = rot + si5/sides * PI2
+                            dl.addLine(cx, cy, cx+cos(ang)*r6, cy+sin(ang)*r6,
+                                packColor(hsvToRgb(hue,0.6,0.4)), th*0.4)
+                            si5++
+                        }
+                    }
+                    ri++
+                }
+                break
+            }
+            default: {
+                // Voronoi
+                var seeds = floor(p2 * 3) + 4
+                var gsize = floor(p1 * 4) + 4
+                var seedPts = []; var vi = 0
+                while (vi < seeds) {
+                    var ang = vi/seeds*PI2 + t*0.1*(vi%3==0?1:-1)
+                    var r7 = min(cw,ch)*0.3 + sin(t*0.3+vi)*min(cw,ch)*0.1
+                    push(seedPts, { x:cx+cos(ang)*r7, y:cy+sin(ang)*r7, hue:vi/seeds })
+                    vi++
+                }
+                var gxi = 0
+                while (gxi*gsize < cw) {
+                    var gyi = 0
+                    while (gyi*gsize < ch) {
+                        var sx = p.x+gxi*gsize+gsize/2; var sy = p.y+gyi*gsize+gsize/2
+                        var minDist = 99999.0; var minHue = 0.0; var si6 = 0
+                        while (si6 < seeds) {
+                            var ddx = sx-seedPts[si6].x; var ddy = sy-seedPts[si6].y
+                            var d = ddx*ddx+ddy*ddy
+                            if (d < minDist) { minDist = d; minHue = seedPts[si6].hue }
+                            si6++
+                        }
+                        var intensity = 1.0 - (minDist / (min(cw,ch)*0.35 * min(cw,ch)*0.35))
+                        if (intensity < 0) { intensity = 0 }
+                        dl.addRectFilled(sx-gsize/2, sy-gsize/2, gsize, gsize,
+                            packColor(hsvToRgb((minHue+t*0.05)%1.0,0.7,intensity*0.9)), 0.0, UI.DRAW_NONE)
+                        gyi++
+                    }
+                    gxi++
+                }
+                var si7 = 0
+                while (si7 < seeds) {
+                    dl.addCircleFilled(seedPts[si7].x, seedPts[si7].y, 4, packColor([1,1,1,0.8]), 0)
+                    si7++
+                }
+                break
+            }
+        }
+
+        // Crosshair
+        dl.addLine(cx-8, cy, cx+8, cy, packColor([1,1,1,0.12]), 1.0)
+        dl.addLine(cx, cy-8, cx, cy+8, packColor([1,1,1,0.12]), 1.0)
+
+        UI.dummy(cw, ch)
+    })
 }
 
-// Pack a [r,g,b,a] float ref into a 32-bit RGBA via UI.color.
-func packColor(c) {
-    return UI.color(c[0] * 255.0, c[1] * 255.0, c[2] * 255.0, c[3] * 255.0)
+// ---------------------------------------------------------------------------
+// Page: Custom Widgets
+// ---------------------------------------------------------------------------
+
+var pageCustom = func() {
+    var ws  = win.getSize()
+    var hw  = (ws.w - 80) / 2
+
+    UI.child("cw-left", { w: hw, h: 0, border: false }, func() {
+
+        secHeader("Knob", "click-drag to adjust value")
+        UI.child("knob-area", { w: 0, h: 140, border: true }, func() {
+            var dl    = UI.drawList()
+            var lp    = UI.getCursorPos()
+            var wp    = UI.getWindowPos()
+            var p     = UI.getCursorPos()
+            var cx2   = p.x + 60; var cy2 = p.y + 60
+            var r     = 45.0
+            var vmin  = 0.0; var vmax = 1.0
+            var v     = knobVal[0]
+            var startAng = PI * 0.75; var endAng = PI2 + PI * 0.25
+            var valAng   = startAng + (v-vmin)/(vmax-vmin)*(endAng-startAng)
+            var ac = accent[0]
+
+            // Track
+            dl.pathArcTo(cx2, cy2, r, startAng, endAng, 48)
+            dl.pathStroke(packColor([1,1,1,0.08]), false, 6.0, UI.DRAW_NONE)
+            // Fill
+            dl.pathArcTo(cx2, cy2, r, startAng, valAng, 48)
+            dl.pathStroke(packColor(ac), false, 6.0, UI.DRAW_NONE)
+            // Center circle
+            dl.addCircleFilled(cx2, cy2, r-10, packColor([0.12,0.14,0.18,1]), 0)
+            dl.addCircle(cx2, cy2, r-10, packColor([1,1,1,0.06]), 0, 1.0)
+            // Indicator line
+            dl.addLine(cx2, cy2,
+                cx2 + cos(valAng)*(r-12),
+                cy2 + sin(valAng)*(r-12),
+                packColor(ac), 2.0)
+            // Value text
+            var valStr = str(floor(v*100))+"%"
+            var ts = UI.calcTextSize(valStr)
+            dl.addText(cx2 - ts.x/2, cy2 - ts.y/2, packColor([0.93,0.95,0.98,1]), valStr)
+
+            UI.setCursorPos(15, 15)
+            UI.invisibleButton("knob", 90, 90)
+            if (UI.isItemActive()) {
+                var delta = UI.getMouseDragDelta(0)
+                knobVal[0] = knobVal[0] - delta.y * 0.005
+                if (knobVal[0] < 0) { knobVal[0] = 0 }
+                if (knobVal[0] > 1) { knobVal[0] = 1 }
+                UI.resetMouseDragDelta(0)
+            }
+            if (UI.isItemHovered()) { UI.tooltip("Drag up/down to adjust") }
+
+            UI.setCursorPos(120, 20)
+            UI.text("Value: " + str(floor(knobVal[0]*100)) + "%")
+            UI.setCursorPos(120, 44)
+            UI.sliderFloat("##knobsl", knobVal, 0.0, 1.0)
+            UI.setCursorPos(4, 125)
+            UI.dummy(0, 0)
+        })
+
+        UI.dummy(0,8)
+        secHeader("Toggle switch", "click to toggle")
+        UI.child("toggle-area", { w:0, h:60, border:true }, func() {
+            var dl  = UI.drawList()
+            var p   = UI.getCursorPos()
+            var tw  = 52.0; var th2 = 26.0; var r2 = th2/2
+            var on  = toggleVal[0]
+            var bgCol = on ? packColor(accent[0]) : packColor([1,1,1,0.12])
+            var kx  = on ? p.x+tw-r2 : p.x+r2
+
+            dl.addRectFilled(p.x, p.y+8, tw, th2, bgCol, r2, UI.DRAW_ROUND_CORNERS_ALL)
+            dl.addCircleFilled(kx, p.y+8+r2, r2-3, packColor([1,1,1,0.95]), 0)
+
+            UI.setCursorPos(0, 8)
+            UI.invisibleButton("toggle", tw, th2)
+            if (UI.isItemClicked()) { toggleVal[0] = !toggleVal[0] }
+
+            UI.setCursorPos(tw+12, 14)
+            UI.text(on ? "ON" : "OFF")
+            UI.setCursorPos(tw+60, 14)
+            UI.textDisabled("(click the switch)")
+            UI.setCursorPos(0, th2+12)
+            UI.dummy(0, 0)
+        })
+
+        UI.dummy(0,8)
+        secHeader("Radial progress", "")
+        UI.child("radial-area", { w:0, h:140, border:true }, func() {
+            var dl  = UI.drawList()
+            var p   = UI.getCursorPos()
+            var cx3 = p.x+65; var cy3 = p.y+65; var r3 = 50.0
+            var v3  = radialProg[0]
+            var ac  = accent[0]
+
+            // Background ring
+            dl.pathArcTo(cx3, cy3, r3, -PI/2, -PI/2+PI2, 64)
+            dl.pathStroke(packColor([1,1,1,0.06]), false, 10.0, UI.DRAW_NONE)
+            // Progress arc
+            dl.pathArcTo(cx3, cy3, r3, -PI/2, -PI/2+PI2*v3, 64)
+            dl.pathStroke(packColor(ac), false, 10.0, UI.DRAW_NONE)
+            // Inner circle
+            dl.addCircleFilled(cx3, cy3, r3-14, packColor([0.09,0.10,0.13,1]), 0)
+            // Percentage text
+            var pStr = str(floor(v3*100))+"%"
+            var ts2  = UI.calcTextSize(pStr)
+            dl.addText(cx3-ts2.x/2, cy3-ts2.y/2, packColor([0.93,0.95,0.98,1]), pStr)
+            // End cap dot
+            var endAng = -PI/2 + PI2*v3
+            dl.addCircleFilled(cx3+cos(endAng)*r3, cy3+sin(endAng)*r3, 6,
+                packColor(ac), 0)
+
+            UI.setCursorPos(145, 30)
+            UI.text("Completion")
+            UI.setCursorPos(145, 54)
+            UI.sliderFloat("##rp", radialProg, 0.0, 1.0)
+            UI.setCursorPos(4, 132)
+            UI.dummy(0, 0)
+        })
+
+        UI.dummy(0,8)
+        secHeader("Gradient cards", "addRectFilledMultiColor")
+        UI.child("grad-area", { w:0, h:110, border:false }, func() {
+            var dl = UI.drawList()
+            var p   = UI.getCursorPos()
+            var cw2 = (UI.getWindowWidth()-40)/2; var ch2 = 90.0
+
+            // Card 1
+            dl.addRectFilledMultiColor(p.x, p.y, cw2, ch2,
+                packColor(gradCard1), packColor(gradCard2),
+                packColor(gradCard2), packColor(gradCard1))
+            dl.addRect(p.x, p.y, cw2, ch2, packColor([1,1,1,0.08]), 6.0, 1.0, UI.DRAW_ROUND_CORNERS_ALL)
+            dl.addText(p.x+12, p.y+36, packColor([1,1,1,0.9]), "Gradient A→B")
+
+            // Card 2
+            var x2 = p.x + cw2 + 10
+            dl.addRectFilledMultiColor(x2, p.y, cw2, ch2,
+                packColor(gradCard3), packColor(gradCard3),
+                packColor(gradCard4), packColor(gradCard4))
+            dl.addRect(x2, p.y, cw2, ch2, packColor([1,1,1,0.08]), 6.0, 1.0, UI.DRAW_ROUND_CORNERS_ALL)
+            dl.addText(x2+12, p.y+36, packColor([1,1,1,0.9]), "Gradient C→D")
+
+            UI.dummy(0, ch2+4)
+        })
+    })
+
+    UI.sameLine()
+
+    UI.child("cw-right", { w:0, h:0, border:false }, func() {
+
+        secHeader("Radar / spider chart", "")
+        UI.child("radar-area", { w:0, h:240, border:true }, func() {
+            var dl   = UI.drawList()
+            var p   = UI.getCursorPos()
+            var cw3  = UI.getWindowWidth()-20
+            var cx4  = p.x + cw3/2; var cy4 = p.y + 110
+            var r4   = 90.0; var sides = length(radarData)
+
+            // Grid rings
+            var ring = 0
+            while (ring < 4) {
+                var rf = (ring+1)/4 * r4
+                var pts4 = []
+                var si8 = 0
+                while (si8 < sides) {
+                    var ang = si8/sides*PI2 - PI/2
+                    push(pts4, cx4+cos(ang)*rf); push(pts4, cy4+sin(ang)*rf)
+                    si8++
+                }
+                dl.addPolyline(pts4, packColor([1,1,1,0.06]), true, 1.0, UI.DRAW_NONE)
+                ring++
+            }
+            // Spokes + labels
+            var si9 = 0
+            while (si9 < sides) {
+                var ang = si9/sides*PI2 - PI/2
+                var lx = cx4+cos(ang)*r4; var ly = cy4+sin(ang)*r4
+                dl.addLine(cx4, cy4, lx, ly, packColor([1,1,1,0.08]), 1.0)
+                var label = radarLabels[si9]
+                var ts3   = UI.calcTextSize(label)
+                var lx2 = cx4+cos(ang)*(r4+14)-ts3.x/2
+                var ly2 = cy4+sin(ang)*(r4+14)-ts3.y/2
+                dl.addText(lx2, ly2, packColor([0.48,0.52,0.60,1]), label)
+                si9++
+            }
+            // Data polygon filled
+            var dataPts = []
+            var si10 = 0
+            while (si10 < sides) {
+                var ang = si10/sides*PI2 - PI/2
+                var rv = radarData[si10]*r4
+                push(dataPts, cx4+cos(ang)*rv); push(dataPts, cy4+sin(ang)*rv)
+                si10++
+            }
+            var fillCol = packColor(mix(accent[0], black, 0.5))
+            var fillCol2 = packColor([accent[0][0],accent[0][1],accent[0][2],0.15])
+            dl.addConvexPolyFilled(dataPts, fillCol2)
+            dl.addPolyline(dataPts, fillCol, true, 2.0, UI.DRAW_NONE)
+            // Dots at vertices
+            si10 = 0
+            while (si10 < sides) {
+                var ang = si10/sides*PI2 - PI/2
+                var rv = radarData[si10]*r4
+                dl.addCircleFilled(cx4+cos(ang)*rv, cy4+sin(ang)*rv, 4, packColor(accent[0]), 0)
+                si10++
+            }
+
+            UI.dummy(0, 220)
+        })
+
+        UI.dummy(0,4)
+        var i11 = 0
+        while (i11 < length(radarData)) {
+            UI.id("rd-"+str(i11), func() {
+                var ref = [radarData[i11]]
+                UI.setNextItemWidth(120)
+                UI.sliderFloat(radarLabels[i11], ref, 0.0, 1.0)
+                radarData[i11] = ref[0]
+            })
+            if (i11 % 2 == 0 and i11 < length(radarData)-1) { UI.sameLine() }
+            i11++
+        }
+
+        UI.dummy(0,8)
+        secHeader("Sparkline with fill", "path API filled area")
+        UI.child("spark-area", { w:0, h:100, border:true }, func() {
+            var dl  = UI.drawList()
+            var p   = UI.getCursorPos()
+            var cw4 = UI.getWindowWidth()-20; var ch4 = 75.0
+            var n   = length(sparkData)
+            var mn  = sparkData[0]; var mx = sparkData[0]
+            var si12 = 0
+            while (si12 < n) {
+                if (sparkData[si12] < mn) { mn = sparkData[si12] }
+                if (sparkData[si12] > mx) { mx = sparkData[si12] }
+                si12++
+            }
+
+            // Build fill path (bottom L → data points → bottom R)
+            dl.pathLineTo(p.x, p.y+ch4)
+            si12 = 0
+            while (si12 < n) {
+                var x4 = p.x + (si12/(n-1))*cw4
+                var y4 = p.y + ch4 - ((sparkData[si12]-mn)/(mx-mn))*ch4*0.85 - 4
+                dl.pathLineTo(x4, y4)
+                si12++
+            }
+            dl.pathLineTo(p.x+cw4, p.y+ch4)
+            dl.pathFillConcave(packColor([accent[0][0],accent[0][1],accent[0][2],0.15]))
+
+            // Stroke line
+            dl.pathClear()
+            si12 = 0
+            while (si12 < n) {
+                var x4 = p.x + (si12/(n-1))*cw4
+                var y4 = p.y + ch4 - ((sparkData[si12]-mn)/(mx-mn))*ch4*0.85 - 4
+                dl.pathLineTo(x4, y4)
+                si12++
+            }
+            dl.pathStroke(packColor(accent[0]), false, 2.0, UI.DRAW_NONE)
+
+            // Last value dot
+            var lx = p.x + cw4
+            var ly = p.y + ch4 - ((sparkData[n-1]-mn)/(mx-mn))*ch4*0.85 - 4
+            dl.addCircleFilled(lx, ly, 4, packColor(accent[0]), 0)
+
+            UI.dummy(0, ch4+8)
+        })
+
+        UI.dummy(0,8)
+        secHeader("Bezier curve editor", "drag control points")
+        UI.child("bez-area", { w:0, h:0, border:true }, func() {
+            var dl  = UI.drawList()
+            var p   = UI.getCursorPos()
+            var cw5 = UI.getWindowWidth()-20; var ch5 = UI.getWindowHeight()-20
+
+            // Draw curve
+            dl.addBezierCubic(
+                p.x+bezCtrlPts[0][0], p.y+bezCtrlPts[0][1],
+                p.x+bezCtrlPts[1][0], p.y+bezCtrlPts[1][1],
+                p.x+bezCtrlPts[2][0], p.y+bezCtrlPts[2][1],
+                p.x+bezCtrlPts[3][0], p.y+bezCtrlPts[3][1],
+                packColor(accent[0]), 2.5
+            )
+            // Control lines
+            dl.addLine(p.x+bezCtrlPts[0][0], p.y+bezCtrlPts[0][1],
+                       p.x+bezCtrlPts[1][0], p.y+bezCtrlPts[1][1],
+                       packColor([1,1,1,0.18]), 1.0)
+            dl.addLine(p.x+bezCtrlPts[2][0], p.y+bezCtrlPts[2][1],
+                       p.x+bezCtrlPts[3][0], p.y+bezCtrlPts[3][1],
+                       packColor([1,1,1,0.18]), 1.0)
+            // Control point dots
+            var bci = 0
+            while (bci < 4) {
+                var bx = p.x+bezCtrlPts[bci][0]; var by = p.y+bezCtrlPts[bci][1]
+                var isEnd = bci==0 or bci==3
+                var col2  = isEnd ? packColor(accent[0]) : packColor([0.98,0.72,0.38,1])
+                dl.addCircleFilled(bx, by, 7, col2, 0)
+                dl.addCircle(bx, by, 7, packColor([1,1,1,0.3]), 0, 1.0)
+
+                UI.setCursorPos(bx-8-p.x, by-8-p.y)
+                UI.invisibleButton("bcp-"+str(bci), 16, 16)
+                if (UI.isItemActive()) {
+                    var delta = UI.getMouseDragDelta(0)
+                    bezCtrlPts[bci][0] = bezCtrlPts[bci][0] + delta.x
+                    bezCtrlPts[bci][1] = bezCtrlPts[bci][1] + delta.y
+                    if (bezCtrlPts[bci][0] < 0)    { bezCtrlPts[bci][0] = 0 }
+                    if (bezCtrlPts[bci][0] > cw5)  { bezCtrlPts[bci][0] = cw5 }
+                    if (bezCtrlPts[bci][1] < 0)    { bezCtrlPts[bci][1] = 0 }
+                    if (bezCtrlPts[bci][1] > ch5)  { bezCtrlPts[bci][1] = ch5 }
+                    UI.resetMouseDragDelta(0)
+                }
+                if (UI.isItemHovered()) { UI.tooltip(isEnd ? "Endpoint" : "Control point") }
+                bci++
+            }
+            UI.setCursorPos(p.x, p.y+ch5+4)
+            UI.dummy(0, 0)
+        })
+    })
 }
 
-// ---- toolbar (reusable layout fragment) -------------------------------
+// ---------------------------------------------------------------------------
+// Page: Theme
+// ---------------------------------------------------------------------------
 
-func renderToolbar() {
-    if (UI.button("+ add task")) { want_add_modal = true }
+var pageTheme = func() {
+    var ws = win.getSize(); var hw = (ws.w-80)/2
+
+    UI.child("th-l", { w:420, h:0, border:true }, func() {
+        secHeader("Accent & Shape", "drives the whole UI")
+        UI.colorEdit("Accent", accent[0])
+        UI.sliderFloat("Rounding", rounding, 0.0, 16.0, "%.1f px")
+        UI.combo("Density", density, ["Compact","Cozy","Comfortable"])
+        UI.dummy(0,8)
+        secHeader("Preview", "")
+        UI.button("Button"); UI.sameLine(); UI.smallButton("Small")
+        UI.sameLine(); UI.checkbox("Check",[true]); UI.sameLine(); UI.radioButton("Radio",true)
+        UI.sliderFloat("##ps",[0.6],0,1); UI.progressBar(0.72,-1,0,"72%")
+        UI.dummy(0,8)
+        secHeader("Derived shades", "")
+        var shades = [
+            ["accent",        accent[0]],
+            ["hover",         mix(accent[0],white,0.18)],
+            ["active",        mix(accent[0],black,0.18)],
+            ["dim",           mix(accent[0],black,0.55)],
+            ["faint",         mix(accent[0],black,0.75)],
+        ]
+        var si13 = 0
+        while (si13 < length(shades)) {
+            var sh = shades[si13]; var p2 = UI.getCursorPos()
+            UI.drawRectFilled(p2.x, p2.y, 16, 16, packColor(sh[1]))
+            UI.dummy(20,16); UI.sameLine(); UI.text(sh[0])
+            si13++
+        }
+    })
     UI.sameLine()
-    if (UI.button("clear completed")) { want_clear_confirm = true }
-    UI.sameLine()
-    UI.checkbox("hide completed", hide_done)
-    UI.sameLine()
-    UI.text("|")
-    UI.sameLine()
-    UI.combo("category", filter_cat, filter_items)
-    UI.sameLine()
-    UI.combo("##prio", filter_prio, filter_prio_items)
+    UI.child("th-r", { w:0, h:0, border:true }, func() {
+        secHeader("Widget gallery", "all themed live")
+        UI.inputText("Text", Buffer.new(64))
+        UI.combo("Combo",[1],["One","Two","Three"])
+        UI.sliderInt("Slider",[60],0,100)
+        UI.dragFloat("Drag",[1.5],0.01,0,10)
+        UI.colorEdit("Color",[0.38,0.72,0.98,1.0])
+        UI.dummy(0,8)
+        secHeader("Tab bar", "")
+        UI.tabBar("th-tabs", func() {
+            UI.tabItem("Alpha", func() { UI.text("Content A") })
+            UI.tabItem("Beta",  func() { UI.text("Content B") })
+            UI.tabItem("Gamma", func() { UI.text("Content C") })
+        })
+        UI.dummy(0,8)
+        secHeader("Progress bars", "")
+        UI.progressBar(0.25,-1,0,"25%"); UI.progressBar(0.50,-1,0,"50%")
+        UI.progressBar(0.75,-1,0,"75%"); UI.progressBar(1.00,-1,0,"100%")
+        UI.dummy(0,8)
+        secHeader("Vertical sliders", "")
+        UI.vSliderFloat("##v1", 40, 80, [0.40], 0, 1)
+        UI.sameLine(); UI.vSliderFloat("##v2", 40, 80, [0.65], 0, 1)
+        UI.sameLine(); UI.vSliderFloat("##v3", 40, 80, [0.80], 0, 1)
+        UI.sameLine(); UI.vSliderFloat("##v4", 40, 80, [0.30], 0, 1)
+    })
 }
 
-// =========================================================== main loop =
+// ---------------------------------------------------------------------------
+// Page: About
+// ---------------------------------------------------------------------------
 
-while (!win.shouldClose() and !done_flag) {
+var pageAbout = func() {
+    var ws = win.getSize(); var hw = (ws.w-80)/2
+
+    UI.child("ab-l", { w: hw, h:0, border:true }, func() {
+        secHeader("ZYM UI Showcase v2", "0.3.0")
+        UI.textWrapped("A comprehensive demonstration of the ZYM scripting language's UI and DrawList capabilities, built on SDL3 and Dear ImGui.")
+        UI.dummy(0,8)
+        UI.bulletText("Full ImGui DrawList API (paths, beziers, polylines, n-gons, ellipses)")
+        UI.bulletText("Background / foreground draw lists")
+        UI.bulletText("Channel splitter for z-ordering")
+        UI.bulletText("8 parametric drawing modes")
+        UI.bulletText("5 custom hand-crafted widgets")
+        UI.bulletText("Knob with drag interaction")
+        UI.bulletText("Toggle switch")
+        UI.bulletText("Radial progress ring")
+        UI.bulletText("Interactive bezier curve editor")
+        UI.bulletText("Radar / spider chart")
+        UI.bulletText("Sparkline with filled area (path API)")
+        UI.bulletText("Four-corner gradient cards")
+        UI.bulletText("Sortable / filterable / DnD table")
+        UI.bulletText("Live accent-driven theme system")
+        UI.dummy(0,8); UI.separator(); UI.dummy(0,4)
+        UI.text("Links:")
+        UI.sameLine(); UI.textLinkOpenURL("zym-lang.org","https://zym-lang.org")
+        UI.sameLine(); UI.textDisabled("·")
+        UI.sameLine(); UI.textLinkOpenURL("Dear ImGui","https://github.com/ocornut/imgui")
+        UI.sameLine(); UI.textDisabled("·")
+        UI.sameLine(); UI.textLinkOpenURL("SDL3","https://libsdl.org")
+    })
+    UI.sameLine()
+    UI.child("ab-r", { w:0, h:0, border:true }, func() {
+        secHeader("Performance", "")
+        UI.text("FPS:"); UI.sameLine(); UI.textColored(accent[0], str(floor(fps_hist[length(fps_hist)-1])))
+        UI.dummy(0,4)
+        UI.plotLines("##fps2", fps_hist, str(floor(fps_hist[length(fps_hist)-1]))+" fps", 0, 0)
+        UI.dummy(0,8)
+        secHeader("Counters", "")
+        UI.labelText("Frames rendered", str(frame))
+        UI.labelText("Particles",       str(length(particles)))
+        UI.labelText("Bezier pts",      "4 draggable")
+        UI.labelText("Radar axes",      str(length(radarData)))
+        UI.labelText("Table rows",      str(length(tableData)))
+        UI.labelText("Draw mode",       drawModes[drawMode[0]])
+        UI.dummy(0,8)
+        secHeader("Runtime", "")
+        UI.labelText("Language",  "ZYM 0.3.0")
+        UI.labelText("UI",        "Dear ImGui")
+        UI.labelText("Windowing", "SDL3")
+        UI.labelText("Density",   density[0]==0?"Compact":density[0]==1?"Cozy":"Comfortable")
+        UI.labelText("Rounding",  str(rounding[0])+" px")
+        UI.dummy(0,8)
+        secHeader("Uptime", "")
+        UI.labelText("Seconds", str(floor(Time.clock() - clockStart)))
+        UI.labelText("Frames",  str(frame))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+
+var done = false
+
+while (!win.shouldClose() and !done) {
     var e = SDL.pollEvent()
     while (e != null) {
+        if (e.type == "quit") { done = true }
         e = SDL.pollEvent()
     }
 
+    var now = Time.clock()
+    var dt  = now - lastClock; lastClock = now
+    drawTime = drawTime + dt
+
+    // Update signals
+    if ((now - lastTick) >= tickRate) {
+        lastTick = now
+        var t2 = drawTime
+        pushSample(signal1, sin(t2*drawParam1[0]*2) + rng.randfRange(-0.15,0.15))
+        pushSample(signal2, cos(t2*drawParam2[0]*1.5))
+        pushSample(signal3, abs(sin(t2+rng.randfRange(-0.1,0.1)))*2.5)
+        pushSample(sparkData, sparkData[length(sparkData)-1] + rng.randfRange(-3,4))
+    }
+
     UI.frame(win, func() {
+        var fps = UI.framerate()
+        pushSample(fps_hist, fps)
+        frame++
 
-        // ---- main menu bar --------------------------------------------
-        UI.mainMenuBar(func() {
-            UI.menu("file", func() {
-                if (UI.menuItem("new task...", "ctrl+n")) {
-                    want_add_modal = true
-                }
-                UI.separator()
-                if (UI.menuItem("quit", "ctrl+q")) {
-                    // Set a script-side flag and let the outer loop
-                    // exit cleanly at the top of the next iteration.
-                    done_flag = true
-                }
-            })
-            UI.menu("edit", func() {
-                if (UI.menuItem("clear completed")) {
-                    want_clear_confirm = true
-                }
-                if (UI.menuItem("mark all done")) {
-                    var i = 0
-                    while (i < length(task_done)) {
-                        task_done[i] = true
-                        i = i + 1
-                    }
-                }
-                if (UI.menuItem("mark all pending")) {
-                    var i = 0
-                    while (i < length(task_done)) {
-                        task_done[i] = false
-                        i = i + 1
-                    }
-                }
-            })
-            UI.menu("view", func() {
-                UI.menuItem("hide completed", null, hide_done)
-            })
-        })
+        UI.withStyleColor(buildColors(), func() {
+            UI.withStyleVar(buildVars(), func() {
+                var size = win.getSize()
+                UI.setNextWindowPos(0, 0)
+                UI.setNextWindowSize(size.w, size.h)
 
-        // ---- record completion history once per second ---------------
-        var now = UI.framerate()  // we don't have a clock binding yet,
-                                  // so we tick history every ~60 frames
-        if (length(history_done) == 0 or (length(history_done) < 120 and history_last_t > 30.0)) {
-            push(history_done,  doneCount())
-            push(history_total, taskCount())
-            history_last_t = 0.0
-        } else {
-            history_last_t = history_last_t + 1.0
-        }
+                var wf = UI.WINDOW_NO_TITLE_BAR + UI.WINDOW_NO_RESIZE
+                       + UI.WINDOW_NO_MOVE      + UI.WINDOW_NO_COLLAPSE
+                       + UI.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
+                       + UI.WINDOW_NO_SAVED_SETTINGS
 
-        // ---- root pane: fill the entire SDL window (minus menu bar) -
-        // Pin the ImGui window to (0, menu_h) and size it to the SDL
-        // window, with all chrome turned off so it acts as the app
-        // itself rather than a floating sub-window inside the app.
-        var ws = win.getSize()
-        var menu_h = 22.0
-        UI.setNextWindowPos(0, menu_h)
-        UI.setNextWindowSize(ws.w + 0.0, ws.h - menu_h)
-        var root_flags = UI.WINDOW_NO_TITLE_BAR
-        root_flags = root_flags + UI.WINDOW_NO_RESIZE
-        root_flags = root_flags + UI.WINDOW_NO_MOVE
-        root_flags = root_flags + UI.WINDOW_NO_COLLAPSE
-        root_flags = root_flags + UI.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
-        root_flags = root_flags + UI.WINDOW_NO_SAVED_SETTINGS
-        UI.window("zym tasks", root_flags, func() {
+                UI.window("root", wf, func() {
+                    // Header
+                    UI.withStyleColor({ Text: accent[0] }, func() { UI.text("◆  ZYM UI SHOWCASE") })
+                    UI.sameLine(0,20); UI.textDisabled("v0.3.0")
+                    UI.sameLine(size.w - 200)
+                    UI.textDisabled(str(floor(fps))+" fps  ·  frame "+str(frame))
+                    UI.dummy(0,6)
 
-            renderToolbar()
-            UI.separator()
-
-            // ----- left side: task table inside a scrollable child ----
-            UI.text("tasks (" + str(pendingCount()) + " pending / " + str(taskCount()) + " total):")
-
-            UI.child("task_panel", 0, 280, true, func() {
-                UI.table("tasks_table", 5, func() {
-                    UI.tableSetupColumn("done")
-                    UI.tableSetupColumn("title")
-                    UI.tableSetupColumn("prio")
-                    UI.tableSetupColumn("category")
-                    UI.tableSetupColumn("")
-                    UI.tableHeadersRow()
-
-                    var i = 0
-                    while (i < length(task_titles)) {
-                        if (taskVisible(i)) {
-                            UI.id(i, func() {
-                                UI.tableNextRow()
-
-                                // column 0 — completion checkbox
-                                UI.tableNextColumn()
-                                var done_ref = [task_done[i]]
-                                UI.checkbox("##d", done_ref)
-                                task_done[i] = done_ref[0]
-
-                                // column 1 — title, struck through visually
-                                // if completed (via textDisabled).
-                                UI.tableNextColumn()
-                                if (task_done[i]) {
-                                    UI.textDisabled(task_titles[i])
-                                } else {
-                                    UI.text(task_titles[i])
-                                }
-
-                                // column 2 — priority label, colored
-                                UI.tableNextColumn()
-                                var prio = task_prios[i]
-                                if (prio == 2) {
-                                    UI.textColored(theme_warn, prio_names[prio])
-                                } else if (prio == 1) {
-                                    UI.text(prio_names[prio])
-                                } else {
-                                    UI.textDisabled(prio_names[prio])
-                                }
-
-                                // column 3 — category label
-                                UI.tableNextColumn()
-                                UI.text(categories[task_cats[i]])
-
-                                // column 4 — delete button
-                                UI.tableNextColumn()
-                                if (UI.smallButton("x")) {
-                                    pending_delete_idx = i
-                                }
-                            })
-                        }
-                        i = i + 1
-                    }
+                    UI.tabBar("main-nav", func() {
+                        UI.tabItem("Widgets",  func() { pageWidgets()  })
+                        UI.tabItem("Layout",   func() { pageLayout()   })
+                        UI.tabItem("Data",     func() { pageData()     })
+                        UI.tabItem("Drawing",  func() { pageDrawing()  })
+                        UI.tabItem("Custom",   func() { pageCustom()   })
+                        UI.tabItem("Theme",    func() { pageTheme()    })
+                        UI.tabItem("About",    func() { pageAbout()    })
+                    })
                 })
             })
-
-            UI.separator()
-
-            // ----- bottom split: stats panel + custom card ------------
-            UI.child("bottom_left", 460, 200, true, func() {
-                UI.text("completion stats")
-                UI.separator()
-
-                var done_n = doneCount()
-                var total_n = taskCount()
-                var ratio = 0.0
-                if (total_n > 0) { ratio = (done_n + 0.0) / total_n }
-
-                UI.text("done: " + str(done_n) + " / " + str(total_n))
-                UI.progressBar(ratio, 0, 0, str(done_n) + "/" + str(total_n))
-
-                UI.dummy(0, 4)
-                UI.text("completion history (last " + str(length(history_done)) + " ticks):")
-                if (length(history_done) > 1) {
-                    UI.plotLines("##done_hist", history_done, "done",
-                                 0.0, 1.0)
-                    UI.plotHistogram("##total_hist", history_total, "total",
-                                     0.0, 1.0)
-                } else {
-                    UI.textDisabled("(building history... let the app run a moment)")
-                }
-            })
-
-            UI.sameLine()
-
-            UI.child("bottom_right", 0, 200, true, func() {
-                UI.text("custom drawList card")
-                UI.separator()
-
-                var cp = UI.getCursorPos()
-                var x = cp.x
-                var y = cp.y
-                var w = 380.0
-                var h = 130.0
-
-                // background panel using the theme bg color
-                UI.drawRectFilled(x, y, w, h, packColor(theme_bg))
-                UI.drawRect(x, y, w, h, packColor(theme_accent))
-
-                // bars representing per-category counts
-                var counts = [0, 0, 0, 0]
-                var ci = 0
-                while (ci < length(task_cats)) {
-                    var c = task_cats[ci]
-                    counts[c] = counts[c] + 1
-                    ci = ci + 1
-                }
-                var max_count = 1
-                var k = 0
-                while (k < 4) {
-                    if (counts[k] > max_count) { max_count = counts[k] }
-                    k = k + 1
-                }
-
-                var bar_y = y + 24
-                var bar_x = x + 110
-                var bar_w_max = 240
-                var bar_h = 14
-                var bar_gap = 8
-                var bi = 0
-                while (bi < 4) {
-                    var label_y = bar_y + (bar_h + bar_gap) * bi
-                    UI.drawText(x + 12, label_y, packColor(theme_accent),
-                                categories[bi])
-                    var bw = (bar_w_max + 0.0) * counts[bi] / max_count
-                    UI.drawRectFilled(bar_x, label_y, bw, bar_h,
-                                      packColor(theme_accent))
-                    UI.drawRect(bar_x, label_y, bar_w_max, bar_h,
-                                packColor(theme_accent))
-                    UI.drawText(bar_x + bar_w_max + 6, label_y,
-                                packColor(theme_accent), str(counts[bi]))
-                    bi = bi + 1
-                }
-
-                // reserve the canvas footprint
-                UI.dummy(w, h)
-            })
-
-            UI.separator()
-
-            // ----- theme controls (drive drawList colors) -------------
-            UI.treeNode("theme", func() {
-                UI.text("these colors drive the custom-drawn card above")
-                UI.colorEdit("accent", theme_accent)
-                UI.colorEdit("background", theme_bg)
-                UI.colorEdit("warn", theme_warn)
-                UI.separator()
-                UI.textDisabled("tip: try changing accent to see all card text/bars retint live")
-            })
-
-            UI.separator()
-
-            // ----- status bar ----------------------------------------
-            UI.text("fps: " + str(UI.framerate()))
-            UI.sameLine(200)
-            UI.text(str(pendingCount()) + " pending")
-            UI.sameLine(320)
-            UI.text(str(doneCount()) + " done")
-            UI.sameLine(420)
-            UI.textDisabled("zym ui showcase — built on UI/SDL primitives")
         })
-
-        // ---- modal: add task ----------------------------------------
-        if (want_add_modal) {
-            UI.openPopup("add_task_modal")
-            want_add_modal = false
-        }
-        UI.popupModal("add_task_modal", func() {
-            UI.text("add a new task")
-            UI.separator()
-
-            UI.inputText("title", new_title_buf)
-            UI.combo("priority", new_prio, prio_names)
-            UI.combo("category", new_cat, categories)
-
-            UI.separator()
-
-            var title_now = new_title_buf.toUtf8()
-            UI.disabled(length(title_now) == 0, func() {
-                if (UI.button("add", 100, 0)) {
-                    addTaskFromBuffer()
-                    UI.closeCurrentPopup()
-                }
-            })
-            UI.sameLine()
-            if (UI.button("cancel", 100, 0)) {
-                new_title_buf.fill(0)
-                UI.closeCurrentPopup()
-            }
-        })
-
-        // ---- modal: confirm clear completed -------------------------
-        if (want_clear_confirm) {
-            UI.openPopup("confirm_clear")
-            want_clear_confirm = false
-        }
-        UI.popupModal("confirm_clear", func() {
-            UI.text("clear all completed tasks?")
-            UI.text("(" + str(doneCount()) + " tasks will be removed)")
-            UI.separator()
-            if (UI.button("yes, clear", 120, 0)) {
-                clearCompleted()
-                UI.closeCurrentPopup()
-            }
-            UI.sameLine()
-            if (UI.button("cancel", 120, 0)) {
-                UI.closeCurrentPopup()
-            }
-        })
-
-        // ---- deferred delete (table iteration is over by now) -------
-        if (pending_delete_idx >= 0) {
-            removeTask(pending_delete_idx)
-            pending_delete_idx = -1
-        }
     })
 }
 
 win.free()
-print("showcase exit — final %v tasks (%v done)", taskCount(), doneCount())

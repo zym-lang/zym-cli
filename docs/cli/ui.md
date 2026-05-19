@@ -47,12 +47,20 @@ can mutate the script-visible value in place.
   var name = nameBuf.toUtf8()
   ```
 
-- **Refs (color).** A color ref is a 4-element list of normalised
-  floats `[r, g, b, a]` (each `0.0 .. 1.0`). `UI.colorEdit` /
-  `UI.colorPicker` write the edited components back into the list.
-  Packed colors (32-bit `0xAABBGGRR` for `DrawList` primitives) are
-  separate; build them with `UI.color(r, g, b, a)` or pass an
-  already-packed integer.
+- **Refs (color).** A color ref is a 3- or 4-element list of
+  normalised floats `[r, g, b]` / `[r, g, b, a]` (each `0.0 .. 1.0`).
+  `UI.colorEdit` / `UI.colorPicker` / `UI.colorButton` /
+  `UI.textColored` all take a color ref in this shape and (for
+  `colorEdit` / `colorPicker`) write the edited components back into
+  the list in place. The native picks the 3- vs 4-channel ImGui call
+  based on the list length.
+- **Packed colors (`ImU32`).** `DrawList` primitives and the legacy
+  `UI.draw*` flat helpers take a packed 32-bit color in `IM_COL32`
+  (ABGR) order. Build them with `UI.color(r, g, b, a)` where each
+  component is an integer in `[0, 255]` (alpha defaults to `255` if
+  omitted), or pass an already-packed integer literal. Color refs and
+  packed colors are **not** interchangeable — `colorEdit` wants the
+  ref list, `drawRect` wants the packed int.
 - **Scoped callbacks.** Every ImGui call shaped like `Begin*` /
   `End*` is exposed as a single Zym function taking a `body` callback
   as its last argument. The bridge calls `Begin*` before invoking the
@@ -77,6 +85,18 @@ can mutate the script-visible value in place.
 | --- | --- | --- |
 | `UI.frame(win, body)` | null | Begins a new ImGui frame for `win`, invokes `body`, then renders and presents. Single-frame call — drive the outer loop yourself with `while (!win.shouldClose()) { UI.frame(...) }`. |
 | `UI.lastError()` | string | Most recent UI-side error message, or `""` if none. |
+| `UI.silent(on)` | null | Convenience switch for ImGui's recoverable-error diagnostics. `UI.silent(true)` suppresses **both** the stderr `[imgui-error]` log lines (the `"In window 'X': Code uses SetCursorPos() ..."` style messages) and the on-screen error tooltip. `UI.silent(false)` restores both. Equivalent to calling `setErrorLogging(!on)` and `setErrorTooltip(!on)` together. Requires an active ImGui context — call from inside `UI.frame(...)`. The setting persists across frames until changed again. |
+| `UI.setErrorLogging(on)` | null | Toggle the stderr `[imgui-error]` log lines alone (`io.ConfigErrorRecoveryEnableDebugLog`). `on=true` enables logging (default), `false` silences it. |
+| `UI.setErrorTooltip(on)` | null | Toggle the in-app red error tooltip alone (`io.ConfigErrorRecoveryEnableTooltip`). `on=true` enables the tooltip (default), `false` hides it. |
+
+> **Note.** These switches only affect ImGui's *reporting* of recoverable
+> errors — the underlying error-recovery path itself stays enabled, so
+> the warned-about condition is still handled safely. They are the
+> right knob for noisy diagnostics like the `SetCursorPos()` "submit a
+> Dummy() afterwards" message when you've intentionally drawn a child
+> via the `DrawList` without a sizing item. They do **not** silence
+> Zym-side runtime errors raised by the `UI` native itself (those are
+> always reported and can't be muted).
 
 ---
 
@@ -152,7 +172,7 @@ full-pane root.
 | Method | Returns | Notes |
 | --- | --- | --- |
 | `UI.text(s)` | null | Plain text. |
-| `UI.textColored(color, s)` | null | Text in the given 4-elem color ref (`[r, g, b, a]`). |
+| `UI.textColored(color, s)` | null | Text in the given color ref — a 3- or 4-element float list (`[r, g, b]` / `[r, g, b, a]`, each `0.0 .. 1.0`). Not a packed `UI.color` int. |
 | `UI.textWrapped(s)` | null | Word-wrapped to the current content region. |
 | `UI.textDisabled(s)` | null | Greyed-out text. |
 | `UI.labelText(label, value)` | null | `label = value` style row. |
@@ -223,10 +243,11 @@ edit. `_` arguments are optional in the dispatched form.
 
 | Method | Notes |
 | --- | --- |
-| `UI.colorEdit(label, ref)` | Color editor; `ref` is a 3- or 4-element float list. |
-| `UI.colorPicker(label, ref)` | Full picker widget. |
-| `UI.colorButton(id, color)` | Just the swatch; returns `true` on click. |
-| `UI.color(r, g, b, a)` | Packs four `0.0 .. 1.0` floats into a 32-bit color suitable for `UI.drawRect` / `UI.drawText` / etc. |
+| `UI.colorEdit(label, ref)` | Color editor; `ref` is a 3- or 4-element float list (`[r, g, b]` / `[r, g, b, a]`, each `0.0 .. 1.0`). Returns `true` on edit; writes the new components back into `ref`. |
+| `UI.colorPicker(label, ref)` | Full picker widget. Same ref shape as `colorEdit`. |
+| `UI.colorButton(id, ref)` | Just the swatch; takes the same 3- or 4-element color **ref list** as `colorEdit`. Returns `true` on click. Does **not** accept a packed `UI.color` integer. |
+| `UI.color(r, g, b)` | Pack `[0, 255]` integer components into an `IM_COL32` packed color. Alpha defaults to `255`. |
+| `UI.color(r, g, b, a)` | Same, with explicit alpha. Output is suitable for `UI.drawRect` / `UI.drawText` / all `DrawList` methods. Component out-of-range values are clamped. |
 
 ---
 
@@ -339,9 +360,22 @@ Bit-or these and pass to the 4-arg form of `UI.table(id, columns, flags, body)`.
 
 ## Custom 2D drawing
 
-These draw into the current ImGui window's foreground draw list, so
-they must be called inside a `UI.window` (or `UI.child`) body. All
-colors are packed 32-bit values — build them with `UI.color(r, g, b, a)`.
+`UI` exposes the full ImGui `ImDrawList` surface (minus image / texture
+APIs, which are deferred until the SDL image layer lands). Two flavours
+are available:
+
+1. **Flat helpers** — one-shot calls on the current window's draw list,
+   for short scripts and ad-hoc overlays. Convenient but limited: no
+   paths, no clip stack, no channel splitter.
+2. **`DrawList` handle** — a script-side mirror of the C++ API, with
+   `add*` / `path*` / `pushClipRect` / `channelsSplit` methods. Use this
+   when you need composed shapes, layered draws, or to target the
+   viewport background / foreground instead of the current window.
+
+All colors are packed 32-bit `ImU32` values — build them with
+`UI.color(r, g, b, a)` (four `0.0 .. 1.0` floats).
+
+### Flat helpers (current-window draw list)
 
 | Method | Returns |
 | --- | --- |
@@ -353,6 +387,176 @@ colors are packed 32-bit values — build them with `UI.color(r, g, b, a)`.
 | `UI.drawText(x, y, color, s)` | null |
 | `UI.drawTriangle(x1, y1, x2, y2, x3, y3, color)` | null |
 | `UI.drawTriangleFilled(x1, y1, x2, y2, x3, y3, color)` | null |
+
+Must be called inside a `UI.window` (or `UI.child`) body — they bind to
+whichever ImGui window is current.
+
+### `DrawList` handle
+
+Three factory functions return a `DrawList` handle bound to a specific
+`ImDrawList`. The handle is a plain Zym map whose methods take no
+explicit receiver — call them as `dl.addLine(...)` etc.
+
+| Factory | Returns | Notes |
+| --- | --- | --- |
+| `UI.drawList()` | DrawList | The current ImGui window's draw list. Must be called inside a `UI.window` / `UI.child` body (otherwise raises). |
+| `UI.backgroundDrawList()` | DrawList \| null | The viewport background draw list — anything drawn here renders **under** all ImGui windows. Must be called inside `UI.frame(...)`. |
+| `UI.foregroundDrawList()` | DrawList \| null | The viewport foreground draw list — anything drawn here renders **over** all ImGui windows (useful for HUD-style overlays). Must be called inside `UI.frame(...)`. |
+
+DrawList handles are atlas-owned and have no per-handle finalizer; the
+draw list itself lives as long as its owning ImGui context. Hold one
+across frames at your own risk — re-fetch each frame to be safe.
+
+> **Argument arity.** Each `DrawList` method is registered as a
+> **fixed-arity** native closure for the exact arg count shown in the
+> tables below — every argument (including the ones marked `?`) must
+> be passed explicitly. The `?` mark records *which* arg corresponds
+> to an ImGui default: pass `0` for `segments`, pass `0.0` for
+> `rotation` / `thickness=1.0` (1.0 is also the bridge default for
+> stroke methods), and pass `UI.DRAW_NONE` for `flags`. Native
+> dispatcher cap is 10 args; the single method that exceeds it is
+> `dl.addBezierCubic` (11 args), which is registered as a **variadic**
+> native closure — its trailing `segments` arg may be omitted, in
+> which case ImGui auto-picks the segment count.
+
+#### Primitives — `Add*`
+
+| Method | Notes |
+| --- | --- |
+| `dl.addLine(x1, y1, x2, y2, color, thickness?)` | `thickness` defaults to `1.0`. |
+| `dl.addRect(x, y, w, h, color, rounding?, thickness?, flags?)` | `flags` is a bitmask of `UI.DRAW_ROUND_CORNERS_*` / `UI.DRAW_*` constants. |
+| `dl.addRectFilled(x, y, w, h, color, rounding?, flags?)` | Filled variant. |
+| `dl.addRectFilledMultiColor(x, y, w, h, cTL, cTR, cBR, cBL)` | Four-corner gradient. |
+| `dl.addQuad(x1, y1, x2, y2, x3, y3, x4, y4, color, thickness?)` | Stroked quad. |
+| `dl.addQuadFilled(x1, y1, x2, y2, x3, y3, x4, y4, color)` | Filled quad. |
+| `dl.addTriangle(x1, y1, x2, y2, x3, y3, color, thickness?)` | Stroked triangle. |
+| `dl.addTriangleFilled(x1, y1, x2, y2, x3, y3, color)` | Filled triangle. |
+| `dl.addCircle(cx, cy, r, color, segments?, thickness?)` | `segments=0` lets ImGui pick adaptively from `CircleTessellationMaxError`. |
+| `dl.addCircleFilled(cx, cy, r, color, segments?)` | Filled circle. |
+| `dl.addNgon(cx, cy, r, color, sides, thickness?)` | Fixed-sided polygon. |
+| `dl.addNgonFilled(cx, cy, r, color, sides)` | Filled n-gon. |
+| `dl.addEllipse(cx, cy, rx, ry, color, rot?, segments?, thickness?)` | `rot` is in radians. |
+| `dl.addEllipseFilled(cx, cy, rx, ry, color, rot?, segments?)` | Filled ellipse. |
+| `dl.addText(x, y, color, s)` | Uses the currently pushed font (or `UI.withFont`). |
+| `dl.addBezierCubic(x1, y1, x2, y2, x3, y3, x4, y4, color, thickness?, segments?)` | Cubic Bezier (4 control points). |
+| `dl.addBezierQuadratic(x1, y1, x2, y2, x3, y3, color, thickness?, segments?)` | Quadratic Bezier (3 control points). |
+| `dl.addPolyline(points, color, closed?, thickness?, flags?)` | `points` is a list — see *Point lists* below. |
+| `dl.addConvexPolyFilled(points, color)` | Fast convex fill. |
+| `dl.addConcavePolyFilled(points, color)` | Generic concave fill (slower; correct for any simple polygon). |
+
+#### Stateful path API — `Path*`
+
+Build up a path with point-by-point calls, then close it with
+`pathStroke` (line) or `pathFillConvex` / `pathFillConcave` (fill). The
+fill / stroke calls reset the path automatically, so reusing the same
+`dl` for back-to-back shapes is fine.
+
+| Method | Notes |
+| --- | --- |
+| `dl.pathClear()` | Drop all currently buffered points. |
+| `dl.pathLineTo(x, y)` | Append a single point. |
+| `dl.pathLineToMergeDuplicate(x, y)` | Append, but skip if equal to the last point. |
+| `dl.pathFillConvex(color)` | Submit as a filled convex polygon and reset the path. |
+| `dl.pathFillConcave(color)` | Submit as a filled concave polygon and reset the path. |
+| `dl.pathStroke(color, closed?, thickness?, flags?)` | Submit as a stroked polyline and reset. `flags` accepts `UI.DRAW_*`; `closed` is sugar for `UI.DRAW_CLOSED`. |
+| `dl.pathArcTo(cx, cy, r, aMin, aMax, segments?)` | Append a circular arc. Angles in radians, must satisfy `aMin <= aMax`. |
+| `dl.pathArcToFast(cx, cy, r, aMinOf12, aMaxOf12)` | Same as `pathArcTo` but with precomputed 12-step angles (`0..12`). |
+| `dl.pathEllipticalArcTo(cx, cy, rx, ry, rot, aMin, aMax, segments?)` | Append an elliptical arc. `rot` is the ellipse rotation in radians. |
+| `dl.pathBezierCubicCurveTo(x2, y2, x3, y3, x4, y4, segments?)` | Cubic Bezier from current point through 3 controls. |
+| `dl.pathBezierQuadraticCurveTo(x2, y2, x3, y3, segments?)` | Quadratic Bezier from current point through 2 controls. |
+| `dl.pathRect(x, y, w, h, rounding?, flags?)` | Append a rectangle (optionally rounded). |
+
+#### Clip rect
+
+`pushClipRect` / `popClipRect` on a `DrawList` are **render-only**
+scissoring — they clip geometry submitted to that draw list but do
+**not** affect ImGui's hit-testing or widget culling. For widget-level
+clipping that also affects hover/click, use `UI.clip(x, y, w, h, body)`.
+
+| Method | Notes |
+| --- | --- |
+| `dl.pushClipRect(x, y, w, h, intersect?)` | `intersect=true` intersects with the current clip rect instead of replacing it. |
+| `dl.pushClipRectFullScreen()` | Push a clip rect that covers the whole viewport. |
+| `dl.popClipRect()` | Pop the most recent push. |
+| `dl.getClipRectMin()` | `{ x, y }` of the current clip rect's top-left. |
+| `dl.getClipRectMax()` | `{ x, y }` of the current clip rect's bottom-right. |
+
+#### Channel splitter
+
+The channel splitter lets you submit shapes out of order and have them
+rendered in a fixed z-stacking — e.g. draw a background fill *after*
+text is laid out, while still having the fill appear *under* the text.
+
+| Method | Notes |
+| --- | --- |
+| `dl.channelsSplit(count)` | Begin splitting into `count` channels (≥2). Subsequent draws go to channel 0 by default. |
+| `dl.channelsSetCurrent(n)` | Switch the active channel for subsequent draws. |
+| `dl.channelsMerge()` | Merge all channels back, preserving submission order *within* each channel and stacking channels low-to-high. |
+
+#### Point lists
+
+Methods that take a `points` argument (`addPolyline`,
+`addConvexPolyFilled`, `addConcavePolyFilled`) accept either form:
+
+```zym
+// Nested:
+dl.addPolyline([[10, 10], [50, 30], [90, 10]], color, true, 2.0)
+
+// Flat:
+dl.addPolyline([10, 10, 50, 30, 90, 10], color, true, 2.0)
+```
+
+The flat form requires an even number of entries; the nested form
+requires each inner list to have at least 2 numbers.
+
+#### `UI.DRAW_*` flags
+
+For `addRect` / `addRectFilled` / `pathRect`, the rounding-corner
+flags select which corners get rounded when `rounding > 0`. For
+`pathStroke` / `addPolyline`, `UI.DRAW_CLOSED` joins the last and
+first point.
+
+| Flag | Notes |
+| --- | --- |
+| `UI.DRAW_NONE` | No flags. |
+| `UI.DRAW_ROUND_CORNERS_TOP_LEFT` | Round only the top-left corner. |
+| `UI.DRAW_ROUND_CORNERS_TOP_RIGHT` | Round only the top-right corner. |
+| `UI.DRAW_ROUND_CORNERS_BOTTOM_LEFT` | Round only the bottom-left corner. |
+| `UI.DRAW_ROUND_CORNERS_BOTTOM_RIGHT` | Round only the bottom-right corner. |
+| `UI.DRAW_ROUND_CORNERS_TOP` | `TOP_LEFT \| TOP_RIGHT`. |
+| `UI.DRAW_ROUND_CORNERS_BOTTOM` | `BOTTOM_LEFT \| BOTTOM_RIGHT`. |
+| `UI.DRAW_ROUND_CORNERS_LEFT` | `TOP_LEFT \| BOTTOM_LEFT`. |
+| `UI.DRAW_ROUND_CORNERS_RIGHT` | `TOP_RIGHT \| BOTTOM_RIGHT`. |
+| `UI.DRAW_ROUND_CORNERS_ALL` | All four corners. |
+| `UI.DRAW_ROUND_CORNERS_NONE` | Explicitly disables rounding (NOT the same as `0`; required to override a non-zero `rounding` value when you want square corners). |
+| `UI.DRAW_CLOSED` | For `pathStroke` / `addPolyline`: connect last point to first. |
+
+#### Example — composed shape with the path API
+
+```zym
+UI.frame(win, func() {
+  UI.window("Path demo", func() {
+    var dl = UI.drawList()
+    // UI.color takes 0..255 integer components, alpha defaults to 255.
+    var c = UI.color(230, 80, 50)
+
+    // A teardrop: arc + a line back to the start, then convex-filled.
+    dl.pathArcTo(200, 150, 60, 0, 3.14159 * 1.5, 24)
+    dl.pathLineTo(200, 150)
+    dl.pathFillConvex(c)
+
+    // Stroked rounded box on top.
+    dl.addRect(120, 80, 160, 140, UI.color(255, 255, 255, 255),
+               8.0, 2.0, UI.DRAW_ROUND_CORNERS_ALL)
+  })
+})
+```
+
+#### Image-touching APIs — deferred
+
+`AddImage`, `AddImageQuad`, `AddImageRounded`, `PathImageRect`, and
+`PushTextureID` / `PopTextureID` are **not** exposed yet. They require
+a script-side texture handle, which lands with the SDL image layer.
 
 ---
 
@@ -499,7 +703,7 @@ the lifetime of the window that owns the context.
 | Method | Returns | Notes |
 | --- | --- | --- |
 | `UI.loadFont(path, sizePx)` | Font \| null | Load a TTF/OTF at the given pixel size into the active context's atlas. Returns `null` and stamps `UI.lastError()` on failure (missing file, bad font, no active context). |
-| `UI.loadFont(path, sizePx, opts)` | Font \| null | Same, with an options map. `opts` is currently reserved for future glyph-range / merge options and is ignored. |
+| `UI.loadFont(path, sizePx, opts)` | Font \| null | Same, with an options map. `opts` keys are **currently ignored** — the map slot is reserved for future glyph-range / merge / oversampling options. Passing `{}` or `null` is the same as the 2-arg form. |
 | `UI.defaultFont()` | Font | Handle to the context's default font (ProggyClean unless something else was loaded earlier). |
 | `UI.withFont(font, body)` | null | Push `font` for the duration of `body`. Uses the size the font was loaded at. |
 

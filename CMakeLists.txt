@@ -15,8 +15,8 @@ endif()
 
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
 set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
-#set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections")
+#set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
+set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections")
 
 set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
 set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
@@ -45,6 +45,40 @@ set(RUNTIME_ONLY OFF)
 # binary so engine-level error and warning output is suppressed at startup
 # (zym's own runtime errors are unaffected). See src/boot/register_core.cpp.
 set(USE_ENGINE_ERRORS OFF)
+
+# ZYM_SDL: ON builds the `sdl` native (SDL3, vendored under third_party/sdl3)
+# and links it into zym. Slice 1 (future/gui.md) — window + event pump only.
+# Default depends on RUNTIME_ONLY:
+#   * CLI build (RUNTIME_ONLY=OFF) -> ON (UI is a first-class CLI feature).
+#   * Runtime-export build (RUNTIME_ONLY=ON) -> OFF (size-sensitive artifact;
+#     authors can opt back in to produce a UI-capable runtime export).
+if(NOT DEFINED ZYM_SDL)
+    if(RUNTIME_ONLY)
+        set(ZYM_SDL OFF)
+    else()
+        set(ZYM_SDL ON)
+    endif()
+endif()
+
+# ZYM_UI: ON builds the `ui` native (Dear ImGui, vendored under
+# third_party/imgui) and links it into zym. Slice 1 PR 2 — ImGui
+# widgets rendered into an SDL3 window via imgui_impl_sdl3 +
+# imgui_impl_sdlrenderer3.
+# Soft-depends on ZYM_SDL: if ZYM_UI=ON but ZYM_SDL=OFF, we force
+# ZYM_UI to OFF and emit a warning rather than producing a broken
+# build. Same default policy as ZYM_SDL: ON for the CLI, OFF for
+# runtime-export builds where size dominates.
+if(NOT DEFINED ZYM_UI)
+    if(RUNTIME_ONLY)
+        set(ZYM_UI OFF)
+    else()
+        set(ZYM_UI ON)
+    endif()
+endif()
+if(ZYM_UI AND NOT ZYM_SDL)
+    message(WARNING ">> ZYM_UI requires ZYM_SDL — disabling ZYM_UI")
+    set(ZYM_UI OFF)
+endif()
 
 cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)
@@ -126,6 +160,17 @@ set(ZYM_NATIVE_SOURCES
         src/natives/pack.cpp
 )
 
+# Slice 1: optional `sdl` native sources. Linked into zym when ZYM_SDL=ON.
+if(ZYM_SDL)
+    list(APPEND ZYM_NATIVE_SOURCES src/natives/sdl.cpp)
+endif()
+
+# Slice 1 PR 2: optional `ui` native sources. Linked into zym when
+# ZYM_UI=ON (which implies ZYM_SDL=ON; see the soft-dep check above).
+if(ZYM_UI)
+    list(APPEND ZYM_NATIVE_SOURCES src/natives/ui.cpp)
+endif()
+
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and
 # StringName::setup / cleanup, which the engine declares `private` and
 # friends only to godot/core/register_core_types.cpp. We can't modify
@@ -143,6 +188,168 @@ if(ZYM_LTO_OK)
 endif()
 
 target_link_libraries(zym PRIVATE zym_core)
+
+# --- SDL3 (Slice 1) ------------------------------------------------------
+# Vendored under third_party/sdl3 (git submodule, pinned to release-3.4.8).
+# Build SDL3 as a static library with subsystems trimmed to the bare
+# minimum Slice 1 needs (video + events). Everything else (audio,
+# joystick, haptic, sensor, camera, hidapi, power, dialog, process) is
+# OFF so it doesn't bloat the binary and doesn't drag in extra deps.
+# Renderer drivers stay enabled because Slice 1 hands ImGui an
+# SDL_Renderer to draw into (PR 2). GPU/Vulkan/Metal/D3D12 stay off
+# (they're a later slice).
+if(ZYM_SDL)
+    set(SDL_STATIC      ON  CACHE BOOL "" FORCE)
+    set(SDL_SHARED      OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_TESTS       OFF CACHE BOOL "" FORCE)
+    set(SDL_EXAMPLES    OFF CACHE BOOL "" FORCE)
+    set(SDL_INSTALL     OFF CACHE BOOL "" FORCE)
+    set(SDL_DISABLE_INSTALL_DOCS ON CACHE BOOL "" FORCE)
+    # Subsystems: keep video + events (and the renderer subsystem so
+    # SDL_CreateRenderer / SDL_SetRenderVSync work). Drop the rest.
+    set(SDL_AUDIO       OFF CACHE BOOL "" FORCE)
+    set(SDL_JOYSTICK    OFF CACHE BOOL "" FORCE)
+    set(SDL_HAPTIC      OFF CACHE BOOL "" FORCE)
+    set(SDL_HIDAPI      OFF CACHE BOOL "" FORCE)
+    set(SDL_POWER       OFF CACHE BOOL "" FORCE)
+    set(SDL_SENSOR      OFF CACHE BOOL "" FORCE)
+    set(SDL_CAMERA      OFF CACHE BOOL "" FORCE)
+    set(SDL_DIALOG      OFF CACHE BOOL "" FORCE)
+    set(SDL_PROCESS     OFF CACHE BOOL "" FORCE)
+    set(SDL_GPU         OFF CACHE BOOL "" FORCE)
+    set(SDL_VULKAN      OFF CACHE BOOL "" FORCE)
+    set(SDL_METAL       OFF CACHE BOOL "" FORCE)
+    set(SDL_OPENVR      OFF CACHE BOOL "" FORCE)
+    # Slice 1 uses imgui_impl_sdlrenderer3 (PR 2). Keep the renderer
+    # subsystem; OpenGL is enough as a portable software-or-GL fallback.
+    set(SDL_RENDER      ON  CACHE BOOL "" FORCE)
+    set(SDL_OPENGL      ON  CACHE BOOL "" FORCE)
+    # Trim renderers/video drivers we don't ship in Slice 1:
+    #   * Dummy + offscreen video drivers (~150-200 KB) -- we always have
+    #     a real display when the `sdl` native is in use; headless callers
+    #     simply don't import `sdl`.
+    #   * OpenGL ES2 renderer (~100-200 KB) -- desktop OpenGL is what
+    #     imgui_impl_sdlrenderer3 will draw through; ES2 is redundant.
+    #   * Audio backends (Pipewire/Pulse/ALSA/Jack/sndio/OSS): SDL_AUDIO is
+    #     already OFF above, but the dep_option machinery can still pull
+    #     the backend stubs in via defaults. Force every Linux audio
+    #     backend OFF explicitly so no stub code survives gc-sections.
+    set(SDL_VIDEO_DUMMY     OFF CACHE BOOL "" FORCE)
+    set(SDL_DUMMYVIDEO      OFF CACHE BOOL "" FORCE)
+    set(SDL_VIDEO_OFFSCREEN OFF CACHE BOOL "" FORCE)
+    set(SDL_OFFSCREEN       OFF CACHE BOOL "" FORCE)
+    set(SDL_DUMMYAUDIO      OFF CACHE BOOL "" FORCE)
+    set(SDL_OPENGLES        OFF CACHE BOOL "" FORCE)
+    set(SDL_RENDER_GPU      OFF CACHE BOOL "" FORCE)
+    set(SDL_PIPEWIRE        OFF CACHE BOOL "" FORCE)
+    set(SDL_PULSEAUDIO      OFF CACHE BOOL "" FORCE)
+    set(SDL_ALSA            OFF CACHE BOOL "" FORCE)
+    set(SDL_JACK            OFF CACHE BOOL "" FORCE)
+    set(SDL_SNDIO           OFF CACHE BOOL "" FORCE)
+    set(SDL_OSS             OFF CACHE BOOL "" FORCE)
+    # X11 sub-features: drop the optional ones whose dev headers aren't
+    # universally available on minimal Linux hosts. Core X11 stays on
+    # (SDL needs it for the basic window).
+    set(SDL_X11_XSCRNSAVER OFF CACHE BOOL "" FORCE)
+    set(SDL_X11_XINPUT     OFF CACHE BOOL "" FORCE)
+    set(SDL_X11_XSYNC      OFF CACHE BOOL "" FORCE)
+    set(SDL_X11_XTEST      OFF CACHE BOOL "" FORCE)
+    set(SDL_X11_XDBE       OFF CACHE BOOL "" FORCE)
+    set(SDL_X11_XSHAPE     OFF CACHE BOOL "" FORCE)
+    set(SDL_IBUS           OFF CACHE BOOL "" FORCE)
+    set(SDL_DBUS           OFF CACHE BOOL "" FORCE)
+    set(SDL_LIBURING       OFF CACHE BOOL "" FORCE)
+    # Don't propagate SDL3's warnings/options into the zym TUs.
+    add_subdirectory(third_party/sdl3 EXCLUDE_FROM_ALL)
+    # Propagate the same size-tuning treatment we apply to `zym` over to
+    # SDL3-static so we're comparing apples-to-apples in Release/Tiny:
+    #   1. LTO. CMake's `INTERPROCEDURAL_OPTIMIZATION_<CFG>` is set per-target,
+    #      not per-project, so flipping it on `zym` (lines 159-162 above) does
+    #      NOT propagate to SDL3-static. Without this, every SDL3 TU is
+    #      optimised in isolation -- no cross-TU inlining, no cross-TU DCE
+    #      inside reachable functions (the dispatch switches in SDL_CreateWindow
+    #      that select between video drivers stay fully populated even when
+    #      only x11 is registered). Turning IPO on for SDL3-static lets the
+    #      linker fold the dead branches and inline the small helpers.
+    #   2. `-fno-pie`. `zym` is linked `-no-pie` (libgodot.a is non-PIC), so
+    #      SDL3-static needs to be position-dependent too or the final link
+    #      mixes PIC and non-PIC objects.
+    #   3. `-flto` mode. Match zym's `-flto` (Release single-partition) /
+    #      `-flto=auto` (other configs). Required for LTO IR compatibility
+    #      with the rest of the link.
+    if(ZYM_LTO_OK)
+        set_property(TARGET SDL3-static PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET SDL3-static PROPERTY INTERPROCEDURAL_OPTIMIZATION_TINY TRUE)
+    endif()
+    target_compile_options(SDL3-static PRIVATE
+            $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+    if(NOT WIN32)
+        target_compile_options(SDL3-static PRIVATE -fno-pie)
+    endif()
+    target_link_libraries(zym PRIVATE SDL3::SDL3-static)
+    target_compile_definitions(zym PRIVATE ZYM_SDL_ENABLED=1)
+    message(STATUS ">> ZYM_SDL: ON — vendored SDL3 (video+events+render) linked into zym")
+    if(ZYM_LTO_OK)
+        message(STATUS ">> ZYM_SDL: LTO + gc-sections + Release flags propagated to SDL3-static")
+    endif()
+else()
+    message(STATUS ">> ZYM_SDL: OFF — `sdl` native disabled")
+endif()
+
+# --- Dear ImGui (Slice 1 PR 2) ------------------------------------------
+# Vendored under third_party/imgui (git submodule, pinned to v1.92.8).
+# Built as a small static library `zym_imgui` so ImGui's compile flags
+# (and the SDL3 include path it needs for the backend TUs) don't leak
+# into the rest of the zym translation units.
+#
+# Sources: ImGui core (imgui*.cpp), plus the two upstream SDL3 backends
+# (imgui_impl_sdl3.cpp + imgui_impl_sdlrenderer3.cpp). Demo / freetype
+# / other addons are intentionally NOT included — Slice 1 ships only
+# the core widget surface.
+if(ZYM_UI)
+    set(ZYM_IMGUI_DIR "${CMAKE_SOURCE_DIR}/third_party/imgui")
+    add_library(zym_imgui STATIC
+            "${ZYM_IMGUI_DIR}/imgui.cpp"
+            "${ZYM_IMGUI_DIR}/imgui_draw.cpp"
+            "${ZYM_IMGUI_DIR}/imgui_tables.cpp"
+            "${ZYM_IMGUI_DIR}/imgui_widgets.cpp"
+            "${ZYM_IMGUI_DIR}/imgui_demo.cpp"
+            "${ZYM_IMGUI_DIR}/backends/imgui_impl_sdl3.cpp"
+            "${ZYM_IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp"
+    )
+    target_include_directories(zym_imgui PUBLIC
+            "${ZYM_IMGUI_DIR}"
+            "${ZYM_IMGUI_DIR}/backends"
+    )
+    # The SDL3 backends need <SDL3/SDL.h>; pull the include dir from
+    # the static target so we don't hardcode the source-tree path.
+    target_link_libraries(zym_imgui PUBLIC SDL3::SDL3-static)
+    # Same propagation treatment as SDL3-static: match zym's LTO mode,
+    # match -fno-pie for the libgodot.a non-PIC link.
+    if(ZYM_LTO_OK)
+        set_property(TARGET zym_imgui PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET zym_imgui PROPERTY INTERPROCEDURAL_OPTIMIZATION_TINY TRUE)
+    endif()
+    target_compile_options(zym_imgui PRIVATE
+            $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+    if(NOT WIN32)
+        target_compile_options(zym_imgui PRIVATE -fno-pie)
+    endif()
+    # ImGui internally uses lots of `(void)var` and switch-case fallthrough
+    # patterns its own headers silence; the zym build is fussier (Wall in
+    # debug, -fno-exceptions). Silence warnings inside the ImGui TUs only
+    # so they don't drown out our own.
+    target_compile_options(zym_imgui PRIVATE -w)
+    target_link_libraries(zym PRIVATE zym_imgui)
+    target_compile_definitions(zym PRIVATE ZYM_UI_ENABLED=1)
+    message(STATUS ">> ZYM_UI: ON — vendored ImGui (v1.92.8) linked into zym via zym_imgui")
+    if(ZYM_LTO_OK)
+        message(STATUS ">> ZYM_UI: LTO + Release flags propagated to zym_imgui")
+    endif()
+else()
+    message(STATUS ">> ZYM_UI: OFF — `ui` native disabled")
+endif()
 
 if(RUNTIME_ONLY)
     message(STATUS ">> RUNTIME_ONLY: ON - excluding full_executor; runtime_loader path only")

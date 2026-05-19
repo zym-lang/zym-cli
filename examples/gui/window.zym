@@ -1,0 +1,38 @@
+// Slice 1 smoke test (future/gui.md §1.3, PR 1).
+//
+// Opens a window, polls events, closes on quit / window.close.
+// Manual run only — needs a display, so it's not in runAll.sh.
+//
+// Usage:
+//   zym run examples/gui/window.zym
+
+print("sdl version: %v", sdl.version())
+
+var win = sdl.createWindow("zym sdl smoke test", 640, 360, {
+    resizable: true,
+})
+if (win == null) {
+    print("createWindow failed: ", sdl.lastError())
+    return
+}
+
+print("window opened — close it to exit")
+
+while (!win.shouldClose()) {
+    var e = sdl.pollEvent()
+    while (e != null) {
+        if (e.type == "quit") {
+            print("got quit event")
+        } else if (e.type == "window.close") {
+            print("got window.close event for window %v", e.window)
+        } else if (e.type == "key.down") {
+            print("key.down scancode=%v key=%v", e.scancode, e.key)
+        }
+        e = sdl.pollEvent()
+    }
+    // sleep-ish until the next event so we don't spin the CPU.
+    sdl.waitEvent(50)
+}
+
+win.free()
+print("done")

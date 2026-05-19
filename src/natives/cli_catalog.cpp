@@ -56,6 +56,12 @@ void install_websocket(ZymVM* vm) { zym_defineGlobal(vm, "WebSocket", nativeWebS
 void install_aes    (ZymVM* vm) { zym_defineGlobal(vm, "AES",     nativeAes_create(vm));     }
 void install_sockets(ZymVM* vm) { zym_defineGlobal(vm, "Sockets", nativeSockets_create(vm)); }
 void install_pack   (ZymVM* vm) { zym_defineGlobal(vm, "Pack",    nativePack_create(vm));    }
+#ifdef ZYM_SDL_ENABLED
+void install_sdl    (ZymVM* vm) { zym_defineGlobal(vm, "sdl",     nativeSdl_create(vm));     }
+#endif
+#ifdef ZYM_UI_ENABLED
+void install_ui     (ZymVM* vm) { zym_defineGlobal(vm, "ui",      nativeUi_create(vm));      }
+#endif
 // Note: `install_zym` is intentionally absent from the kCatalog
 // installer slot. Zym is installed by `cli_catalog_install_all` /
 // `cli_catalog_install_named` *after* the rest of the catalog so it
@@ -67,7 +73,14 @@ void install_pack   (ZymVM* vm) { zym_defineGlobal(vm, "Pack",    nativePack_cre
 // as the new grantable entry. `Buffer` is intentionally absent
 // (auto-installed). When a new module is added, append it to this
 // table and to the corresponding declaration in natives.hpp.
-constexpr std::array<CatalogEntry, 23> kCatalog = {{
+#if defined(ZYM_SDL_ENABLED) && defined(ZYM_UI_ENABLED)
+constexpr std::size_t kCatalogSize = 25;
+#elif defined(ZYM_SDL_ENABLED)
+constexpr std::size_t kCatalogSize = 24;
+#else
+constexpr std::size_t kCatalogSize = 23;
+#endif
+constexpr std::array<CatalogEntry, kCatalogSize> kCatalog = {{
     {"print",   install_print},
     {"Time",    install_time},
     {"File",    install_file},
@@ -91,6 +104,12 @@ constexpr std::array<CatalogEntry, 23> kCatalog = {{
     {"AES",     install_aes},
     {"Sockets", install_sockets},
     {"Pack",    install_pack},
+#ifdef ZYM_SDL_ENABLED
+    {"sdl",     install_sdl},
+#endif
+#ifdef ZYM_UI_ENABLED
+    {"ui",      install_ui},
+#endif
 }};
 
 const CatalogEntry* find_entry(const char* name) {

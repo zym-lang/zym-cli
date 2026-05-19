@@ -2,3 +2,11 @@
 	path = zym_core
 	url = https://github.com/zym-lang/zym_core.git
 	branch = lsp
+[submodule "third_party/sdl3"]
+	path = third_party/sdl3
+	url = https://github.com/libsdl-org/SDL.git
+	branch = release-3.4.8
+[submodule "third_party/imgui"]
+	path = third_party/imgui
+	url = https://github.com/ocornut/imgui.git
+	branch = v1.92.8

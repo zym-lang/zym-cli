@@ -83,7 +83,7 @@ for (var f = 0; f < frames; f = f + 1) {
     if (x <= 2 or x >= W - 1) { dx = -dx; x = x + dx + dx }
     if (y <= 2 or y >= H - 1) { dy = -dy; y = y + dy + dy }
 
-    Time.sleep(40)
+    System.sleep(40)
 }
 
 Console.useMainScreen()

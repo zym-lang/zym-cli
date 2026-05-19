@@ -219,13 +219,23 @@ static ZymValue b_hex(ZymVM* vm, ZymValue ctx) {
 static ZymValue b_toUtf8(ZymVM* vm, ZymValue ctx) {
     auto* p = unwrap(ctx);
     String s;
-    if (p->size() > 0) s.append_utf8((const char*)p->ptr(), p->size());
+    if (p->size() > 0) {
+        // Treat the buffer as a NUL-terminated C string: stop at the
+        // first zero byte so callers using a Buffer as a text holder
+        // (e.g. ImGui's inputText, which pads with NULs up to capacity)
+        // get just the actual string content, not the padding.
+        size_t n = strnlen((const char*)p->ptr(), (size_t)p->size());
+        if (n > 0) s.append_utf8((const char*)p->ptr(), (int)n);
+    }
     return stringToZym(vm, s);
 }
 static ZymValue b_toAscii(ZymVM* vm, ZymValue ctx) {
     auto* p = unwrap(ctx);
     String s;
-    if (p->size() > 0) s.append_ascii(Span<char>((const char*)p->ptr(), p->size()));
+    if (p->size() > 0) {
+        size_t n = strnlen((const char*)p->ptr(), (size_t)p->size());
+        if (n > 0) s.append_ascii(Span<char>((const char*)p->ptr(), (int)n));
+    }
     return stringToZym(vm, s);
 }
 

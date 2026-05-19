@@ -36,7 +36,7 @@ elseif(PGO_MODE STREQUAL "USE")
 endif()
 
 set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION OFF)
+set(USE_COMPRESSION ON)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
 set(RUNTIME_ONLY OFF)

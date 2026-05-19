@@ -93,7 +93,7 @@ while (true) {
     Console.reset()
 
     Console.flush()
-    Time.sleep(80)
+    System.sleep(80)
 }
 
 Console.useMainScreen()

@@ -23,7 +23,7 @@ for (var i = 0; i < iters; i = i + 1) {
     Console.reset()
     Console.flush()
 
-    Time.sleep(80)
+    //Time.sleep(80)
 }
 
 Console.moveCursorUp(1)

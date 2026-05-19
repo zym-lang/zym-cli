@@ -181,6 +181,19 @@ int optInt(ZymValue v, int fallback) {
     if (zym_isNumber(v)) return (int)zym_asNumber(v);
     return fallback;
 }
+// Unsigned-32 variant — used for packed colors (IM_COL32) which routinely
+// exceed INT_MAX. Casting a double > INT_MAX directly to `int` is UB and
+// in practice produces 0/INT_MIN on GCC, which makes drawList colors look
+// frozen regardless of what the script passes. Round through uint32_t.
+uint32_t optU32(ZymValue v, uint32_t fallback) {
+    if (zym_isNumber(v)) {
+        double d = zym_asNumber(v);
+        if (d < 0.0) d = 0.0;
+        if (d > 4294967295.0) d = 4294967295.0;
+        return (uint32_t)d;
+    }
+    return fallback;
+}
 bool optBool(ZymValue v, bool fallback) {
     if (zym_isBool(v)) return zym_asBool(v);
     return fallback;
@@ -393,6 +406,53 @@ ZymValue u_window(ZymVM* vm, ZymValue /*self*/, ZymValue nameV, ZymValue bodyV) 
         ImGui::End();
     }
     return zym_newBool(open);
+}
+
+// `ui.window(name, flags, body) -> bool` — overload accepting an
+// ImGuiWindowFlags bitmask so scripts can request NoTitleBar/NoResize/
+// NoMove/NoCollapse etc. to mold a window into a full-window root pane.
+ZymValue u_windowFlags(ZymVM* vm, ZymValue /*self*/, ZymValue nameV,
+                       ZymValue flagsV, ZymValue bodyV) {
+    std::string name;
+    if (!reqStr(vm, nameV, "ui.window(name, flags, body)", &name)) return ZYM_ERROR;
+    int flags;
+    if (!reqInt(vm, flagsV, "ui.window(name, flags, body)", &flags)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.window(name, flags, body)")) return ZYM_ERROR;
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.window: called outside ui.frame(...)");
+        return ZYM_ERROR;
+    }
+
+    bool open = ImGui::Begin(name.c_str(), nullptr, (ImGuiWindowFlags)flags);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::End();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    } else {
+        ImGui::End();
+    }
+    return zym_newBool(open);
+}
+
+// Positioning / sizing the next window — used to pin a window to a
+// specific rectangle (e.g. the full SDL window for full-pane apps).
+ZymValue u_setNextWindowPos(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV) {
+    double x, y;
+    if (!reqNum(vm, xV, "ui.setNextWindowPos", &x)) return ZYM_ERROR;
+    if (!reqNum(vm, yV, "ui.setNextWindowPos", &y)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.setNextWindowPos")) return ZYM_ERROR;
+    ImGui::SetNextWindowPos(ImVec2((float)x, (float)y));
+    return zym_newNull();
+}
+ZymValue u_setNextWindowSize(ZymVM* vm, ZymValue, ZymValue wV, ZymValue hV) {
+    double w, h;
+    if (!reqNum(vm, wV, "ui.setNextWindowSize", &w)) return ZYM_ERROR;
+    if (!reqNum(vm, hV, "ui.setNextWindowSize", &h)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.setNextWindowSize")) return ZYM_ERROR;
+    ImGui::SetNextWindowSize(ImVec2((float)w, (float)h));
+    return zym_newNull();
 }
 
 // ---- widgets: text -------------------------------------------------------
@@ -660,6 +720,28 @@ ZymValue u_dragFloat(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV, ZymVal
 // inputText — Buffer-backed. Buffer holds raw bytes; we treat them as a
 // NUL-terminated UTF-8 string for ImGui purposes and write back the
 // edited contents on change.
+// Helper: copy an edited ImGui input buffer back into the Zym Buffer
+// **preserving the original allocated capacity**. ImGui's InputText
+// edits a NUL-terminated C string in-place; the actual string length
+// is usually much smaller than the buffer capacity. If we wrote back
+// only the string length, the underlying PackedByteArray would shrink
+// to that length, leaving no room for ImGui to edit further bytes on
+// the next frame — which presents as "buffer keeps clearing after one
+// character." Instead we write back the full capacity: the user's
+// edited string followed by zero-padding up to the original size.
+static void writeInputTextBack(ZymVM* vm, ZymValue bufV, const char* edited, size_t capacity) {
+    if (capacity == 0) return;
+    // Find the actual string length within capacity.
+    size_t len = strnlen(edited, capacity);
+    if (len > capacity) len = capacity; // defensive (shouldn't happen)
+    if (len >= capacity) len = capacity - 1;
+    // Build a capacity-sized buffer with the edited text then zero
+    // padding, so the PBA stays at its original allocated size.
+    std::vector<char> out(capacity, 0);
+    if (len > 0 && len < capacity) memcpy(out.data(), edited, len);
+    writeBufferBytes(vm, bufV, out.data(), capacity);
+}
+
 ZymValue u_inputText(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue bufV, ZymValue flagsV) {
     std::string label; if (!reqStr(vm, labelV, "ui.inputText", &label)) return ZYM_ERROR;
     const char* bytes = nullptr; size_t size = 0;
@@ -669,19 +751,15 @@ ZymValue u_inputText(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue bufV, ZymVal
     }
     int flags = optInt(flagsV, 0);
     if (!requireFrame(vm, "ui.inputText")) return ZYM_ERROR;
-    // Stage into a local growable buffer ImGui can edit in place. Cap
-    // ImGui-edited size to the Buffer's allocated size; scripts size
-    // their Buffer with Buffer.alloc(N) up front.
+    // Stage into a local growable buffer ImGui can edit in place. The
+    // Buffer's full allocated size is the capacity — keep it intact
+    // across edits so ImGui always has room to grow.
     if (size == 0) size = 1;
     std::vector<char> tmp(size);
-    if (bytes) memcpy(tmp.data(), bytes, size - 1);
+    if (bytes) memcpy(tmp.data(), bytes, size);
     tmp[size - 1] = 0; // ensure NUL terminator
-    // ImGui needs the full capacity to grow into.
     bool changed = ImGui::InputText(label.c_str(), tmp.data(), tmp.size(), flags);
-    if (changed) {
-        size_t newLen = strnlen(tmp.data(), tmp.size());
-        writeBufferBytes(vm, bufV, tmp.data(), newLen);
-    }
+    if (changed) writeInputTextBack(vm, bufV, tmp.data(), size);
     return zym_newBool(changed);
 }
 
@@ -697,14 +775,11 @@ ZymValue u_inputTextMultiline(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue buf
     if (!requireFrame(vm, "ui.inputTextMultiline")) return ZYM_ERROR;
     if (size == 0) size = 1;
     std::vector<char> tmp(size);
-    if (bytes) memcpy(tmp.data(), bytes, size - 1);
+    if (bytes) memcpy(tmp.data(), bytes, size);
     tmp[size - 1] = 0;
     bool changed = ImGui::InputTextMultiline(label.c_str(), tmp.data(), tmp.size(),
                                              ImVec2(w, h), flags);
-    if (changed) {
-        size_t newLen = strnlen(tmp.data(), tmp.size());
-        writeBufferBytes(vm, bufV, tmp.data(), newLen);
-    }
+    if (changed) writeInputTextBack(vm, bufV, tmp.data(), size);
     return zym_newBool(changed);
 }
 
@@ -1495,7 +1570,7 @@ ZymValue u_drawLine(ZymVM* vm, ZymValue, ZymValue x1V, ZymValue y1V,
     if (!dl) return ZYM_ERROR;
     dl->AddLine(ImVec2((float)optNum(x1V, 0), (float)optNum(y1V, 0)),
                 ImVec2((float)optNum(x2V, 0), (float)optNum(y2V, 0)),
-                (ImU32)optInt(colV, 0xFFFFFFFF), 1.0f);
+                optU32(colV, 0xFFFFFFFFu), 1.0f);
     return zym_newNull();
 }
 
@@ -1506,7 +1581,7 @@ ZymValue u_drawRect(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV,
     float x = (float)optNum(xV, 0), y = (float)optNum(yV, 0);
     float w = (float)optNum(wV, 0), h = (float)optNum(hV, 0);
     dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h),
-                (ImU32)optInt(colV, 0xFFFFFFFF));
+                optU32(colV, 0xFFFFFFFFu));
     return zym_newNull();
 }
 
@@ -1517,7 +1592,7 @@ ZymValue u_drawRectFilled(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV,
     float x = (float)optNum(xV, 0), y = (float)optNum(yV, 0);
     float w = (float)optNum(wV, 0), h = (float)optNum(hV, 0);
     dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h),
-                      (ImU32)optInt(colV, 0xFFFFFFFF));
+                      optU32(colV, 0xFFFFFFFFu));
     return zym_newNull();
 }
 
@@ -1526,7 +1601,7 @@ ZymValue u_drawCircle(ZymVM* vm, ZymValue, ZymValue cxV, ZymValue cyV,
     ImDrawList* dl = curDL(vm, "ui.drawCircle");
     if (!dl) return ZYM_ERROR;
     dl->AddCircle(ImVec2((float)optNum(cxV, 0), (float)optNum(cyV, 0)),
-                  (float)optNum(rV, 0), (ImU32)optInt(colV, 0xFFFFFFFF));
+                  (float)optNum(rV, 0), optU32(colV, 0xFFFFFFFFu));
     return zym_newNull();
 }
 
@@ -1535,7 +1610,7 @@ ZymValue u_drawCircleFilled(ZymVM* vm, ZymValue, ZymValue cxV, ZymValue cyV,
     ImDrawList* dl = curDL(vm, "ui.drawCircleFilled");
     if (!dl) return ZYM_ERROR;
     dl->AddCircleFilled(ImVec2((float)optNum(cxV, 0), (float)optNum(cyV, 0)),
-                        (float)optNum(rV, 0), (ImU32)optInt(colV, 0xFFFFFFFF));
+                        (float)optNum(rV, 0), optU32(colV, 0xFFFFFFFFu));
     return zym_newNull();
 }
 
@@ -1546,7 +1621,7 @@ ZymValue u_drawText(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV,
     ImDrawList* dl = curDL(vm, "ui.drawText");
     if (!dl) return ZYM_ERROR;
     dl->AddText(ImVec2((float)optNum(xV, 0), (float)optNum(yV, 0)),
-                (ImU32)optInt(colV, 0xFFFFFFFF), s.c_str());
+                optU32(colV, 0xFFFFFFFFu), s.c_str());
     return zym_newNull();
 }
 
@@ -1560,7 +1635,7 @@ ZymValue u_drawTriangle(ZymVM* vm, ZymValue,
     dl->AddTriangle(ImVec2((float)optNum(x1V, 0), (float)optNum(y1V, 0)),
                     ImVec2((float)optNum(x2V, 0), (float)optNum(y2V, 0)),
                     ImVec2((float)optNum(x3V, 0), (float)optNum(y3V, 0)),
-                    (ImU32)optInt(colV, 0xFFFFFFFF));
+                    optU32(colV, 0xFFFFFFFFu));
     return zym_newNull();
 }
 
@@ -1574,7 +1649,7 @@ ZymValue u_drawTriangleFilled(ZymVM* vm, ZymValue,
     dl->AddTriangleFilled(ImVec2((float)optNum(x1V, 0), (float)optNum(y1V, 0)),
                           ImVec2((float)optNum(x2V, 0), (float)optNum(y2V, 0)),
                           ImVec2((float)optNum(x3V, 0), (float)optNum(y3V, 0)),
-                          (ImU32)optInt(colV, 0xFFFFFFFF));
+                          optU32(colV, 0xFFFFFFFFu));
     return zym_newNull();
 }
 
@@ -1608,25 +1683,6 @@ ZymValue u_framerate(ZymVM* vm, ZymValue) {
     return zym_newNumber((double)ImGui::GetIO().Framerate);
 }
 
-// ---- demo / inspector windows -----------------------------------------
-
-ZymValue u_showDemoWindow(ZymVM* vm, ZymValue) {
-    if (!requireFrame(vm, "ui.showDemoWindow")) return ZYM_ERROR;
-    ImGui::ShowDemoWindow();
-    return zym_newNull();
-}
-
-ZymValue u_showMetricsWindow(ZymVM* vm, ZymValue) {
-    if (!requireFrame(vm, "ui.showMetricsWindow")) return ZYM_ERROR;
-    ImGui::ShowMetricsWindow();
-    return zym_newNull();
-}
-
-ZymValue u_showAboutWindow(ZymVM* vm, ZymValue) {
-    if (!requireFrame(vm, "ui.showAboutWindow")) return ZYM_ERROR;
-    ImGui::ShowAboutWindow();
-    return zym_newNull();
-}
 
 ZymValue u_lastError(ZymVM* vm, ZymValue /*self*/) {
     return zym_newStringN(vm, g_ui_lastError.c_str(),
@@ -1651,8 +1707,20 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_pushRoot(vm, name);
 
     MOD(frame,     "frame(win, body)",  u_frame)
-    MOD(window,    "window(name, body)", u_window)
     MOD(lastError, "lastError()",       u_lastError)
+
+    // window: 2-arg (name, body) or 3-arg (name, flags, body) via dispatcher
+    ZymValue window2 = zym_createNativeClosure(vm, "window(name, body)",        (void*)u_window,      context);
+    zym_pushRoot(vm, window2);
+    ZymValue window3 = zym_createNativeClosure(vm, "window(name, flags, body)", (void*)u_windowFlags, context);
+    zym_pushRoot(vm, window3);
+    ZymValue window = zym_createDispatcher(vm);
+    zym_pushRoot(vm, window);
+    zym_addOverload(vm, window, window2);
+    zym_addOverload(vm, window, window3);
+
+    MOD(setNextWindowPos,  "setNextWindowPos(x, y)",  u_setNextWindowPos)
+    MOD(setNextWindowSize, "setNextWindowSize(w, h)", u_setNextWindowSize)
 
     // text family
     MOD(text,         "text(s)",                u_text)
@@ -2045,19 +2113,39 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(getMousePos,  "getMousePos()",  u_getMousePos)
     MOD(framerate,    "framerate()",    u_framerate)
 
-    // demo / inspector
-    MOD(showDemoWindow,    "showDemoWindow()",    u_showDemoWindow)
-    MOD(showMetricsWindow, "showMetricsWindow()", u_showMetricsWindow)
-    MOD(showAboutWindow,   "showAboutWindow()",   u_showAboutWindow)
-
 #undef MOD
 
     ZymValue obj = zym_newMap(vm);
     zym_pushRoot(vm, obj);
 
-    zym_mapSet(vm, obj, "frame",     frame);
-    zym_mapSet(vm, obj, "window",    window);
-    zym_mapSet(vm, obj, "lastError", lastError);
+    zym_mapSet(vm, obj, "frame",             frame);
+    zym_mapSet(vm, obj, "window",            window);
+    zym_mapSet(vm, obj, "setNextWindowPos",  setNextWindowPos);
+    zym_mapSet(vm, obj, "setNextWindowSize", setNextWindowSize);
+    zym_mapSet(vm, obj, "lastError",         lastError);
+
+    // ImGuiWindowFlags constants — exposed as plain integers so scripts
+    // can OR them together for `UI.window(name, flags, body)`. Subset
+    // most useful for full-pane / chromeless apps.
+    zym_mapSet(vm, obj, "WINDOW_NONE",                  zym_newNumber(0));
+    zym_mapSet(vm, obj, "WINDOW_NO_TITLE_BAR",          zym_newNumber(1 << 0));
+    zym_mapSet(vm, obj, "WINDOW_NO_RESIZE",             zym_newNumber(1 << 1));
+    zym_mapSet(vm, obj, "WINDOW_NO_MOVE",               zym_newNumber(1 << 2));
+    zym_mapSet(vm, obj, "WINDOW_NO_SCROLLBAR",          zym_newNumber(1 << 3));
+    zym_mapSet(vm, obj, "WINDOW_NO_SCROLL_WITH_MOUSE",  zym_newNumber(1 << 4));
+    zym_mapSet(vm, obj, "WINDOW_NO_COLLAPSE",           zym_newNumber(1 << 5));
+    zym_mapSet(vm, obj, "WINDOW_ALWAYS_AUTO_RESIZE",    zym_newNumber(1 << 6));
+    zym_mapSet(vm, obj, "WINDOW_NO_BACKGROUND",         zym_newNumber(1 << 7));
+    zym_mapSet(vm, obj, "WINDOW_NO_SAVED_SETTINGS",     zym_newNumber(1 << 8));
+    zym_mapSet(vm, obj, "WINDOW_NO_MOUSE_INPUTS",       zym_newNumber(1 << 9));
+    zym_mapSet(vm, obj, "WINDOW_MENU_BAR",              zym_newNumber(1 << 10));
+    zym_mapSet(vm, obj, "WINDOW_HORIZONTAL_SCROLLBAR",  zym_newNumber(1 << 11));
+    zym_mapSet(vm, obj, "WINDOW_NO_FOCUS_ON_APPEARING", zym_newNumber(1 << 12));
+    zym_mapSet(vm, obj, "WINDOW_NO_BRING_TO_FRONT_ON_FOCUS", zym_newNumber(1 << 13));
+    zym_mapSet(vm, obj, "WINDOW_NO_DECORATION",
+        zym_newNumber((1<<0)|(1<<1)|(1<<3)|(1<<5))); // NoTitleBar|NoResize|NoScrollbar|NoCollapse
+    zym_mapSet(vm, obj, "WINDOW_NO_INPUTS",
+        zym_newNumber((1<<9)|(1<<16)|(1<<17))); // NoMouseInputs|NoNavInputs|NoNavFocus (best-effort)
 
     zym_mapSet(vm, obj, "text",         text);
     zym_mapSet(vm, obj, "textColored",  textColored);
@@ -2160,9 +2248,6 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "getCursorPos",      getCursorPos);
     zym_mapSet(vm, obj, "getMousePos",       getMousePos);
     zym_mapSet(vm, obj, "framerate",         framerate);
-    zym_mapSet(vm, obj, "showDemoWindow",    showDemoWindow);
-    zym_mapSet(vm, obj, "showMetricsWindow", showMetricsWindow);
-    zym_mapSet(vm, obj, "showAboutWindow",   showAboutWindow);
 
     // Roots are popped in reverse-push order; everything we've pushed
     // is reachable from `obj`, which is itself rooted. Pop in groups
@@ -2170,9 +2255,6 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_popRoot(vm); // obj
 
     // batch 6 (popped newest-first)
-    zym_popRoot(vm); // showAboutWindow
-    zym_popRoot(vm); // showMetricsWindow
-    zym_popRoot(vm); // showDemoWindow
     zym_popRoot(vm); // framerate
     zym_popRoot(vm); // getMousePos
     zym_popRoot(vm); // getCursorPos
@@ -2263,7 +2345,8 @@ ZymValue nativeUi_create(ZymVM* vm) {
     // text family (7: bullet, bulletText, labelText, textDisabled, textWrapped, textColored, text)
     zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
     zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // lastError, window, frame
+    // setNextWindowSize, setNextWindowPos, window dispatcher, window3, window2, lastError, frame
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
     zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
     // context
     zym_popRoot(vm);

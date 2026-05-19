@@ -2083,6 +2083,686 @@ ZymValue u_withFont(ZymVM* vm, ZymValue, ZymValue fontV, ZymValue bodyV) {
 }
 
 
+// ---- PR 2d: widget parity (broader ImGui surface) ----------------------
+//
+// Added in this batch:
+//   * TabBar / TabItem scoped helpers
+//   * ListBox (scoped + flat-items form)
+//   * comboScope (BeginCombo/EndCombo, preview-string form)
+//   * Vector slider/drag/input variants (Float2/3/4, Int2/3/4)
+//   * SliderAngle, VSliderFloat, VSliderInt
+//   * SeparatorText(label)
+//   * TextLink / TextLinkOpenURL
+//   * CheckboxFlags
+//   * Scrolling helpers (getScrollX/Y, setScrollX/Y, getScrollMaxX/Y,
+//     setScrollHereX/Y, setScrollFromPosX/Y)
+//   * Window state queries (isWindowAppearing/Collapsed,
+//     getWindowPos/Size/Width/Height)
+//   * Item queries (isItemVisible/Edited/Activated/Deactivated/
+//     DeactivatedAfterEdit/Toggled, getItemRectMin/Max/Size,
+//     isAnyItemHovered/Active/Focused)
+//   * Mouse queries (isMouseDown/Clicked/DoubleClicked/Released/Dragging,
+//     getMouseDragDelta, resetMouseDragDelta, getMouseClickedCount)
+//   * Keyboard queries (isKeyDown/Pressed/Released, getKeyPressedAmount,
+//     setNextFrameWantCaptureKeyboard/Mouse)
+//   * Clipboard helpers (getClipboardText / setClipboardText)
+//   * Context popup helpers (popupContextItem / popupContextWindow)
+//   * SetNextItem* helpers + PushItemWidth/PopItemWidth + CalcTextSize
+//   * SetNextWindow* helpers (Focus, BgAlpha, ContentSize, Collapsed, Scroll)
+//   * Style getters (getStyleColorVec4, getColorU32, getFontSize)
+
+// Pack a 2-element ImVec2 / 3-element / 4-element float vector into a
+// ZymValue list. Helper for returning rects, sizes, deltas.
+static ZymValue makeXY(ZymVM* vm, float x, float y) {
+    ZymValue m = zym_newMap(vm);
+    zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "x", zym_newNumber((double)x));
+    zym_mapSet(vm, m, "y", zym_newNumber((double)y));
+    zym_popRoot(vm);
+    return m;
+}
+
+// Read N floats from a list reference into out[N]. Returns false on
+// length mismatch / non-number entries (sets a runtime error).
+static bool refReadFloatN(ZymVM* vm, ZymValue ref, int n, const char* where,
+                          float out[]) {
+    if (!zym_isList(ref) || zym_listLength(ref) != n) {
+        zym_runtimeError(vm, "%s: ref must be a list of %d numbers", where, n);
+        return false;
+    }
+    for (int i = 0; i < n; i++) {
+        ZymValue v = zym_listGet(vm, ref, i);
+        if (!zym_isNumber(v)) {
+            zym_runtimeError(vm, "%s: ref[%d] is not a number", where, i);
+            return false;
+        }
+        out[i] = (float)zym_asNumber(v);
+    }
+    return true;
+}
+
+// Read N ints from a list reference into out[N].
+static bool refReadIntN(ZymVM* vm, ZymValue ref, int n, const char* where,
+                        int out[]) {
+    if (!zym_isList(ref) || zym_listLength(ref) != n) {
+        zym_runtimeError(vm, "%s: ref must be a list of %d ints", where, n);
+        return false;
+    }
+    for (int i = 0; i < n; i++) {
+        ZymValue v = zym_listGet(vm, ref, i);
+        if (!zym_isNumber(v)) {
+            zym_runtimeError(vm, "%s: ref[%d] is not a number", where, i);
+            return false;
+        }
+        out[i] = (int)zym_asNumber(v);
+    }
+    return true;
+}
+
+// Write N floats back to a list reference.
+static void refWriteFloatN(ZymVM* vm, ZymValue ref, int n, const float v[]) {
+    for (int i = 0; i < n; i++) {
+        zym_listSet(vm, ref, i, zym_newNumber((double)v[i]));
+    }
+}
+
+// Write N ints back to a list reference.
+static void refWriteIntN(ZymVM* vm, ZymValue ref, int n, const int v[]) {
+    for (int i = 0; i < n; i++) {
+        zym_listSet(vm, ref, i, zym_newNumber((double)v[i]));
+    }
+}
+
+// Invoke a callable body once. Used by every scoped helper added in
+// this batch. Returns true on success, false if the body raised.
+static bool invokeBody(ZymVM* vm, ZymValue bodyV) {
+    zym_pushRoot(vm, bodyV);
+    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+    zym_popRoot(vm);
+    return st == ZYM_STATUS_OK;
+}
+
+// ---- 2d.a: scoped tab bar / tab item ----
+ZymValue u_tabBar(ZymVM* vm, ZymValue, ZymValue idV, ZymValue bodyV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.tabBar(id, body)", &id)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.tabBar(id, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.tabBar")) return ZYM_ERROR;
+    bool open = ImGui::BeginTabBar(id.c_str());
+    if (open) {
+        bool ok = invokeBody(vm, bodyV);
+        ImGui::EndTabBar();
+        if (!ok) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+ZymValue u_tabItem(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue bodyV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.tabItem(label, body)", &label)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.tabItem(label, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.tabItem")) return ZYM_ERROR;
+    bool open = ImGui::BeginTabItem(label.c_str(), nullptr, 0);
+    if (open) {
+        bool ok = invokeBody(vm, bodyV);
+        ImGui::EndTabItem();
+        if (!ok) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+ZymValue u_tabItemButton(ZymVM* vm, ZymValue, ZymValue labelV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.tabItemButton(label)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.tabItemButton")) return ZYM_ERROR;
+    return zym_newBool(ImGui::TabItemButton(label.c_str(), 0));
+}
+
+// ---- 2d.b: list box ----
+ZymValue u_listBox(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue bodyV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.listBox(label, body)", &label)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.listBox(label, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.listBox")) return ZYM_ERROR;
+    bool open = ImGui::BeginListBox(label.c_str());
+    if (open) {
+        bool ok = invokeBody(vm, bodyV);
+        ImGui::EndListBox();
+        if (!ok) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// flat listBox(label, idxRef, items)
+ZymValue u_listBoxFlat(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue idxRefV,
+                       ZymValue itemsV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.listBox", &label)) return ZYM_ERROR;
+    int cur;
+    if (!refReadInt(vm, idxRefV, "ui.listBox", &cur)) return ZYM_ERROR;
+    if (!zym_isList(itemsV)) {
+        zym_runtimeError(vm, "ui.listBox: items must be a list of strings");
+        return ZYM_ERROR;
+    }
+    if (!requireFrame(vm, "ui.listBox")) return ZYM_ERROR;
+    int n = zym_listLength(itemsV);
+    std::vector<std::string> store; store.reserve(n);
+    std::vector<const char*> ptrs;  ptrs.reserve(n);
+    for (int i = 0; i < n; i++) {
+        ZymValue iv = zym_listGet(vm, itemsV, i);
+        if (!zym_isString(iv)) {
+            zym_runtimeError(vm, "ui.listBox: item %d is not a string", i);
+            return ZYM_ERROR;
+        }
+        store.emplace_back(zym_asCString(iv));
+        ptrs.push_back(store.back().c_str());
+    }
+    bool changed = ImGui::ListBox(label.c_str(), &cur,
+                                  ptrs.empty() ? nullptr : ptrs.data(), n, -1);
+    if (changed) refWriteInt(vm, idxRefV, cur);
+    return zym_newBool(changed);
+}
+
+// ---- 2d.c: scoped combo (BeginCombo/EndCombo) ----
+ZymValue u_comboScope(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue previewV,
+                     ZymValue bodyV) {
+    std::string label, preview;
+    if (!reqStr(vm, labelV,  "ui.comboScope(label, preview, body)", &label))   return ZYM_ERROR;
+    if (!reqStr(vm, previewV,"ui.comboScope(label, preview, body)", &preview)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV,"ui.comboScope(label, preview, body)"))         return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.comboScope")) return ZYM_ERROR;
+    bool open = ImGui::BeginCombo(label.c_str(), preview.c_str(), 0);
+    if (open) {
+        bool ok = invokeBody(vm, bodyV);
+        ImGui::EndCombo();
+        if (!ok) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// ---- 2d.d: separatorText / textLink ----
+ZymValue u_separatorText(ZymVM* vm, ZymValue, ZymValue sV) {
+    std::string s; if (!reqStr(vm, sV, "ui.separatorText(s)", &s)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.separatorText")) return ZYM_ERROR;
+    ImGui::SeparatorText(s.c_str());
+    return zym_newNull();
+}
+
+ZymValue u_textLink(ZymVM* vm, ZymValue, ZymValue sV) {
+    std::string s; if (!reqStr(vm, sV, "ui.textLink(s)", &s)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.textLink")) return ZYM_ERROR;
+    return zym_newBool(ImGui::TextLink(s.c_str()));
+}
+
+ZymValue u_textLinkOpenURL(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue urlV) {
+    std::string label, url;
+    if (!reqStr(vm, labelV, "ui.textLinkOpenURL(label, url)", &label)) return ZYM_ERROR;
+    if (!reqStr(vm, urlV,   "ui.textLinkOpenURL(label, url)", &url))   return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.textLinkOpenURL")) return ZYM_ERROR;
+    ImGui::TextLinkOpenURL(label.c_str(), url.c_str());
+    return zym_newNull();
+}
+
+// ---- 2d.e: checkboxFlags(label, ref, flagsValue) ----
+ZymValue u_checkboxFlags(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV,
+                         ZymValue flagsV) {
+    std::string label; if (!reqStr(vm, labelV, "ui.checkboxFlags", &label)) return ZYM_ERROR;
+    int v;             if (!refReadInt(vm, refV, "ui.checkboxFlags", &v))   return ZYM_ERROR;
+    int flagsBit;      if (!reqInt(vm, flagsV, "ui.checkboxFlags", &flagsBit)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.checkboxFlags")) return ZYM_ERROR;
+    bool changed = ImGui::CheckboxFlags(label.c_str(), &v, flagsBit);
+    if (changed) refWriteInt(vm, refV, v);
+    return zym_newBool(changed);
+}
+
+// ---- 2d.f: vector slider / drag / input ----
+#define VEC_RW_FLOAT(NAME, N, IMCALL)                                                  \
+ZymValue u_##NAME(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV,                 \
+                  ZymValue minV, ZymValue maxV) {                                      \
+    std::string label; if (!reqStr(vm, labelV, "ui." #NAME, &label)) return ZYM_ERROR; \
+    float v[N];        if (!refReadFloatN(vm, refV, N, "ui." #NAME, v)) return ZYM_ERROR; \
+    double mn = optNum(minV, 0.0), mx = optNum(maxV, 1.0);                             \
+    if (!requireFrame(vm, "ui." #NAME)) return ZYM_ERROR;                              \
+    bool changed = ImGui::IMCALL(label.c_str(), v, (float)mn, (float)mx, "%.3f", 0);   \
+    if (changed) refWriteFloatN(vm, refV, N, v);                                       \
+    return zym_newBool(changed);                                                       \
+}
+
+VEC_RW_FLOAT(sliderFloat2, 2, SliderFloat2)
+VEC_RW_FLOAT(sliderFloat3, 3, SliderFloat3)
+VEC_RW_FLOAT(sliderFloat4, 4, SliderFloat4)
+
+#define VEC_RW_INT(NAME, N, IMCALL)                                                    \
+ZymValue u_##NAME(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV,                 \
+                  ZymValue minV, ZymValue maxV) {                                      \
+    std::string label; if (!reqStr(vm, labelV, "ui." #NAME, &label)) return ZYM_ERROR; \
+    int v[N];          if (!refReadIntN(vm, refV, N, "ui." #NAME, v)) return ZYM_ERROR; \
+    int mn = optInt(minV, 0), mx = optInt(maxV, 100);                                  \
+    if (!requireFrame(vm, "ui." #NAME)) return ZYM_ERROR;                              \
+    bool changed = ImGui::IMCALL(label.c_str(), v, mn, mx, "%d", 0);                   \
+    if (changed) refWriteIntN(vm, refV, N, v);                                         \
+    return zym_newBool(changed);                                                       \
+}
+
+VEC_RW_INT(sliderInt2, 2, SliderInt2)
+VEC_RW_INT(sliderInt3, 3, SliderInt3)
+VEC_RW_INT(sliderInt4, 4, SliderInt4)
+
+#define VEC_DRAG_FLOAT(NAME, N, IMCALL)                                                \
+ZymValue u_##NAME(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV,                 \
+                  ZymValue speedV, ZymValue minV, ZymValue maxV) {                     \
+    std::string label; if (!reqStr(vm, labelV, "ui." #NAME, &label)) return ZYM_ERROR; \
+    float v[N];        if (!refReadFloatN(vm, refV, N, "ui." #NAME, v)) return ZYM_ERROR; \
+    double sp = optNum(speedV, 1.0), mn = optNum(minV, 0.0), mx = optNum(maxV, 0.0);   \
+    if (!requireFrame(vm, "ui." #NAME)) return ZYM_ERROR;                              \
+    bool changed = ImGui::IMCALL(label.c_str(), v, (float)sp, (float)mn, (float)mx,    \
+                                 "%.3f", 0);                                           \
+    if (changed) refWriteFloatN(vm, refV, N, v);                                       \
+    return zym_newBool(changed);                                                       \
+}
+
+VEC_DRAG_FLOAT(dragFloat2, 2, DragFloat2)
+VEC_DRAG_FLOAT(dragFloat3, 3, DragFloat3)
+VEC_DRAG_FLOAT(dragFloat4, 4, DragFloat4)
+
+#define VEC_DRAG_INT(NAME, N, IMCALL)                                                  \
+ZymValue u_##NAME(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV,                 \
+                  ZymValue speedV, ZymValue minV, ZymValue maxV) {                     \
+    std::string label; if (!reqStr(vm, labelV, "ui." #NAME, &label)) return ZYM_ERROR; \
+    int v[N];          if (!refReadIntN(vm, refV, N, "ui." #NAME, v)) return ZYM_ERROR; \
+    double sp = optNum(speedV, 1.0);                                                   \
+    int mn = optInt(minV, 0), mx = optInt(maxV, 0);                                    \
+    if (!requireFrame(vm, "ui." #NAME)) return ZYM_ERROR;                              \
+    bool changed = ImGui::IMCALL(label.c_str(), v, (float)sp, mn, mx, "%d", 0);        \
+    if (changed) refWriteIntN(vm, refV, N, v);                                         \
+    return zym_newBool(changed);                                                       \
+}
+
+VEC_DRAG_INT(dragInt2, 2, DragInt2)
+VEC_DRAG_INT(dragInt3, 3, DragInt3)
+VEC_DRAG_INT(dragInt4, 4, DragInt4)
+
+#define VEC_INPUT_FLOAT(NAME, N, IMCALL)                                               \
+ZymValue u_##NAME(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV) {               \
+    std::string label; if (!reqStr(vm, labelV, "ui." #NAME, &label)) return ZYM_ERROR; \
+    float v[N];        if (!refReadFloatN(vm, refV, N, "ui." #NAME, v)) return ZYM_ERROR; \
+    if (!requireFrame(vm, "ui." #NAME)) return ZYM_ERROR;                              \
+    bool changed = ImGui::IMCALL(label.c_str(), v, "%.3f", 0);                         \
+    if (changed) refWriteFloatN(vm, refV, N, v);                                       \
+    return zym_newBool(changed);                                                       \
+}
+
+VEC_INPUT_FLOAT(inputFloat2, 2, InputFloat2)
+VEC_INPUT_FLOAT(inputFloat3, 3, InputFloat3)
+VEC_INPUT_FLOAT(inputFloat4, 4, InputFloat4)
+
+#define VEC_INPUT_INT(NAME, N, IMCALL)                                                 \
+ZymValue u_##NAME(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV) {               \
+    std::string label; if (!reqStr(vm, labelV, "ui." #NAME, &label)) return ZYM_ERROR; \
+    int v[N];          if (!refReadIntN(vm, refV, N, "ui." #NAME, v)) return ZYM_ERROR; \
+    if (!requireFrame(vm, "ui." #NAME)) return ZYM_ERROR;                              \
+    bool changed = ImGui::IMCALL(label.c_str(), v, 0);                                 \
+    if (changed) refWriteIntN(vm, refV, N, v);                                         \
+    return zym_newBool(changed);                                                       \
+}
+
+VEC_INPUT_INT(inputInt2, 2, InputInt2)
+VEC_INPUT_INT(inputInt3, 3, InputInt3)
+VEC_INPUT_INT(inputInt4, 4, InputInt4)
+
+// ---- 2d.g: sliderAngle / vsliders ----
+ZymValue u_sliderAngle(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV,
+                       ZymValue degMinV, ZymValue degMaxV) {
+    std::string label; if (!reqStr(vm, labelV, "ui.sliderAngle", &label)) return ZYM_ERROR;
+    float v;           if (!refReadFloat(vm, refV, "ui.sliderAngle", &v)) return ZYM_ERROR;
+    double mn = optNum(degMinV, -360.0), mx = optNum(degMaxV, 360.0);
+    if (!requireFrame(vm, "ui.sliderAngle")) return ZYM_ERROR;
+    bool changed = ImGui::SliderAngle(label.c_str(), &v, (float)mn, (float)mx,
+                                      "%.0f deg", 0);
+    if (changed) refWriteFloat(vm, refV, v);
+    return zym_newBool(changed);
+}
+
+ZymValue u_vSliderFloat(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue wV,
+                        ZymValue hV, ZymValue refV, ZymValue minV, ZymValue maxV) {
+    std::string label; if (!reqStr(vm, labelV, "ui.vSliderFloat", &label)) return ZYM_ERROR;
+    float v;           if (!refReadFloat(vm, refV, "ui.vSliderFloat", &v)) return ZYM_ERROR;
+    double w = optNum(wV, 18.0), h = optNum(hV, 160.0);
+    double mn = optNum(minV, 0.0), mx = optNum(maxV, 1.0);
+    if (!requireFrame(vm, "ui.vSliderFloat")) return ZYM_ERROR;
+    bool changed = ImGui::VSliderFloat(label.c_str(), ImVec2((float)w, (float)h),
+                                       &v, (float)mn, (float)mx, "%.3f", 0);
+    if (changed) refWriteFloat(vm, refV, v);
+    return zym_newBool(changed);
+}
+
+ZymValue u_vSliderInt(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue wV,
+                      ZymValue hV, ZymValue refV, ZymValue minV, ZymValue maxV) {
+    std::string label; if (!reqStr(vm, labelV, "ui.vSliderInt", &label)) return ZYM_ERROR;
+    int v;             if (!refReadInt(vm, refV, "ui.vSliderInt", &v))   return ZYM_ERROR;
+    double w = optNum(wV, 18.0), h = optNum(hV, 160.0);
+    int mn = optInt(minV, 0), mx = optInt(maxV, 100);
+    if (!requireFrame(vm, "ui.vSliderInt")) return ZYM_ERROR;
+    bool changed = ImGui::VSliderInt(label.c_str(), ImVec2((float)w, (float)h),
+                                     &v, mn, mx, "%d", 0);
+    if (changed) refWriteInt(vm, refV, v);
+    return zym_newBool(changed);
+}
+
+// ---- 2d.h: scrolling helpers ----
+ZymValue u_getScrollX(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getScrollX")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetScrollX());
+}
+ZymValue u_getScrollY(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getScrollY")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetScrollY());
+}
+ZymValue u_getScrollMaxX(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getScrollMaxX")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetScrollMaxX());
+}
+ZymValue u_getScrollMaxY(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getScrollMaxY")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetScrollMaxY());
+}
+ZymValue u_setScrollX(ZymVM* vm, ZymValue, ZymValue xV) {
+    if (!requireFrame(vm, "ui.setScrollX")) return ZYM_ERROR;
+    ImGui::SetScrollX((float)optNum(xV, 0)); return zym_newNull();
+}
+ZymValue u_setScrollY(ZymVM* vm, ZymValue, ZymValue yV) {
+    if (!requireFrame(vm, "ui.setScrollY")) return ZYM_ERROR;
+    ImGui::SetScrollY((float)optNum(yV, 0)); return zym_newNull();
+}
+ZymValue u_setScrollHereX(ZymVM* vm, ZymValue, ZymValue cV) {
+    if (!requireFrame(vm, "ui.setScrollHereX")) return ZYM_ERROR;
+    ImGui::SetScrollHereX((float)optNum(cV, 0.5)); return zym_newNull();
+}
+ZymValue u_setScrollHereY(ZymVM* vm, ZymValue, ZymValue cV) {
+    if (!requireFrame(vm, "ui.setScrollHereY")) return ZYM_ERROR;
+    ImGui::SetScrollHereY((float)optNum(cV, 0.5)); return zym_newNull();
+}
+ZymValue u_setScrollFromPosX(ZymVM* vm, ZymValue, ZymValue pV, ZymValue cV) {
+    if (!requireFrame(vm, "ui.setScrollFromPosX")) return ZYM_ERROR;
+    ImGui::SetScrollFromPosX((float)optNum(pV, 0), (float)optNum(cV, 0.5));
+    return zym_newNull();
+}
+ZymValue u_setScrollFromPosY(ZymVM* vm, ZymValue, ZymValue pV, ZymValue cV) {
+    if (!requireFrame(vm, "ui.setScrollFromPosY")) return ZYM_ERROR;
+    ImGui::SetScrollFromPosY((float)optNum(pV, 0), (float)optNum(cV, 0.5));
+    return zym_newNull();
+}
+
+// ---- 2d.i: window state queries ----
+ZymValue u_isWindowAppearing(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isWindowAppearing")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsWindowAppearing());
+}
+ZymValue u_isWindowCollapsed(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isWindowCollapsed")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsWindowCollapsed());
+}
+ZymValue u_getWindowPos(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getWindowPos")) return ZYM_ERROR;
+    ImVec2 p = ImGui::GetWindowPos(); return makeXY(vm, p.x, p.y);
+}
+ZymValue u_getWindowSize(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getWindowSize")) return ZYM_ERROR;
+    ImVec2 s = ImGui::GetWindowSize(); return makeXY(vm, s.x, s.y);
+}
+ZymValue u_getWindowWidth(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getWindowWidth")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetWindowWidth());
+}
+ZymValue u_getWindowHeight(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getWindowHeight")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetWindowHeight());
+}
+
+// ---- 2d.j: setNextWindow* ----
+ZymValue u_setNextWindowFocus(ZymVM*, ZymValue) {
+    ImGui::SetNextWindowFocus(); return zym_newNull();
+}
+ZymValue u_setNextWindowBgAlpha(ZymVM*, ZymValue, ZymValue aV) {
+    ImGui::SetNextWindowBgAlpha((float)optNum(aV, 1.0)); return zym_newNull();
+}
+ZymValue u_setNextWindowContentSize(ZymVM*, ZymValue, ZymValue wV, ZymValue hV) {
+    ImGui::SetNextWindowContentSize(ImVec2((float)optNum(wV, 0), (float)optNum(hV, 0)));
+    return zym_newNull();
+}
+ZymValue u_setNextWindowCollapsed(ZymVM*, ZymValue, ZymValue cV) {
+    ImGui::SetNextWindowCollapsed(optBool(cV, false), 0); return zym_newNull();
+}
+ZymValue u_setNextWindowScroll(ZymVM*, ZymValue, ZymValue xV, ZymValue yV) {
+    ImGui::SetNextWindowScroll(ImVec2((float)optNum(xV, -1), (float)optNum(yV, -1)));
+    return zym_newNull();
+}
+
+// ---- 2d.k: extra item queries ----
+ZymValue u_isItemVisible(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isItemVisible")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsItemVisible());
+}
+ZymValue u_isItemEdited(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isItemEdited")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsItemEdited());
+}
+ZymValue u_isItemActivated(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isItemActivated")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsItemActivated());
+}
+ZymValue u_isItemDeactivated(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isItemDeactivated")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsItemDeactivated());
+}
+ZymValue u_isItemDeactivatedAfterEdit(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isItemDeactivatedAfterEdit")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsItemDeactivatedAfterEdit());
+}
+ZymValue u_isItemToggledOpen(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isItemToggledOpen")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsItemToggledOpen());
+}
+ZymValue u_isAnyItemHovered(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isAnyItemHovered")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsAnyItemHovered());
+}
+ZymValue u_isAnyItemActive(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isAnyItemActive")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsAnyItemActive());
+}
+ZymValue u_isAnyItemFocused(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.isAnyItemFocused")) return ZYM_ERROR;
+    return zym_newBool(ImGui::IsAnyItemFocused());
+}
+ZymValue u_getItemRectMin(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getItemRectMin")) return ZYM_ERROR;
+    ImVec2 p = ImGui::GetItemRectMin(); return makeXY(vm, p.x, p.y);
+}
+ZymValue u_getItemRectMax(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getItemRectMax")) return ZYM_ERROR;
+    ImVec2 p = ImGui::GetItemRectMax(); return makeXY(vm, p.x, p.y);
+}
+ZymValue u_getItemRectSize(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getItemRectSize")) return ZYM_ERROR;
+    ImVec2 p = ImGui::GetItemRectSize(); return makeXY(vm, p.x, p.y);
+}
+
+// ---- 2d.l: mouse queries ----
+ZymValue u_isMouseDown(ZymVM*, ZymValue, ZymValue bV) {
+    return zym_newBool(ImGui::IsMouseDown(optInt(bV, 0)));
+}
+ZymValue u_isMouseClicked(ZymVM*, ZymValue, ZymValue bV) {
+    return zym_newBool(ImGui::IsMouseClicked(optInt(bV, 0), false));
+}
+ZymValue u_isMouseDoubleClicked(ZymVM*, ZymValue, ZymValue bV) {
+    return zym_newBool(ImGui::IsMouseDoubleClicked(optInt(bV, 0)));
+}
+ZymValue u_isMouseReleased(ZymVM*, ZymValue, ZymValue bV) {
+    return zym_newBool(ImGui::IsMouseReleased(optInt(bV, 0)));
+}
+ZymValue u_isMouseDragging(ZymVM*, ZymValue, ZymValue bV, ZymValue thV) {
+    return zym_newBool(ImGui::IsMouseDragging(optInt(bV, 0), (float)optNum(thV, -1)));
+}
+ZymValue u_getMouseDragDelta(ZymVM* vm, ZymValue, ZymValue bV) {
+    ImVec2 d = ImGui::GetMouseDragDelta(optInt(bV, 0), -1);
+    return makeXY(vm, d.x, d.y);
+}
+ZymValue u_resetMouseDragDelta(ZymVM*, ZymValue, ZymValue bV) {
+    ImGui::ResetMouseDragDelta(optInt(bV, 0)); return zym_newNull();
+}
+ZymValue u_getMouseClickedCount(ZymVM*, ZymValue, ZymValue bV) {
+    return zym_newNumber((double)ImGui::GetMouseClickedCount(optInt(bV, 0)));
+}
+
+// ---- 2d.m: keyboard queries ----
+ZymValue u_isKeyDown(ZymVM*, ZymValue, ZymValue kV) {
+    return zym_newBool(ImGui::IsKeyDown((ImGuiKey)optInt(kV, 0)));
+}
+ZymValue u_isKeyPressed(ZymVM*, ZymValue, ZymValue kV, ZymValue repV) {
+    return zym_newBool(ImGui::IsKeyPressed((ImGuiKey)optInt(kV, 0), optBool(repV, true)));
+}
+ZymValue u_isKeyReleased(ZymVM*, ZymValue, ZymValue kV) {
+    return zym_newBool(ImGui::IsKeyReleased((ImGuiKey)optInt(kV, 0)));
+}
+ZymValue u_getKeyPressedAmount(ZymVM*, ZymValue, ZymValue kV, ZymValue rdV, ZymValue rrV) {
+    return zym_newNumber((double)ImGui::GetKeyPressedAmount(
+        (ImGuiKey)optInt(kV, 0), (float)optNum(rdV, 0), (float)optNum(rrV, 0)));
+}
+ZymValue u_setNextFrameWantCaptureKeyboard(ZymVM*, ZymValue, ZymValue bV) {
+    ImGui::SetNextFrameWantCaptureKeyboard(optBool(bV, true)); return zym_newNull();
+}
+ZymValue u_setNextFrameWantCaptureMouse(ZymVM*, ZymValue, ZymValue bV) {
+    ImGui::SetNextFrameWantCaptureMouse(optBool(bV, true)); return zym_newNull();
+}
+
+// ---- 2d.n: clipboard ----
+ZymValue u_getClipboardText(ZymVM* vm, ZymValue) {
+    const char* s = ImGui::GetClipboardText();
+    return zym_newString(vm, s ? s : "");
+}
+ZymValue u_setClipboardText(ZymVM* vm, ZymValue, ZymValue sV) {
+    std::string s; if (!reqStr(vm, sV, "ui.setClipboardText", &s)) return ZYM_ERROR;
+    ImGui::SetClipboardText(s.c_str()); return zym_newNull();
+}
+
+// ---- 2d.o: popupContextItem / popupContextWindow (scoped) ----
+ZymValue u_popupContextItem(ZymVM* vm, ZymValue, ZymValue idV, ZymValue bodyV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.popupContextItem(id, body)", &id)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.popupContextItem(id, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.popupContextItem")) return ZYM_ERROR;
+    bool open = ImGui::BeginPopupContextItem(id.c_str(), ImGuiPopupFlags_MouseButtonRight);
+    if (open) {
+        bool ok = invokeBody(vm, bodyV);
+        ImGui::EndPopup();
+        if (!ok) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+ZymValue u_popupContextWindow(ZymVM* vm, ZymValue, ZymValue idV, ZymValue bodyV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.popupContextWindow(id, body)", &id)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.popupContextWindow(id, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.popupContextWindow")) return ZYM_ERROR;
+    bool open = ImGui::BeginPopupContextWindow(id.c_str(), ImGuiPopupFlags_MouseButtonRight);
+    if (open) {
+        bool ok = invokeBody(vm, bodyV);
+        ImGui::EndPopup();
+        if (!ok) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// ---- 2d.p: setNextItem*, push/pop ItemWidth, calcTextSize, style getters ----
+ZymValue u_setNextItemWidth(ZymVM* vm, ZymValue, ZymValue wV) {
+    if (!requireFrame(vm, "ui.setNextItemWidth")) return ZYM_ERROR;
+    ImGui::SetNextItemWidth((float)optNum(wV, -1)); return zym_newNull();
+}
+ZymValue u_setNextItemOpen(ZymVM* vm, ZymValue, ZymValue bV) {
+    if (!requireFrame(vm, "ui.setNextItemOpen")) return ZYM_ERROR;
+    ImGui::SetNextItemOpen(optBool(bV, false), 0); return zym_newNull();
+}
+ZymValue u_setNextItemAllowOverlap(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.setNextItemAllowOverlap")) return ZYM_ERROR;
+    ImGui::SetNextItemAllowOverlap(); return zym_newNull();
+}
+ZymValue u_pushItemWidth(ZymVM* vm, ZymValue, ZymValue wV) {
+    if (!requireFrame(vm, "ui.pushItemWidth")) return ZYM_ERROR;
+    ImGui::PushItemWidth((float)optNum(wV, -1)); return zym_newNull();
+}
+ZymValue u_popItemWidth(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.popItemWidth")) return ZYM_ERROR;
+    ImGui::PopItemWidth(); return zym_newNull();
+}
+ZymValue u_setKeyboardFocusHere(ZymVM* vm, ZymValue, ZymValue oV) {
+    if (!requireFrame(vm, "ui.setKeyboardFocusHere")) return ZYM_ERROR;
+    ImGui::SetKeyboardFocusHere(optInt(oV, 0)); return zym_newNull();
+}
+ZymValue u_setItemDefaultFocus(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.setItemDefaultFocus")) return ZYM_ERROR;
+    ImGui::SetItemDefaultFocus(); return zym_newNull();
+}
+ZymValue u_calcTextSize(ZymVM* vm, ZymValue, ZymValue sV) {
+    std::string s; if (!reqStr(vm, sV, "ui.calcTextSize", &s)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.calcTextSize")) return ZYM_ERROR;
+    ImVec2 p = ImGui::CalcTextSize(s.c_str()); return makeXY(vm, p.x, p.y);
+}
+ZymValue u_getStyleColorVec4(ZymVM* vm, ZymValue, ZymValue nameV) {
+    std::string name; if (!reqStr(vm, nameV, "ui.getStyleColorVec4", &name)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.getStyleColorVec4")) return ZYM_ERROR;
+    int slot = -1;
+    for (auto& s : kColSlots) if (name == s.name) { slot = s.slot; break; }
+    if (slot < 0) {
+        zym_runtimeError(vm, "ui.getStyleColorVec4: unknown color slot '%s'", name.c_str());
+        return ZYM_ERROR;
+    }
+    const ImVec4& c = ImGui::GetStyleColorVec4(slot);
+    ZymValue list = zym_newList(vm);
+    zym_pushRoot(vm, list);
+    zym_listAppend(vm, list, zym_newNumber((double)c.x));
+    zym_listAppend(vm, list, zym_newNumber((double)c.y));
+    zym_listAppend(vm, list, zym_newNumber((double)c.z));
+    zym_listAppend(vm, list, zym_newNumber((double)c.w));
+    zym_popRoot(vm);
+    return list;
+}
+ZymValue u_getFontSize(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getFontSize")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetFontSize());
+}
+ZymValue u_getTextLineHeight(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getTextLineHeight")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetTextLineHeight());
+}
+ZymValue u_getTextLineHeightWithSpacing(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getTextLineHeightWithSpacing")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetTextLineHeightWithSpacing());
+}
+ZymValue u_getFrameHeight(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getFrameHeight")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetFrameHeight());
+}
+ZymValue u_getFrameHeightWithSpacing(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getFrameHeightWithSpacing")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetFrameHeightWithSpacing());
+}
+ZymValue u_getContentRegionAvail(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getContentRegionAvail")) return ZYM_ERROR;
+    ImVec2 p = ImGui::GetContentRegionAvail(); return makeXY(vm, p.x, p.y);
+}
+ZymValue u_setCursorPos(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV) {
+    if (!requireFrame(vm, "ui.setCursorPos")) return ZYM_ERROR;
+    ImGui::SetCursorPos(ImVec2((float)optNum(xV, 0), (float)optNum(yV, 0)));
+    return zym_newNull();
+}
+ZymValue u_setCursorScreenPos(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV) {
+    if (!requireFrame(vm, "ui.setCursorScreenPos")) return ZYM_ERROR;
+    ImGui::SetCursorScreenPos(ImVec2((float)optNum(xV, 0), (float)optNum(yV, 0)));
+    return zym_newNull();
+}
+
 ZymValue u_lastError(ZymVM* vm, ZymValue /*self*/) {
     return zym_newStringN(vm, g_ui_lastError.c_str(),
                           (int)g_ui_lastError.size());
@@ -2532,6 +3212,137 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     MOD(defaultFont,    "defaultFont()",             u_defaultFont)
 
+    // ----- PR 2d: widget parity batch -----
+    MOD(tabBar,          "tabBar(id, body)",            u_tabBar)
+    MOD(tabItem,         "tabItem(label, body)",        u_tabItem)
+    MOD(tabItemButton,   "tabItemButton(label)",        u_tabItemButton)
+
+    // listBox: scoped (label, body) and flat (label, idxRef, items)
+    ZymValue listBox2v = zym_createNativeClosure(vm, "listBox(label, body)",          (void*)u_listBox,     context);
+    zym_pushRoot(vm, listBox2v);
+    ZymValue listBox3v = zym_createNativeClosure(vm, "listBox(label, idxRef, items)", (void*)u_listBoxFlat, context);
+    zym_pushRoot(vm, listBox3v);
+    ZymValue listBox   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, listBox);
+    zym_addOverload(vm, listBox, listBox2v);
+    zym_addOverload(vm, listBox, listBox3v);
+
+    MOD(comboScope,      "comboScope(label, preview, body)", u_comboScope)
+    MOD(separatorText,   "separatorText(s)",                u_separatorText)
+    MOD(textLink,        "textLink(s)",                     u_textLink)
+    MOD(textLinkOpenURL, "textLinkOpenURL(label, url)",     u_textLinkOpenURL)
+    MOD(checkboxFlags,   "checkboxFlags(label, ref, flag)", u_checkboxFlags)
+
+    // vector slider / drag / input
+    MOD(sliderFloat2v, "sliderFloat2(label, ref, min, max)", u_sliderFloat2)
+    MOD(sliderFloat3v, "sliderFloat3(label, ref, min, max)", u_sliderFloat3)
+    MOD(sliderFloat4v, "sliderFloat4(label, ref, min, max)", u_sliderFloat4)
+    MOD(sliderInt2v,   "sliderInt2(label, ref, min, max)",   u_sliderInt2)
+    MOD(sliderInt3v,   "sliderInt3(label, ref, min, max)",   u_sliderInt3)
+    MOD(sliderInt4v,   "sliderInt4(label, ref, min, max)",   u_sliderInt4)
+    MOD(dragFloat2v,   "dragFloat2(label, ref, speed, min, max)", u_dragFloat2)
+    MOD(dragFloat3v,   "dragFloat3(label, ref, speed, min, max)", u_dragFloat3)
+    MOD(dragFloat4v,   "dragFloat4(label, ref, speed, min, max)", u_dragFloat4)
+    MOD(dragInt2v,     "dragInt2(label, ref, speed, min, max)",   u_dragInt2)
+    MOD(dragInt3v,     "dragInt3(label, ref, speed, min, max)",   u_dragInt3)
+    MOD(dragInt4v,     "dragInt4(label, ref, speed, min, max)",   u_dragInt4)
+    MOD(inputFloat2v,  "inputFloat2(label, ref)",           u_inputFloat2)
+    MOD(inputFloat3v,  "inputFloat3(label, ref)",           u_inputFloat3)
+    MOD(inputFloat4v,  "inputFloat4(label, ref)",           u_inputFloat4)
+    MOD(inputInt2v,    "inputInt2(label, ref)",             u_inputInt2)
+    MOD(inputInt3v,    "inputInt3(label, ref)",             u_inputInt3)
+    MOD(inputInt4v,    "inputInt4(label, ref)",             u_inputInt4)
+
+    MOD(sliderAngle,  "sliderAngle(label, ref, degMin, degMax)",     u_sliderAngle)
+    MOD(vSliderFloat, "vSliderFloat(label, w, h, ref, min, max)",    u_vSliderFloat)
+    MOD(vSliderInt,   "vSliderInt(label, w, h, ref, min, max)",      u_vSliderInt)
+
+    // scrolling
+    MOD(getScrollX,        "getScrollX()",                 u_getScrollX)
+    MOD(getScrollY,        "getScrollY()",                 u_getScrollY)
+    MOD(getScrollMaxX,     "getScrollMaxX()",              u_getScrollMaxX)
+    MOD(getScrollMaxY,     "getScrollMaxY()",              u_getScrollMaxY)
+    MOD(setScrollX,        "setScrollX(x)",                u_setScrollX)
+    MOD(setScrollY,        "setScrollY(y)",                u_setScrollY)
+    MOD(setScrollHereX,    "setScrollHereX(centerRatio)",  u_setScrollHereX)
+    MOD(setScrollHereY,    "setScrollHereY(centerRatio)",  u_setScrollHereY)
+    MOD(setScrollFromPosX, "setScrollFromPosX(localX, centerRatio)", u_setScrollFromPosX)
+    MOD(setScrollFromPosY, "setScrollFromPosY(localY, centerRatio)", u_setScrollFromPosY)
+
+    // window state
+    MOD(isWindowAppearing, "isWindowAppearing()", u_isWindowAppearing)
+    MOD(isWindowCollapsed, "isWindowCollapsed()", u_isWindowCollapsed)
+    MOD(getWindowPos,      "getWindowPos()",      u_getWindowPos)
+    MOD(getWindowSize,     "getWindowSize()",     u_getWindowSize)
+    MOD(getWindowWidth,    "getWindowWidth()",    u_getWindowWidth)
+    MOD(getWindowHeight,   "getWindowHeight()",   u_getWindowHeight)
+
+    // setNextWindow*
+    MOD(setNextWindowFocus,       "setNextWindowFocus()",            u_setNextWindowFocus)
+    MOD(setNextWindowBgAlpha,     "setNextWindowBgAlpha(alpha)",     u_setNextWindowBgAlpha)
+    MOD(setNextWindowContentSize, "setNextWindowContentSize(w, h)",  u_setNextWindowContentSize)
+    MOD(setNextWindowCollapsed,   "setNextWindowCollapsed(c)",       u_setNextWindowCollapsed)
+    MOD(setNextWindowScroll,      "setNextWindowScroll(x, y)",       u_setNextWindowScroll)
+
+    // item queries
+    MOD(isItemVisible,              "isItemVisible()",              u_isItemVisible)
+    MOD(isItemEdited,               "isItemEdited()",               u_isItemEdited)
+    MOD(isItemActivated,            "isItemActivated()",            u_isItemActivated)
+    MOD(isItemDeactivated,          "isItemDeactivated()",          u_isItemDeactivated)
+    MOD(isItemDeactivatedAfterEdit, "isItemDeactivatedAfterEdit()", u_isItemDeactivatedAfterEdit)
+    MOD(isItemToggledOpen,          "isItemToggledOpen()",          u_isItemToggledOpen)
+    MOD(isAnyItemHovered,           "isAnyItemHovered()",           u_isAnyItemHovered)
+    MOD(isAnyItemActive,            "isAnyItemActive()",            u_isAnyItemActive)
+    MOD(isAnyItemFocused,           "isAnyItemFocused()",           u_isAnyItemFocused)
+    MOD(getItemRectMin,             "getItemRectMin()",             u_getItemRectMin)
+    MOD(getItemRectMax,             "getItemRectMax()",             u_getItemRectMax)
+    MOD(getItemRectSize,            "getItemRectSize()",            u_getItemRectSize)
+
+    // mouse queries
+    MOD(isMouseDown,          "isMouseDown(button)",          u_isMouseDown)
+    MOD(isMouseClicked,       "isMouseClicked(button)",       u_isMouseClicked)
+    MOD(isMouseDoubleClicked, "isMouseDoubleClicked(button)", u_isMouseDoubleClicked)
+    MOD(isMouseReleased,      "isMouseReleased(button)",      u_isMouseReleased)
+    MOD(isMouseDragging,      "isMouseDragging(button, threshold)", u_isMouseDragging)
+    MOD(getMouseDragDelta,    "getMouseDragDelta(button)",    u_getMouseDragDelta)
+    MOD(resetMouseDragDelta,  "resetMouseDragDelta(button)",  u_resetMouseDragDelta)
+    MOD(getMouseClickedCount, "getMouseClickedCount(button)", u_getMouseClickedCount)
+
+    // keyboard queries
+    MOD(isKeyDown,                       "isKeyDown(key)",                       u_isKeyDown)
+    MOD(isKeyPressed,                    "isKeyPressed(key, repeat)",            u_isKeyPressed)
+    MOD(isKeyReleased,                   "isKeyReleased(key)",                   u_isKeyReleased)
+    MOD(getKeyPressedAmount,             "getKeyPressedAmount(key, rd, rr)",     u_getKeyPressedAmount)
+    MOD(setNextFrameWantCaptureKeyboard, "setNextFrameWantCaptureKeyboard(b)",   u_setNextFrameWantCaptureKeyboard)
+    MOD(setNextFrameWantCaptureMouse,    "setNextFrameWantCaptureMouse(b)",      u_setNextFrameWantCaptureMouse)
+
+    // clipboard
+    MOD(getClipboardText, "getClipboardText()",  u_getClipboardText)
+    MOD(setClipboardText, "setClipboardText(s)", u_setClipboardText)
+
+    // popup context
+    MOD(popupContextItem,   "popupContextItem(id, body)",   u_popupContextItem)
+    MOD(popupContextWindow, "popupContextWindow(id, body)", u_popupContextWindow)
+
+    // setNextItem / pushItemWidth / calcTextSize / style getters
+    MOD(setNextItemWidth,        "setNextItemWidth(w)",        u_setNextItemWidth)
+    MOD(setNextItemOpen,         "setNextItemOpen(open)",      u_setNextItemOpen)
+    MOD(setNextItemAllowOverlap, "setNextItemAllowOverlap()",  u_setNextItemAllowOverlap)
+    MOD(pushItemWidth,           "pushItemWidth(w)",           u_pushItemWidth)
+    MOD(popItemWidth,            "popItemWidth()",             u_popItemWidth)
+    MOD(setKeyboardFocusHere,    "setKeyboardFocusHere(offset)", u_setKeyboardFocusHere)
+    MOD(setItemDefaultFocus,     "setItemDefaultFocus()",      u_setItemDefaultFocus)
+    MOD(calcTextSize,            "calcTextSize(s)",            u_calcTextSize)
+    MOD(getStyleColorVec4,       "getStyleColorVec4(name)",    u_getStyleColorVec4)
+    MOD(getFontSize,             "getFontSize()",              u_getFontSize)
+    MOD(getTextLineHeight,       "getTextLineHeight()",        u_getTextLineHeight)
+    MOD(getTextLineHeightWithSpacing, "getTextLineHeightWithSpacing()", u_getTextLineHeightWithSpacing)
+    MOD(getFrameHeight,          "getFrameHeight()",           u_getFrameHeight)
+    MOD(getFrameHeightWithSpacing,"getFrameHeightWithSpacing()", u_getFrameHeightWithSpacing)
+    MOD(getContentRegionAvail,   "getContentRegionAvail()",    u_getContentRegionAvail)
+    MOD(setCursorPos,            "setCursorPos(x, y)",         u_setCursorPos)
+    MOD(setCursorScreenPos,      "setCursorScreenPos(x, y)",   u_setCursorScreenPos)
+
 #undef MOD
 
     ZymValue obj = zym_newMap(vm);
@@ -2675,10 +3486,210 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "loadFont",          loadFont);
     zym_mapSet(vm, obj, "defaultFont",       defaultFont);
 
+    // PR 2d: widget parity batch
+    zym_mapSet(vm, obj, "tabBar",          tabBar);
+    zym_mapSet(vm, obj, "tabItem",         tabItem);
+    zym_mapSet(vm, obj, "tabItemButton",   tabItemButton);
+    zym_mapSet(vm, obj, "listBox",         listBox);
+    zym_mapSet(vm, obj, "comboScope",      comboScope);
+    zym_mapSet(vm, obj, "separatorText",   separatorText);
+    zym_mapSet(vm, obj, "textLink",        textLink);
+    zym_mapSet(vm, obj, "textLinkOpenURL", textLinkOpenURL);
+    zym_mapSet(vm, obj, "checkboxFlags",   checkboxFlags);
+    zym_mapSet(vm, obj, "sliderFloat2",    sliderFloat2v);
+    zym_mapSet(vm, obj, "sliderFloat3",    sliderFloat3v);
+    zym_mapSet(vm, obj, "sliderFloat4",    sliderFloat4v);
+    zym_mapSet(vm, obj, "sliderInt2",      sliderInt2v);
+    zym_mapSet(vm, obj, "sliderInt3",      sliderInt3v);
+    zym_mapSet(vm, obj, "sliderInt4",      sliderInt4v);
+    zym_mapSet(vm, obj, "dragFloat2",      dragFloat2v);
+    zym_mapSet(vm, obj, "dragFloat3",      dragFloat3v);
+    zym_mapSet(vm, obj, "dragFloat4",      dragFloat4v);
+    zym_mapSet(vm, obj, "dragInt2",        dragInt2v);
+    zym_mapSet(vm, obj, "dragInt3",        dragInt3v);
+    zym_mapSet(vm, obj, "dragInt4",        dragInt4v);
+    zym_mapSet(vm, obj, "inputFloat2",     inputFloat2v);
+    zym_mapSet(vm, obj, "inputFloat3",     inputFloat3v);
+    zym_mapSet(vm, obj, "inputFloat4",     inputFloat4v);
+    zym_mapSet(vm, obj, "inputInt2",       inputInt2v);
+    zym_mapSet(vm, obj, "inputInt3",       inputInt3v);
+    zym_mapSet(vm, obj, "inputInt4",       inputInt4v);
+    zym_mapSet(vm, obj, "sliderAngle",     sliderAngle);
+    zym_mapSet(vm, obj, "vSliderFloat",    vSliderFloat);
+    zym_mapSet(vm, obj, "vSliderInt",      vSliderInt);
+    zym_mapSet(vm, obj, "getScrollX",      getScrollX);
+    zym_mapSet(vm, obj, "getScrollY",      getScrollY);
+    zym_mapSet(vm, obj, "getScrollMaxX",   getScrollMaxX);
+    zym_mapSet(vm, obj, "getScrollMaxY",   getScrollMaxY);
+    zym_mapSet(vm, obj, "setScrollX",      setScrollX);
+    zym_mapSet(vm, obj, "setScrollY",      setScrollY);
+    zym_mapSet(vm, obj, "setScrollHereX",  setScrollHereX);
+    zym_mapSet(vm, obj, "setScrollHereY",  setScrollHereY);
+    zym_mapSet(vm, obj, "setScrollFromPosX", setScrollFromPosX);
+    zym_mapSet(vm, obj, "setScrollFromPosY", setScrollFromPosY);
+    zym_mapSet(vm, obj, "isWindowAppearing", isWindowAppearing);
+    zym_mapSet(vm, obj, "isWindowCollapsed", isWindowCollapsed);
+    zym_mapSet(vm, obj, "getWindowPos",      getWindowPos);
+    zym_mapSet(vm, obj, "getWindowSize",     getWindowSize);
+    zym_mapSet(vm, obj, "getWindowWidth",    getWindowWidth);
+    zym_mapSet(vm, obj, "getWindowHeight",   getWindowHeight);
+    zym_mapSet(vm, obj, "setNextWindowFocus",       setNextWindowFocus);
+    zym_mapSet(vm, obj, "setNextWindowBgAlpha",     setNextWindowBgAlpha);
+    zym_mapSet(vm, obj, "setNextWindowContentSize", setNextWindowContentSize);
+    zym_mapSet(vm, obj, "setNextWindowCollapsed",   setNextWindowCollapsed);
+    zym_mapSet(vm, obj, "setNextWindowScroll",      setNextWindowScroll);
+    zym_mapSet(vm, obj, "isItemVisible",              isItemVisible);
+    zym_mapSet(vm, obj, "isItemEdited",               isItemEdited);
+    zym_mapSet(vm, obj, "isItemActivated",            isItemActivated);
+    zym_mapSet(vm, obj, "isItemDeactivated",          isItemDeactivated);
+    zym_mapSet(vm, obj, "isItemDeactivatedAfterEdit", isItemDeactivatedAfterEdit);
+    zym_mapSet(vm, obj, "isItemToggledOpen",          isItemToggledOpen);
+    zym_mapSet(vm, obj, "isAnyItemHovered",           isAnyItemHovered);
+    zym_mapSet(vm, obj, "isAnyItemActive",            isAnyItemActive);
+    zym_mapSet(vm, obj, "isAnyItemFocused",           isAnyItemFocused);
+    zym_mapSet(vm, obj, "getItemRectMin",             getItemRectMin);
+    zym_mapSet(vm, obj, "getItemRectMax",             getItemRectMax);
+    zym_mapSet(vm, obj, "getItemRectSize",            getItemRectSize);
+    zym_mapSet(vm, obj, "isMouseDown",          isMouseDown);
+    zym_mapSet(vm, obj, "isMouseClicked",       isMouseClicked);
+    zym_mapSet(vm, obj, "isMouseDoubleClicked", isMouseDoubleClicked);
+    zym_mapSet(vm, obj, "isMouseReleased",      isMouseReleased);
+    zym_mapSet(vm, obj, "isMouseDragging",      isMouseDragging);
+    zym_mapSet(vm, obj, "getMouseDragDelta",    getMouseDragDelta);
+    zym_mapSet(vm, obj, "resetMouseDragDelta",  resetMouseDragDelta);
+    zym_mapSet(vm, obj, "getMouseClickedCount", getMouseClickedCount);
+    zym_mapSet(vm, obj, "isKeyDown",                       isKeyDown);
+    zym_mapSet(vm, obj, "isKeyPressed",                    isKeyPressed);
+    zym_mapSet(vm, obj, "isKeyReleased",                   isKeyReleased);
+    zym_mapSet(vm, obj, "getKeyPressedAmount",             getKeyPressedAmount);
+    zym_mapSet(vm, obj, "setNextFrameWantCaptureKeyboard", setNextFrameWantCaptureKeyboard);
+    zym_mapSet(vm, obj, "setNextFrameWantCaptureMouse",    setNextFrameWantCaptureMouse);
+    zym_mapSet(vm, obj, "getClipboardText",   getClipboardText);
+    zym_mapSet(vm, obj, "setClipboardText",   setClipboardText);
+    zym_mapSet(vm, obj, "popupContextItem",   popupContextItem);
+    zym_mapSet(vm, obj, "popupContextWindow", popupContextWindow);
+    zym_mapSet(vm, obj, "setNextItemWidth",        setNextItemWidth);
+    zym_mapSet(vm, obj, "setNextItemOpen",         setNextItemOpen);
+    zym_mapSet(vm, obj, "setNextItemAllowOverlap", setNextItemAllowOverlap);
+    zym_mapSet(vm, obj, "pushItemWidth",           pushItemWidth);
+    zym_mapSet(vm, obj, "popItemWidth",            popItemWidth);
+    zym_mapSet(vm, obj, "setKeyboardFocusHere",    setKeyboardFocusHere);
+    zym_mapSet(vm, obj, "setItemDefaultFocus",     setItemDefaultFocus);
+    zym_mapSet(vm, obj, "calcTextSize",            calcTextSize);
+    zym_mapSet(vm, obj, "getStyleColorVec4",       getStyleColorVec4);
+    zym_mapSet(vm, obj, "getFontSize",             getFontSize);
+    zym_mapSet(vm, obj, "getTextLineHeight",       getTextLineHeight);
+    zym_mapSet(vm, obj, "getTextLineHeightWithSpacing", getTextLineHeightWithSpacing);
+    zym_mapSet(vm, obj, "getFrameHeight",          getFrameHeight);
+    zym_mapSet(vm, obj, "getFrameHeightWithSpacing", getFrameHeightWithSpacing);
+    zym_mapSet(vm, obj, "getContentRegionAvail",   getContentRegionAvail);
+    zym_mapSet(vm, obj, "setCursorPos",            setCursorPos);
+    zym_mapSet(vm, obj, "setCursorScreenPos",      setCursorScreenPos);
+
     // Roots are popped in reverse-push order; everything we've pushed
     // is reachable from `obj`, which is itself rooted. Pop in groups
     // matching pushes (newest first).
     zym_popRoot(vm); // obj
+
+    // PR 2d: widget parity batch (popped newest-first, exact reverse of push order)
+    zym_popRoot(vm); // setCursorScreenPos
+    zym_popRoot(vm); // setCursorPos
+    zym_popRoot(vm); // getContentRegionAvail
+    zym_popRoot(vm); // getFrameHeightWithSpacing
+    zym_popRoot(vm); // getFrameHeight
+    zym_popRoot(vm); // getTextLineHeightWithSpacing
+    zym_popRoot(vm); // getTextLineHeight
+    zym_popRoot(vm); // getFontSize
+    zym_popRoot(vm); // getStyleColorVec4
+    zym_popRoot(vm); // calcTextSize
+    zym_popRoot(vm); // setItemDefaultFocus
+    zym_popRoot(vm); // setKeyboardFocusHere
+    zym_popRoot(vm); // popItemWidth
+    zym_popRoot(vm); // pushItemWidth
+    zym_popRoot(vm); // setNextItemAllowOverlap
+    zym_popRoot(vm); // setNextItemOpen
+    zym_popRoot(vm); // setNextItemWidth
+    zym_popRoot(vm); // popupContextWindow
+    zym_popRoot(vm); // popupContextItem
+    zym_popRoot(vm); // setClipboardText
+    zym_popRoot(vm); // getClipboardText
+    zym_popRoot(vm); // setNextFrameWantCaptureMouse
+    zym_popRoot(vm); // setNextFrameWantCaptureKeyboard
+    zym_popRoot(vm); // getKeyPressedAmount
+    zym_popRoot(vm); // isKeyReleased
+    zym_popRoot(vm); // isKeyPressed
+    zym_popRoot(vm); // isKeyDown
+    zym_popRoot(vm); // getMouseClickedCount
+    zym_popRoot(vm); // resetMouseDragDelta
+    zym_popRoot(vm); // getMouseDragDelta
+    zym_popRoot(vm); // isMouseDragging
+    zym_popRoot(vm); // isMouseReleased
+    zym_popRoot(vm); // isMouseDoubleClicked
+    zym_popRoot(vm); // isMouseClicked
+    zym_popRoot(vm); // isMouseDown
+    zym_popRoot(vm); // getItemRectSize
+    zym_popRoot(vm); // getItemRectMax
+    zym_popRoot(vm); // getItemRectMin
+    zym_popRoot(vm); // isAnyItemFocused
+    zym_popRoot(vm); // isAnyItemActive
+    zym_popRoot(vm); // isAnyItemHovered
+    zym_popRoot(vm); // isItemToggledOpen
+    zym_popRoot(vm); // isItemDeactivatedAfterEdit
+    zym_popRoot(vm); // isItemDeactivated
+    zym_popRoot(vm); // isItemActivated
+    zym_popRoot(vm); // isItemEdited
+    zym_popRoot(vm); // isItemVisible
+    zym_popRoot(vm); // setNextWindowScroll
+    zym_popRoot(vm); // setNextWindowCollapsed
+    zym_popRoot(vm); // setNextWindowContentSize
+    zym_popRoot(vm); // setNextWindowBgAlpha
+    zym_popRoot(vm); // setNextWindowFocus
+    zym_popRoot(vm); // getWindowHeight
+    zym_popRoot(vm); // getWindowWidth
+    zym_popRoot(vm); // getWindowSize
+    zym_popRoot(vm); // getWindowPos
+    zym_popRoot(vm); // isWindowCollapsed
+    zym_popRoot(vm); // isWindowAppearing
+    zym_popRoot(vm); // setScrollFromPosY
+    zym_popRoot(vm); // setScrollFromPosX
+    zym_popRoot(vm); // setScrollHereY
+    zym_popRoot(vm); // setScrollHereX
+    zym_popRoot(vm); // setScrollY
+    zym_popRoot(vm); // setScrollX
+    zym_popRoot(vm); // getScrollMaxY
+    zym_popRoot(vm); // getScrollMaxX
+    zym_popRoot(vm); // getScrollY
+    zym_popRoot(vm); // getScrollX
+    zym_popRoot(vm); // vSliderInt
+    zym_popRoot(vm); // vSliderFloat
+    zym_popRoot(vm); // sliderAngle
+    zym_popRoot(vm); // inputInt4
+    zym_popRoot(vm); // inputInt3
+    zym_popRoot(vm); // inputInt2
+    zym_popRoot(vm); // inputFloat4
+    zym_popRoot(vm); // inputFloat3
+    zym_popRoot(vm); // inputFloat2
+    zym_popRoot(vm); // dragInt4
+    zym_popRoot(vm); // dragInt3
+    zym_popRoot(vm); // dragInt2
+    zym_popRoot(vm); // dragFloat4
+    zym_popRoot(vm); // dragFloat3
+    zym_popRoot(vm); // dragFloat2
+    zym_popRoot(vm); // sliderInt4
+    zym_popRoot(vm); // sliderInt3
+    zym_popRoot(vm); // sliderInt2
+    zym_popRoot(vm); // sliderFloat4
+    zym_popRoot(vm); // sliderFloat3
+    zym_popRoot(vm); // sliderFloat2
+    zym_popRoot(vm); // checkboxFlags
+    zym_popRoot(vm); // textLinkOpenURL
+    zym_popRoot(vm); // textLink
+    zym_popRoot(vm); // separatorText
+    zym_popRoot(vm); // comboScope
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // listBox{,2v,3v}
+    zym_popRoot(vm); // tabItemButton
+    zym_popRoot(vm); // tabItem
+    zym_popRoot(vm); // tabBar
 
     // PR 2c (popped newest-first)
     zym_popRoot(vm); // defaultFont

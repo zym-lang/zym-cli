@@ -536,6 +536,166 @@ win.free()
 
 ---
 
+## Widget parity (extended surface)
+
+The functions below round out ZYM's coverage of ImGui's public widget
+API. Everything in this section follows the same conventions as the
+rest of the doc: scalar refs are single-element lists, vector refs are
+N-element lists, callable bodies are invoked inside the begin/end pair,
+and every entry requires being inside `UI.frame(...)`.
+
+### Tab bar / tab item
+
+| Call | Notes |
+|------|-------|
+| `UI.tabBar(id, body)` | `BeginTabBar` / `EndTabBar`. Returns `true` if the bar opened. Body should call `UI.tabItem` / `UI.tabItemButton` entries. |
+| `UI.tabItem(label, body)` | `BeginTabItem` / `EndTabItem`. Returns `true` if the tab is currently selected. |
+| `UI.tabItemButton(label)` | Trailing pseudo-tab button. Returns `true` on click. |
+
+### List box
+
+| Call | Notes |
+|------|-------|
+| `UI.listBox(label, body)` | Scoped `BeginListBox` / `EndListBox`. Body emits selectables / items. Returns `true` if visible. |
+| `UI.listBox(label, idxRef, items)` | Flat one-shot — `items` is a list of strings, `idxRef` is `[i]`. Returns `true` on change. |
+
+### Combo (scoped)
+
+| Call | Notes |
+|------|-------|
+| `UI.comboScope(label, preview, body)` | `BeginCombo` / `EndCombo`. Use when items aren't a flat list (mix selectables, separators, headers). |
+
+### Vector slider / drag / input
+
+The 2/3/4 suffix takes a list ref of that length and updates it in place.
+
+| Call | Notes |
+|------|-------|
+| `UI.sliderFloat2/3/4(label, ref, min, max)` | Vector slider. |
+| `UI.sliderInt2/3/4(label, ref, min, max)` | Int vector slider. |
+| `UI.dragFloat2/3/4(label, ref, speed, min, max)` | Vector drag. `min == max` means unbounded. |
+| `UI.dragInt2/3/4(label, ref, speed, min, max)` | Int vector drag. |
+| `UI.inputFloat2/3/4(label, ref)` | Direct vector entry. |
+| `UI.inputInt2/3/4(label, ref)` | Int vector entry. |
+
+### Specialty sliders
+
+| Call | Notes |
+|------|-------|
+| `UI.sliderAngle(label, ref, degMin, degMax)` | `ref[0]` is radians, slider displays degrees. |
+| `UI.vSliderFloat(label, w, h, ref, min, max)` | Vertical float slider. |
+| `UI.vSliderInt(label, w, h, ref, min, max)` | Vertical int slider. |
+
+### Text / separator extras
+
+| Call | Notes |
+|------|-------|
+| `UI.separatorText(s)` | A separator with a centered label. |
+| `UI.textLink(s)` | Clickable underlined text. Returns `true` on click. |
+| `UI.textLinkOpenURL(label, url)` | Same, but ImGui handles opening the URL via platform IO. |
+
+### Toggles
+
+| Call | Notes |
+|------|-------|
+| `UI.checkboxFlags(label, ref, flag)` | Flips bit `flag` on `ref[0]` (int). Returns `true` on change. |
+
+### Scrolling
+
+| Call | Notes |
+|------|-------|
+| `UI.getScrollX()` / `UI.getScrollY()` | Current scroll for the current window. |
+| `UI.getScrollMaxX()` / `UI.getScrollMaxY()` | Maximum scroll. |
+| `UI.setScrollX(x)` / `UI.setScrollY(y)` | Set scroll. |
+| `UI.setScrollHereX(centerRatio)` / `UI.setScrollHereY(centerRatio)` | Center current cursor in view. |
+| `UI.setScrollFromPosX(localX, centerRatio)` / `UI.setScrollFromPosY(localY, centerRatio)` | Scroll to a specific local position. |
+
+### Window state queries
+
+| Call | Notes |
+|------|-------|
+| `UI.isWindowAppearing()` | First frame the window is visible. |
+| `UI.isWindowCollapsed()` | True if collapsed. |
+| `UI.getWindowPos()` / `UI.getWindowSize()` | `{x, y}` map. |
+| `UI.getWindowWidth()` / `UI.getWindowHeight()` | Scalar. |
+
+### `UI.setNextWindow*`
+
+| Call | Notes |
+|------|-------|
+| `UI.setNextWindowFocus()` | Focus on next `UI.window`. |
+| `UI.setNextWindowBgAlpha(alpha)` | Override window bg alpha for the next window only. |
+| `UI.setNextWindowContentSize(w, h)` | Force content size (for `Always*` scrollbars). |
+| `UI.setNextWindowCollapsed(c)` | Start collapsed/expanded. |
+| `UI.setNextWindowScroll(x, y)` | Initial scroll (`-1` = leave as-is). |
+
+### Item / any-item queries
+
+| Call | Notes |
+|------|-------|
+| `UI.isItemVisible()`, `UI.isItemEdited()` | Standard ImGui item-state checks. |
+| `UI.isItemActivated()`, `UI.isItemDeactivated()`, `UI.isItemDeactivatedAfterEdit()` | Edge-triggered. |
+| `UI.isItemToggledOpen()` | For tree nodes / collapsing headers. |
+| `UI.isAnyItemHovered()`, `UI.isAnyItemActive()`, `UI.isAnyItemFocused()` | Wide window-scoped queries. |
+| `UI.getItemRectMin()` / `Max()` / `Size()` | `{x, y}` map for the last submitted item. |
+
+### Mouse queries
+
+| Call | Notes |
+|------|-------|
+| `UI.isMouseDown(button)`, `UI.isMouseClicked(button)`, `UI.isMouseDoubleClicked(button)`, `UI.isMouseReleased(button)` | Buttons: `0=L`, `1=R`, `2=M`. |
+| `UI.isMouseDragging(button, threshold)` | `threshold == -1` uses default. |
+| `UI.getMouseDragDelta(button)` | `{x, y}` map of drag delta. |
+| `UI.resetMouseDragDelta(button)` | Reset accumulator. |
+| `UI.getMouseClickedCount(button)` | Multi-click count. |
+
+### Keyboard queries
+
+| Call | Notes |
+|------|-------|
+| `UI.isKeyDown(key)`, `UI.isKeyPressed(key, repeat)`, `UI.isKeyReleased(key)` | `key` is an `ImGuiKey` integer (use ImGui enum value). |
+| `UI.getKeyPressedAmount(key, rd, rr)` | Repeat-aware press count for a frame. |
+| `UI.setNextFrameWantCaptureKeyboard(b)` / `UI.setNextFrameWantCaptureMouse(b)` | Override IO routing for next frame. |
+
+### Clipboard
+
+| Call | Notes |
+|------|-------|
+| `UI.getClipboardText()` | Returns a string. |
+| `UI.setClipboardText(s)` | Sets the platform clipboard. |
+
+### Context popups
+
+| Call | Notes |
+|------|-------|
+| `UI.popupContextItem(id, body)` | Right-click on previous item opens this popup (scoped). |
+| `UI.popupContextWindow(id, body)` | Right-click anywhere in the current window opens it (scoped). |
+
+### Item width, focus, layout
+
+| Call | Notes |
+|------|-------|
+| `UI.setNextItemWidth(w)` | Width of next widget; negative = right-aligned from edge. |
+| `UI.setNextItemOpen(open)` | Pre-set the open state of the next tree node / collapsing header. |
+| `UI.setNextItemAllowOverlap()` | Allow next item to be overlapped by following items. |
+| `UI.pushItemWidth(w)` / `UI.popItemWidth()` | Stack-based width override. |
+| `UI.setKeyboardFocusHere(offset)` | Focus the previous or next widget. |
+| `UI.setItemDefaultFocus()` | Default-focus the last submitted item. |
+| `UI.calcTextSize(s)` | `{x, y}` for a string at the current font. |
+
+### Cursor / metrics getters
+
+| Call | Notes |
+|------|-------|
+| `UI.getContentRegionAvail()` | `{x, y}` of remaining space. |
+| `UI.setCursorPos(x, y)` / `UI.setCursorScreenPos(x, y)` | Local / screen-space cursor placement. |
+| `UI.getFontSize()` | Current font height in pixels. |
+| `UI.getTextLineHeight()` / `UI.getTextLineHeightWithSpacing()` | Layout metrics. |
+| `UI.getFrameHeight()` / `UI.getFrameHeightWithSpacing()` | Standard widget row heights. |
+| `UI.getStyleColorVec4(name)` | Returns the live `[r, g, b, a]` for any `ImGuiCol_*` slot name. |
+
+---
+
 ## Notes
 
 - `UI` is gated behind the `ZYM_UI` build flag (default `ON` for the

@@ -24,6 +24,7 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
+#include <cfloat>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -735,6 +736,898 @@ ZymValue u_combo(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue idxRefV, ZymValu
     return zym_newBool(changed);
 }
 
+// ---- batch 3: scoped containers (callback-based) ------------------------
+//
+// Pattern: each call validates args, opens the corresponding ImGui
+// region, optionally invokes the body closure, and always closes the
+// region (when ImGui requires an unconditional End/Pop). The body
+// closure is rooted across the re-entrant call exactly like u_window.
+
+// `ui.child(id, w, h, border, body) -> bool`
+// Wraps BeginChild/EndChild. The `border` arg is a bool (0/false for
+// no border, true for ImGuiChildFlags_Border). For the simple form
+// (id + body) callers can pass 0 width/height (= "stretch") and
+// false border. We expose two arities below via dispatcher.
+ZymValue u_child5(ZymVM* vm, ZymValue, ZymValue idV, ZymValue wV, ZymValue hV,
+                  ZymValue borderV, ZymValue bodyV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.child(id, w, h, border, body)", &id)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.child(id, w, h, border, body)")) return ZYM_ERROR;
+    float w = (float)optNum(wV, 0.0), h = (float)optNum(hV, 0.0);
+    bool border = optBool(borderV, false);
+    if (!requireFrame(vm, "ui.child")) return ZYM_ERROR;
+
+    ImGuiChildFlags cflags = border ? ImGuiChildFlags_Borders : 0;
+    bool open = ImGui::BeginChild(id.c_str(), ImVec2(w, h), cflags, 0);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndChild();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    } else {
+        ImGui::EndChild();
+    }
+    return zym_newBool(open);
+}
+// `ui.child(id, body)` shortcut.
+ZymValue u_child2(ZymVM* vm, ZymValue self, ZymValue idV, ZymValue bodyV) {
+    return u_child5(vm, self, idV, zym_newNumber(0.0), zym_newNumber(0.0),
+                    zym_newBool(false), bodyV);
+}
+
+// `ui.group(body)` — BeginGroup/EndGroup (always paired, no bool).
+ZymValue u_group(ZymVM* vm, ZymValue, ZymValue bodyV) {
+    if (!reqCallable(vm, bodyV, "ui.group(body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.group")) return ZYM_ERROR;
+    ImGui::BeginGroup();
+    zym_pushRoot(vm, bodyV);
+    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+    zym_popRoot(vm);
+    ImGui::EndGroup();
+    if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    return zym_newNull();
+}
+
+// `ui.treeNode(label, body) -> bool` — TreeNode/TreePop. TreePop is
+// only called when TreeNode returned true (ImGui requirement).
+ZymValue u_treeNode(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue bodyV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.treeNode(label, body)", &label)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.treeNode(label, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.treeNode")) return ZYM_ERROR;
+    bool open = ImGui::TreeNode(label.c_str());
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::TreePop();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.disabled(cond, body)` — BeginDisabled/EndDisabled (always
+// paired). `cond` is the disable flag (true → widgets in body are
+// disabled).
+ZymValue u_disabled(ZymVM* vm, ZymValue, ZymValue condV, ZymValue bodyV) {
+    bool cond = optBool(condV, true);
+    if (!reqCallable(vm, bodyV, "ui.disabled(cond, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.disabled")) return ZYM_ERROR;
+    ImGui::BeginDisabled(cond);
+    zym_pushRoot(vm, bodyV);
+    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+    zym_popRoot(vm);
+    ImGui::EndDisabled();
+    if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    return zym_newNull();
+}
+
+// `ui.id(idValue, body)` — PushID/PopID. Accepts string or int id.
+ZymValue u_id(ZymVM* vm, ZymValue, ZymValue idV, ZymValue bodyV) {
+    if (!reqCallable(vm, bodyV, "ui.id(idValue, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.id")) return ZYM_ERROR;
+    if (zym_isString(idV)) {
+        ImGui::PushID(zym_asCString(idV));
+    } else if (zym_isNumber(idV)) {
+        ImGui::PushID((int)zym_asNumber(idV));
+    } else {
+        zym_runtimeError(vm, "ui.id: idValue must be a string or number");
+        return ZYM_ERROR;
+    }
+    zym_pushRoot(vm, bodyV);
+    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+    zym_popRoot(vm);
+    ImGui::PopID();
+    if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    return zym_newNull();
+}
+
+// `ui.clip(x, y, w, h, body)` — PushClipRect/PopClipRect on the
+// current window's draw list. `intersect` defaults to true (intersect
+// with parent clip rect rather than replace).
+ZymValue u_clip(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV,
+                ZymValue wV, ZymValue hV, ZymValue bodyV) {
+    double x, y, w, h;
+    if (!reqNum(vm, xV, "ui.clip", &x)) return ZYM_ERROR;
+    if (!reqNum(vm, yV, "ui.clip", &y)) return ZYM_ERROR;
+    if (!reqNum(vm, wV, "ui.clip", &w)) return ZYM_ERROR;
+    if (!reqNum(vm, hV, "ui.clip", &h)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.clip(x, y, w, h, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.clip")) return ZYM_ERROR;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (!dl) {
+        zym_runtimeError(vm, "ui.clip: no current draw list");
+        return ZYM_ERROR;
+    }
+    ImVec2 mn((float)x, (float)y);
+    ImVec2 mx((float)(x + w), (float)(y + h));
+    dl->PushClipRect(mn, mx, true);
+    zym_pushRoot(vm, bodyV);
+    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+    zym_popRoot(vm);
+    dl->PopClipRect();
+    if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    return zym_newNull();
+}
+
+// `ui.tooltipScope(body)` — BeginTooltip/EndTooltip. Only opens
+// the tooltip if ImGui's begin returns true; pairs the end regardless.
+ZymValue u_tooltipScope(ZymVM* vm, ZymValue, ZymValue bodyV) {
+    if (!reqCallable(vm, bodyV, "ui.tooltipScope(body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.tooltipScope")) return ZYM_ERROR;
+    if (ImGui::BeginTooltip()) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndTooltip();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newNull();
+}
+
+// ---- batch 4: tables ----------------------------------------------------
+//
+// ImGui tables are powerful and verbose. The Zym surface exposes the
+// 80% case via a scoped callback wrapper (`ui.table`) plus the row /
+// column / setup helpers as flat calls. The legacy columns API is
+// also exposed as a flat helper for scripts that don't want the full
+// table machinery.
+
+// `ui.table(id, columns, body) -> bool`
+// Wraps BeginTable/EndTable. `columns` is the column count (int >=1).
+// EndTable is called only when BeginTable returned true (ImGui rule).
+ZymValue u_table3(ZymVM* vm, ZymValue, ZymValue idV, ZymValue columnsV,
+                  ZymValue bodyV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.table(id, columns, body)", &id)) return ZYM_ERROR;
+    int cols;
+    if (!reqInt(vm, columnsV, "ui.table(id, columns, body)", &cols)) return ZYM_ERROR;
+    if (cols < 1) {
+        zym_runtimeError(vm, "ui.table: columns must be >= 1 (got %d)", cols);
+        return ZYM_ERROR;
+    }
+    if (!reqCallable(vm, bodyV, "ui.table(id, columns, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.table")) return ZYM_ERROR;
+
+    bool open = ImGui::BeginTable(id.c_str(), cols, 0);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndTable();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.table(id, columns, flags, body) -> bool` — same with flags.
+ZymValue u_table4(ZymVM* vm, ZymValue, ZymValue idV, ZymValue columnsV,
+                  ZymValue flagsV, ZymValue bodyV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.table(id, columns, flags, body)", &id)) return ZYM_ERROR;
+    int cols;
+    if (!reqInt(vm, columnsV, "ui.table(id, columns, flags, body)", &cols)) return ZYM_ERROR;
+    if (cols < 1) {
+        zym_runtimeError(vm, "ui.table: columns must be >= 1 (got %d)", cols);
+        return ZYM_ERROR;
+    }
+    int flags = optInt(flagsV, 0);
+    if (!reqCallable(vm, bodyV, "ui.table(id, columns, flags, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.table")) return ZYM_ERROR;
+
+    bool open = ImGui::BeginTable(id.c_str(), cols, (ImGuiTableFlags)flags);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndTable();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.tableNextRow()` — advance to the next row (no args form).
+ZymValue u_tableNextRow0(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.tableNextRow")) return ZYM_ERROR;
+    ImGui::TableNextRow();
+    return zym_newNull();
+}
+
+// `ui.tableNextRow(minHeight)` — opt min row height.
+ZymValue u_tableNextRow1(ZymVM* vm, ZymValue, ZymValue heightV) {
+    if (!requireFrame(vm, "ui.tableNextRow")) return ZYM_ERROR;
+    float h = (float)optNum(heightV, 0.0);
+    ImGui::TableNextRow(0, h);
+    return zym_newNull();
+}
+
+// `ui.tableNextColumn() -> bool` — move to next column; returns whether
+// the column is visible (ImGui's clipper may skip drawing it).
+ZymValue u_tableNextColumn(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.tableNextColumn")) return ZYM_ERROR;
+    return zym_newBool(ImGui::TableNextColumn());
+}
+
+// `ui.tableSetColumnIndex(idx) -> bool` — jump directly to a column.
+ZymValue u_tableSetColumnIndex(ZymVM* vm, ZymValue, ZymValue idxV) {
+    int idx;
+    if (!reqInt(vm, idxV, "ui.tableSetColumnIndex(idx)", &idx)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.tableSetColumnIndex")) return ZYM_ERROR;
+    return zym_newBool(ImGui::TableSetColumnIndex(idx));
+}
+
+// `ui.tableSetupColumn(label)` / `(label, flags)` / `(label, flags, width)`.
+ZymValue u_tableSetupColumn1(ZymVM* vm, ZymValue, ZymValue labelV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.tableSetupColumn(label)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.tableSetupColumn")) return ZYM_ERROR;
+    ImGui::TableSetupColumn(label.c_str(), 0, 0.0f);
+    return zym_newNull();
+}
+ZymValue u_tableSetupColumn2(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue flagsV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.tableSetupColumn(label, flags)", &label)) return ZYM_ERROR;
+    int flags = optInt(flagsV, 0);
+    if (!requireFrame(vm, "ui.tableSetupColumn")) return ZYM_ERROR;
+    ImGui::TableSetupColumn(label.c_str(), (ImGuiTableColumnFlags)flags, 0.0f);
+    return zym_newNull();
+}
+ZymValue u_tableSetupColumn3(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue flagsV,
+                              ZymValue widthV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.tableSetupColumn(label, flags, width)", &label)) return ZYM_ERROR;
+    int flags = optInt(flagsV, 0);
+    float width = (float)optNum(widthV, 0.0);
+    if (!requireFrame(vm, "ui.tableSetupColumn")) return ZYM_ERROR;
+    ImGui::TableSetupColumn(label.c_str(), (ImGuiTableColumnFlags)flags, width);
+    return zym_newNull();
+}
+
+// `ui.tableSetupScrollFreeze(cols, rows)` — freeze leading cols/rows.
+ZymValue u_tableSetupScrollFreeze(ZymVM* vm, ZymValue, ZymValue colsV, ZymValue rowsV) {
+    int cols, rows;
+    if (!reqInt(vm, colsV, "ui.tableSetupScrollFreeze(cols, rows)", &cols)) return ZYM_ERROR;
+    if (!reqInt(vm, rowsV, "ui.tableSetupScrollFreeze(cols, rows)", &rows)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.tableSetupScrollFreeze")) return ZYM_ERROR;
+    ImGui::TableSetupScrollFreeze(cols, rows);
+    return zym_newNull();
+}
+
+// `ui.tableHeadersRow()` — render a header row using the labels from
+// tableSetupColumn calls.
+ZymValue u_tableHeadersRow(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.tableHeadersRow")) return ZYM_ERROR;
+    ImGui::TableHeadersRow();
+    return zym_newNull();
+}
+
+// `ui.tableHeader(label)` — manual single header cell.
+ZymValue u_tableHeader(ZymVM* vm, ZymValue, ZymValue labelV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.tableHeader(label)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.tableHeader")) return ZYM_ERROR;
+    ImGui::TableHeader(label.c_str());
+    return zym_newNull();
+}
+
+// `ui.tableGetRowIndex() -> int`, `ui.tableGetColumnIndex() -> int`,
+// `ui.tableGetColumnCount() -> int`.
+ZymValue u_tableGetRowIndex(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.tableGetRowIndex")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::TableGetRowIndex());
+}
+ZymValue u_tableGetColumnIndex(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.tableGetColumnIndex")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::TableGetColumnIndex());
+}
+ZymValue u_tableGetColumnCount(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.tableGetColumnCount")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::TableGetColumnCount());
+}
+
+// Legacy columns API — flat, no scoped pair in ImGui (Columns(0)
+// implicitly ends the current set).
+// `ui.columns(count)` / `(count, id)` / `(count, id, border)`.
+ZymValue u_columns1(ZymVM* vm, ZymValue, ZymValue countV) {
+    int count;
+    if (!reqInt(vm, countV, "ui.columns(count)", &count)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.columns")) return ZYM_ERROR;
+    ImGui::Columns(count);
+    return zym_newNull();
+}
+ZymValue u_columns2(ZymVM* vm, ZymValue, ZymValue countV, ZymValue idV) {
+    int count;
+    if (!reqInt(vm, countV, "ui.columns(count, id)", &count)) return ZYM_ERROR;
+    const char* id = optStr(idV, nullptr);
+    if (!requireFrame(vm, "ui.columns")) return ZYM_ERROR;
+    ImGui::Columns(count, id, true);
+    return zym_newNull();
+}
+ZymValue u_columns3(ZymVM* vm, ZymValue, ZymValue countV, ZymValue idV,
+                    ZymValue borderV) {
+    int count;
+    if (!reqInt(vm, countV, "ui.columns(count, id, border)", &count)) return ZYM_ERROR;
+    const char* id = optStr(idV, nullptr);
+    bool border = optBool(borderV, true);
+    if (!requireFrame(vm, "ui.columns")) return ZYM_ERROR;
+    ImGui::Columns(count, id, border);
+    return zym_newNull();
+}
+
+// `ui.nextColumn()` — advance to next column in legacy Columns API.
+ZymValue u_nextColumn(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.nextColumn")) return ZYM_ERROR;
+    ImGui::NextColumn();
+    return zym_newNull();
+}
+
+// ---- batch 5: popups / menus -------------------------------------------
+//
+// All begin/end pairs follow the locked scoped-callback rule: the
+// bridge owns BeginX/EndX, EndX is only called when BeginX returned
+// true (ImGui requirement for popups/menus), and the body closure is
+// rooted across the re-entrant call.
+
+// `ui.popup(id, body) -> bool` — BeginPopup/EndPopup.
+ZymValue u_popup2(ZymVM* vm, ZymValue, ZymValue idV, ZymValue bodyV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.popup(id, body)", &id)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.popup(id, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.popup")) return ZYM_ERROR;
+    bool open = ImGui::BeginPopup(id.c_str(), 0);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndPopup();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.popup(id, flags, body) -> bool` — with flags.
+ZymValue u_popup3(ZymVM* vm, ZymValue, ZymValue idV, ZymValue flagsV,
+                  ZymValue bodyV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.popup(id, flags, body)", &id)) return ZYM_ERROR;
+    int flags = optInt(flagsV, 0);
+    if (!reqCallable(vm, bodyV, "ui.popup(id, flags, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.popup")) return ZYM_ERROR;
+    bool open = ImGui::BeginPopup(id.c_str(), (ImGuiWindowFlags)flags);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndPopup();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.popupModal(name, body) -> bool` — BeginPopupModal/EndPopup.
+ZymValue u_popupModal2(ZymVM* vm, ZymValue, ZymValue nameV, ZymValue bodyV) {
+    std::string name;
+    if (!reqStr(vm, nameV, "ui.popupModal(name, body)", &name)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.popupModal(name, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.popupModal")) return ZYM_ERROR;
+    bool open = ImGui::BeginPopupModal(name.c_str(), nullptr, 0);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndPopup();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.popupModal(name, flags, body) -> bool` — with flags.
+ZymValue u_popupModal3(ZymVM* vm, ZymValue, ZymValue nameV, ZymValue flagsV,
+                       ZymValue bodyV) {
+    std::string name;
+    if (!reqStr(vm, nameV, "ui.popupModal(name, flags, body)", &name)) return ZYM_ERROR;
+    int flags = optInt(flagsV, 0);
+    if (!reqCallable(vm, bodyV, "ui.popupModal(name, flags, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.popupModal")) return ZYM_ERROR;
+    bool open = ImGui::BeginPopupModal(name.c_str(), nullptr,
+                                       (ImGuiWindowFlags)flags);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndPopup();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.openPopup(id)` / `ui.openPopup(id, flags)` — request a popup to open
+// on the next frame. Not a scoped pair (no End); just a flat request.
+ZymValue u_openPopup1(ZymVM* vm, ZymValue, ZymValue idV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.openPopup(id)", &id)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.openPopup")) return ZYM_ERROR;
+    ImGui::OpenPopup(id.c_str(), 0);
+    return zym_newNull();
+}
+ZymValue u_openPopup2(ZymVM* vm, ZymValue, ZymValue idV, ZymValue flagsV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.openPopup(id, flags)", &id)) return ZYM_ERROR;
+    int flags = optInt(flagsV, 0);
+    if (!requireFrame(vm, "ui.openPopup")) return ZYM_ERROR;
+    ImGui::OpenPopup(id.c_str(), (ImGuiPopupFlags)flags);
+    return zym_newNull();
+}
+
+// `ui.closeCurrentPopup()` — close the currently-open popup from inside
+// its body (typically after a MenuItem click).
+ZymValue u_closeCurrentPopup(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.closeCurrentPopup")) return ZYM_ERROR;
+    ImGui::CloseCurrentPopup();
+    return zym_newNull();
+}
+
+// `ui.menuBar(body) -> bool` — per-window menu bar.
+// Wraps BeginMenuBar/EndMenuBar. Body runs only if the window was
+// created with the MenuBar flag *and* the begin returned true.
+ZymValue u_menuBar(ZymVM* vm, ZymValue, ZymValue bodyV) {
+    if (!reqCallable(vm, bodyV, "ui.menuBar(body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.menuBar")) return ZYM_ERROR;
+    bool open = ImGui::BeginMenuBar();
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndMenuBar();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.mainMenuBar(body) -> bool` — viewport-attached main menu bar.
+ZymValue u_mainMenuBar(ZymVM* vm, ZymValue, ZymValue bodyV) {
+    if (!reqCallable(vm, bodyV, "ui.mainMenuBar(body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.mainMenuBar")) return ZYM_ERROR;
+    bool open = ImGui::BeginMainMenuBar();
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndMainMenuBar();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.menu(label, body) -> bool` — drop-down menu inside a menu bar.
+ZymValue u_menu2(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue bodyV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.menu(label, body)", &label)) return ZYM_ERROR;
+    if (!reqCallable(vm, bodyV, "ui.menu(label, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.menu")) return ZYM_ERROR;
+    bool open = ImGui::BeginMenu(label.c_str(), true);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndMenu();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.menu(label, enabled, body) -> bool` — with enabled flag.
+ZymValue u_menu3(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue enabledV,
+                 ZymValue bodyV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.menu(label, enabled, body)", &label)) return ZYM_ERROR;
+    bool enabled = optBool(enabledV, true);
+    if (!reqCallable(vm, bodyV, "ui.menu(label, enabled, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.menu")) return ZYM_ERROR;
+    bool open = ImGui::BeginMenu(label.c_str(), enabled);
+    if (open) {
+        zym_pushRoot(vm, bodyV);
+        ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+        zym_popRoot(vm);
+        ImGui::EndMenu();
+        if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    }
+    return zym_newBool(open);
+}
+
+// `ui.menuItem(label) -> bool`
+// `ui.menuItem(label, shortcut) -> bool`
+// `ui.menuItem(label, shortcut, selected) -> bool`
+// `ui.menuItem(label, shortcut, selected, enabled) -> bool`
+// `selected` may be null/false or a single-element list ref `[bool]`
+// (in which case the ref is mutated when the item is clicked).
+ZymValue u_menuItem1(ZymVM* vm, ZymValue, ZymValue labelV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.menuItem(label)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.menuItem")) return ZYM_ERROR;
+    return zym_newBool(ImGui::MenuItem(label.c_str(), nullptr, false, true));
+}
+ZymValue u_menuItem2(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue shortcutV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.menuItem(label, shortcut)", &label)) return ZYM_ERROR;
+    const char* sc = optStr(shortcutV, nullptr);
+    if (!requireFrame(vm, "ui.menuItem")) return ZYM_ERROR;
+    return zym_newBool(ImGui::MenuItem(label.c_str(), sc, false, true));
+}
+ZymValue u_menuItem3(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue shortcutV,
+                     ZymValue selectedV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.menuItem(label, shortcut, selected)", &label)) return ZYM_ERROR;
+    const char* sc = optStr(shortcutV, nullptr);
+    if (!requireFrame(vm, "ui.menuItem")) return ZYM_ERROR;
+    if (zym_isList(selectedV)) {
+        bool sel = false;
+        if (!refReadBool(vm, selectedV,
+                         "ui.menuItem(label, shortcut, selectedRef)", &sel)) {
+            return ZYM_ERROR;
+        }
+        bool clicked = ImGui::MenuItem(label.c_str(), sc, &sel, true);
+        if (clicked) refWriteBool(vm, selectedV, sel);
+        return zym_newBool(clicked);
+    }
+    bool sel = optBool(selectedV, false);
+    return zym_newBool(ImGui::MenuItem(label.c_str(), sc, sel, true));
+}
+ZymValue u_menuItem4(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue shortcutV,
+                     ZymValue selectedV, ZymValue enabledV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.menuItem(label, shortcut, selected, enabled)", &label)) return ZYM_ERROR;
+    const char* sc = optStr(shortcutV, nullptr);
+    bool enabled = optBool(enabledV, true);
+    if (!requireFrame(vm, "ui.menuItem")) return ZYM_ERROR;
+    if (zym_isList(selectedV)) {
+        bool sel = false;
+        if (!refReadBool(vm, selectedV,
+                         "ui.menuItem(label, shortcut, selectedRef, enabled)", &sel)) {
+            return ZYM_ERROR;
+        }
+        bool clicked = ImGui::MenuItem(label.c_str(), sc, &sel, enabled);
+        if (clicked) refWriteBool(vm, selectedV, sel);
+        return zym_newBool(clicked);
+    }
+    bool sel = optBool(selectedV, false);
+    return zym_newBool(ImGui::MenuItem(label.c_str(), sc, sel, enabled));
+}
+
+// ---- batch 6: plots / color / drawList / demo --------------------------
+
+// Helper: read a list of numbers into a float vector.
+static bool readFloatList(ZymVM* vm, ZymValue v, const char* where,
+                          std::vector<float>* out) {
+    if (!zym_isList(v)) {
+        zym_runtimeError(vm, "%s expects a list of numbers", where);
+        return false;
+    }
+    int n = zym_listLength(v);
+    out->resize((size_t)n);
+    for (int i = 0; i < n; i++) {
+        ZymValue e = zym_listGet(vm, v, i);
+        if (!zym_isNumber(e)) {
+            zym_runtimeError(vm, "%s list element %d must be a number", where, i);
+            return false;
+        }
+        (*out)[i] = (float)zym_asNumber(e);
+    }
+    return true;
+}
+
+// `ui.plotLines(label, values)` / `ui.plotLines(label, values, overlay)`
+// / `ui.plotLines(label, values, overlay, scaleMin, scaleMax)`
+ZymValue u_plotLines2(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue valsV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.plotLines(label, values)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.plotLines")) return ZYM_ERROR;
+    std::vector<float> vs;
+    if (!readFloatList(vm, valsV, "ui.plotLines(label, values)", &vs)) return ZYM_ERROR;
+    ImGui::PlotLines(label.c_str(), vs.data(), (int)vs.size());
+    return zym_newNull();
+}
+ZymValue u_plotLines3(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue valsV,
+                     ZymValue overlayV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.plotLines(label, values, overlay)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.plotLines")) return ZYM_ERROR;
+    std::vector<float> vs;
+    if (!readFloatList(vm, valsV, "ui.plotLines(label, values, overlay)", &vs)) return ZYM_ERROR;
+    const char* ov = optStr(overlayV, nullptr);
+    ImGui::PlotLines(label.c_str(), vs.data(), (int)vs.size(), 0, ov);
+    return zym_newNull();
+}
+ZymValue u_plotLines5(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue valsV,
+                     ZymValue overlayV, ZymValue minV, ZymValue maxV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.plotLines(label, values, overlay, min, max)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.plotLines")) return ZYM_ERROR;
+    std::vector<float> vs;
+    if (!readFloatList(vm, valsV, "ui.plotLines(label, values, overlay, min, max)", &vs)) return ZYM_ERROR;
+    const char* ov = optStr(overlayV, nullptr);
+    float mn = (float)optNum(minV, FLT_MAX);
+    float mx = (float)optNum(maxV, FLT_MAX);
+    ImGui::PlotLines(label.c_str(), vs.data(), (int)vs.size(), 0, ov, mn, mx);
+    return zym_newNull();
+}
+
+// `ui.plotHistogram(label, values)` / +overlay / +overlay+min+max
+ZymValue u_plotHist2(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue valsV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.plotHistogram(label, values)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.plotHistogram")) return ZYM_ERROR;
+    std::vector<float> vs;
+    if (!readFloatList(vm, valsV, "ui.plotHistogram(label, values)", &vs)) return ZYM_ERROR;
+    ImGui::PlotHistogram(label.c_str(), vs.data(), (int)vs.size());
+    return zym_newNull();
+}
+ZymValue u_plotHist3(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue valsV,
+                    ZymValue overlayV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.plotHistogram(label, values, overlay)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.plotHistogram")) return ZYM_ERROR;
+    std::vector<float> vs;
+    if (!readFloatList(vm, valsV, "ui.plotHistogram(label, values, overlay)", &vs)) return ZYM_ERROR;
+    const char* ov = optStr(overlayV, nullptr);
+    ImGui::PlotHistogram(label.c_str(), vs.data(), (int)vs.size(), 0, ov);
+    return zym_newNull();
+}
+ZymValue u_plotHist5(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue valsV,
+                    ZymValue overlayV, ZymValue minV, ZymValue maxV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.plotHistogram(label, values, overlay, min, max)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.plotHistogram")) return ZYM_ERROR;
+    std::vector<float> vs;
+    if (!readFloatList(vm, valsV, "ui.plotHistogram(label, values, overlay, min, max)", &vs)) return ZYM_ERROR;
+    const char* ov = optStr(overlayV, nullptr);
+    float mn = (float)optNum(minV, FLT_MAX);
+    float mx = (float)optNum(maxV, FLT_MAX);
+    ImGui::PlotHistogram(label.c_str(), vs.data(), (int)vs.size(), 0, ov, mn, mx);
+    return zym_newNull();
+}
+
+// ---- color edit / picker ------------------------------------------------
+//
+// Color ref convention: `[r, g, b]` (3-elem) or `[r, g, b, a]` (4-elem).
+// The bridge picks RGB vs RGBA based on the ref length, and the matching
+// 3-vs-4 ImGui call. The ref is mutated in place when the user edits.
+
+ZymValue u_colorEdit(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.colorEdit(label, ref)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.colorEdit")) return ZYM_ERROR;
+    float c[4] = {0, 0, 0, 1};
+    int n = refReadColor(vm, refV, "ui.colorEdit(label, ref)", c);
+    if (n == 0) return ZYM_ERROR;
+    bool changed = (n == 4)
+        ? ImGui::ColorEdit4(label.c_str(), c)
+        : ImGui::ColorEdit3(label.c_str(), c);
+    if (changed) refWriteColor(vm, refV, c, n);
+    return zym_newBool(changed);
+}
+
+ZymValue u_colorPicker(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue refV) {
+    std::string label;
+    if (!reqStr(vm, labelV, "ui.colorPicker(label, ref)", &label)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.colorPicker")) return ZYM_ERROR;
+    float c[4] = {0, 0, 0, 1};
+    int n = refReadColor(vm, refV, "ui.colorPicker(label, ref)", c);
+    if (n == 0) return ZYM_ERROR;
+    bool changed = (n == 4)
+        ? ImGui::ColorPicker4(label.c_str(), c)
+        : ImGui::ColorPicker3(label.c_str(), c);
+    if (changed) refWriteColor(vm, refV, c, n);
+    return zym_newBool(changed);
+}
+
+// `ui.colorButton(id, color)` — small swatch button.
+ZymValue u_colorButton(ZymVM* vm, ZymValue, ZymValue idV, ZymValue refV) {
+    std::string id;
+    if (!reqStr(vm, idV, "ui.colorButton(id, color)", &id)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.colorButton")) return ZYM_ERROR;
+    float c[4] = {0, 0, 0, 1};
+    int n = refReadColor(vm, refV, "ui.colorButton(id, color)", c);
+    if (n == 0) return ZYM_ERROR;
+    return zym_newBool(ImGui::ColorButton(id.c_str(), ImVec4(c[0], c[1], c[2], c[3])));
+}
+
+// ---- DrawList primitives -----------------------------------------------
+//
+// Per the locked decision in §1.2, the draw list is part of ImGui (not
+// SDL), so it lives in the `ui` native. Rather than expose a separate
+// DrawList handle type, we expose flat `ui.draw*` helpers that operate
+// on the current window's draw list. Scripts call them inside a
+// `ui.window(...)` body to draw custom shapes/text into that window.
+//
+// Color parameters here are packed 32-bit ABGR ints (IM_COL32 order),
+// matching ImDrawList's API. Scripts build them with `ui.color(r,g,b,a)`.
+
+// Pack [0..255] r,g,b,a into IM_COL32 ABGR.
+ZymValue u_color(ZymVM* vm, ZymValue, ZymValue rV, ZymValue gV, ZymValue bV,
+                 ZymValue aV) {
+    int r = optInt(rV, 0), g = optInt(gV, 0), b = optInt(bV, 0);
+    int a = optInt(aV, 255);
+    if (r < 0) r = 0; if (r > 255) r = 255;
+    if (g < 0) g = 0; if (g > 255) g = 255;
+    if (b < 0) b = 0; if (b > 255) b = 255;
+    if (a < 0) a = 0; if (a > 255) a = 255;
+    ImU32 c = IM_COL32(r, g, b, a);
+    return zym_newNumber((double)c);
+    (void)vm;
+}
+
+static ImDrawList* curDL(ZymVM* vm, const char* where) {
+    if (!requireFrame(vm, where)) return nullptr;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (!dl) {
+        zym_runtimeError(vm, "%s: no current draw list", where);
+        return nullptr;
+    }
+    return dl;
+}
+
+ZymValue u_drawLine(ZymVM* vm, ZymValue, ZymValue x1V, ZymValue y1V,
+                    ZymValue x2V, ZymValue y2V, ZymValue colV) {
+    ImDrawList* dl = curDL(vm, "ui.drawLine");
+    if (!dl) return ZYM_ERROR;
+    dl->AddLine(ImVec2((float)optNum(x1V, 0), (float)optNum(y1V, 0)),
+                ImVec2((float)optNum(x2V, 0), (float)optNum(y2V, 0)),
+                (ImU32)optInt(colV, 0xFFFFFFFF), 1.0f);
+    return zym_newNull();
+}
+
+ZymValue u_drawRect(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV,
+                    ZymValue wV, ZymValue hV, ZymValue colV) {
+    ImDrawList* dl = curDL(vm, "ui.drawRect");
+    if (!dl) return ZYM_ERROR;
+    float x = (float)optNum(xV, 0), y = (float)optNum(yV, 0);
+    float w = (float)optNum(wV, 0), h = (float)optNum(hV, 0);
+    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h),
+                (ImU32)optInt(colV, 0xFFFFFFFF));
+    return zym_newNull();
+}
+
+ZymValue u_drawRectFilled(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV,
+                          ZymValue wV, ZymValue hV, ZymValue colV) {
+    ImDrawList* dl = curDL(vm, "ui.drawRectFilled");
+    if (!dl) return ZYM_ERROR;
+    float x = (float)optNum(xV, 0), y = (float)optNum(yV, 0);
+    float w = (float)optNum(wV, 0), h = (float)optNum(hV, 0);
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h),
+                      (ImU32)optInt(colV, 0xFFFFFFFF));
+    return zym_newNull();
+}
+
+ZymValue u_drawCircle(ZymVM* vm, ZymValue, ZymValue cxV, ZymValue cyV,
+                      ZymValue rV, ZymValue colV) {
+    ImDrawList* dl = curDL(vm, "ui.drawCircle");
+    if (!dl) return ZYM_ERROR;
+    dl->AddCircle(ImVec2((float)optNum(cxV, 0), (float)optNum(cyV, 0)),
+                  (float)optNum(rV, 0), (ImU32)optInt(colV, 0xFFFFFFFF));
+    return zym_newNull();
+}
+
+ZymValue u_drawCircleFilled(ZymVM* vm, ZymValue, ZymValue cxV, ZymValue cyV,
+                            ZymValue rV, ZymValue colV) {
+    ImDrawList* dl = curDL(vm, "ui.drawCircleFilled");
+    if (!dl) return ZYM_ERROR;
+    dl->AddCircleFilled(ImVec2((float)optNum(cxV, 0), (float)optNum(cyV, 0)),
+                        (float)optNum(rV, 0), (ImU32)optInt(colV, 0xFFFFFFFF));
+    return zym_newNull();
+}
+
+ZymValue u_drawText(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV,
+                    ZymValue colV, ZymValue sV) {
+    std::string s;
+    if (!reqStr(vm, sV, "ui.drawText(x, y, color, s)", &s)) return ZYM_ERROR;
+    ImDrawList* dl = curDL(vm, "ui.drawText");
+    if (!dl) return ZYM_ERROR;
+    dl->AddText(ImVec2((float)optNum(xV, 0), (float)optNum(yV, 0)),
+                (ImU32)optInt(colV, 0xFFFFFFFF), s.c_str());
+    return zym_newNull();
+}
+
+ZymValue u_drawTriangle(ZymVM* vm, ZymValue,
+                        ZymValue x1V, ZymValue y1V,
+                        ZymValue x2V, ZymValue y2V,
+                        ZymValue x3V, ZymValue y3V,
+                        ZymValue colV) {
+    ImDrawList* dl = curDL(vm, "ui.drawTriangle");
+    if (!dl) return ZYM_ERROR;
+    dl->AddTriangle(ImVec2((float)optNum(x1V, 0), (float)optNum(y1V, 0)),
+                    ImVec2((float)optNum(x2V, 0), (float)optNum(y2V, 0)),
+                    ImVec2((float)optNum(x3V, 0), (float)optNum(y3V, 0)),
+                    (ImU32)optInt(colV, 0xFFFFFFFF));
+    return zym_newNull();
+}
+
+ZymValue u_drawTriangleFilled(ZymVM* vm, ZymValue,
+                              ZymValue x1V, ZymValue y1V,
+                              ZymValue x2V, ZymValue y2V,
+                              ZymValue x3V, ZymValue y3V,
+                              ZymValue colV) {
+    ImDrawList* dl = curDL(vm, "ui.drawTriangleFilled");
+    if (!dl) return ZYM_ERROR;
+    dl->AddTriangleFilled(ImVec2((float)optNum(x1V, 0), (float)optNum(y1V, 0)),
+                          ImVec2((float)optNum(x2V, 0), (float)optNum(y2V, 0)),
+                          ImVec2((float)optNum(x3V, 0), (float)optNum(y3V, 0)),
+                          (ImU32)optInt(colV, 0xFFFFFFFF));
+    return zym_newNull();
+}
+
+// `ui.getCursorPos() -> {x, y}` — current draw cursor in window coords.
+ZymValue u_getCursorPos(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getCursorPos")) return ZYM_ERROR;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ZymValue m = zym_newMap(vm);
+    zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "x", zym_newNumber((double)p.x));
+    zym_mapSet(vm, m, "y", zym_newNumber((double)p.y));
+    zym_popRoot(vm);
+    return m;
+}
+
+// `ui.getMousePos() -> {x, y}` — ImGui's mouse position (screen coords).
+ZymValue u_getMousePos(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getMousePos")) return ZYM_ERROR;
+    ImVec2 p = ImGui::GetMousePos();
+    ZymValue m = zym_newMap(vm);
+    zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "x", zym_newNumber((double)p.x));
+    zym_mapSet(vm, m, "y", zym_newNumber((double)p.y));
+    zym_popRoot(vm);
+    return m;
+}
+
+// `ui.framerate() -> number` — ImGui's smoothed FPS counter.
+ZymValue u_framerate(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.framerate")) return ZYM_ERROR;
+    return zym_newNumber((double)ImGui::GetIO().Framerate);
+}
+
+// ---- demo / inspector windows -----------------------------------------
+
+ZymValue u_showDemoWindow(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.showDemoWindow")) return ZYM_ERROR;
+    ImGui::ShowDemoWindow();
+    return zym_newNull();
+}
+
+ZymValue u_showMetricsWindow(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.showMetricsWindow")) return ZYM_ERROR;
+    ImGui::ShowMetricsWindow();
+    return zym_newNull();
+}
+
+ZymValue u_showAboutWindow(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.showAboutWindow")) return ZYM_ERROR;
+    ImGui::ShowAboutWindow();
+    return zym_newNull();
+}
+
 ZymValue u_lastError(ZymVM* vm, ZymValue /*self*/) {
     return zym_newStringN(vm, g_ui_lastError.c_str(),
                           (int)g_ui_lastError.size());
@@ -960,6 +1853,203 @@ ZymValue nativeUi_create(ZymVM* vm) {
     // combo(label, idxRef, items) — flat 3-arg
     MOD(combo, "combo(label, idxRef, items)", u_combo)
 
+    // ----- batch 3: scoped containers -----
+
+    // child(id, body) / child(id, w, h, border, body)
+    ZymValue child2v = zym_createNativeClosure(vm, "child(id, body)",                 (void*)u_child2, context);
+    zym_pushRoot(vm, child2v);
+    ZymValue child5v = zym_createNativeClosure(vm, "child(id, w, h, border, body)",   (void*)u_child5, context);
+    zym_pushRoot(vm, child5v);
+    ZymValue child   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, child);
+    zym_addOverload(vm, child, child2v);
+    zym_addOverload(vm, child, child5v);
+
+    MOD(group,        "group(body)",                 u_group)
+    MOD(treeNode,     "treeNode(label, body)",       u_treeNode)
+    MOD(disabled,     "disabled(cond, body)",        u_disabled)
+    MOD(id,           "id(idValue, body)",           u_id)
+    MOD(clip,         "clip(x, y, w, h, body)",      u_clip)
+    MOD(tooltipScope, "tooltipScope(body)",          u_tooltipScope)
+
+    // ----- batch 4: tables -----
+
+    // table(id, columns, body) / table(id, columns, flags, body)
+    ZymValue table3v = zym_createNativeClosure(vm, "table(id, columns, body)",        (void*)u_table3, context);
+    zym_pushRoot(vm, table3v);
+    ZymValue table4v = zym_createNativeClosure(vm, "table(id, columns, flags, body)", (void*)u_table4, context);
+    zym_pushRoot(vm, table4v);
+    ZymValue table   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, table);
+    zym_addOverload(vm, table, table3v);
+    zym_addOverload(vm, table, table4v);
+
+    // tableNextRow() / tableNextRow(minHeight)
+    ZymValue tableNextRow0v = zym_createNativeClosure(vm, "tableNextRow()",          (void*)u_tableNextRow0, context);
+    zym_pushRoot(vm, tableNextRow0v);
+    ZymValue tableNextRow1v = zym_createNativeClosure(vm, "tableNextRow(minHeight)", (void*)u_tableNextRow1, context);
+    zym_pushRoot(vm, tableNextRow1v);
+    ZymValue tableNextRow   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, tableNextRow);
+    zym_addOverload(vm, tableNextRow, tableNextRow0v);
+    zym_addOverload(vm, tableNextRow, tableNextRow1v);
+
+    MOD(tableNextColumn,    "tableNextColumn()",          u_tableNextColumn)
+    MOD(tableSetColumnIndex,"tableSetColumnIndex(idx)",   u_tableSetColumnIndex)
+
+    // tableSetupColumn(label) / (label, flags) / (label, flags, width)
+    ZymValue tableSetupColumn1v = zym_createNativeClosure(vm, "tableSetupColumn(label)",               (void*)u_tableSetupColumn1, context);
+    zym_pushRoot(vm, tableSetupColumn1v);
+    ZymValue tableSetupColumn2v = zym_createNativeClosure(vm, "tableSetupColumn(label, flags)",        (void*)u_tableSetupColumn2, context);
+    zym_pushRoot(vm, tableSetupColumn2v);
+    ZymValue tableSetupColumn3v = zym_createNativeClosure(vm, "tableSetupColumn(label, flags, width)", (void*)u_tableSetupColumn3, context);
+    zym_pushRoot(vm, tableSetupColumn3v);
+    ZymValue tableSetupColumn   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, tableSetupColumn);
+    zym_addOverload(vm, tableSetupColumn, tableSetupColumn1v);
+    zym_addOverload(vm, tableSetupColumn, tableSetupColumn2v);
+    zym_addOverload(vm, tableSetupColumn, tableSetupColumn3v);
+
+    MOD(tableSetupScrollFreeze,"tableSetupScrollFreeze(cols, rows)", u_tableSetupScrollFreeze)
+    MOD(tableHeadersRow,       "tableHeadersRow()",                  u_tableHeadersRow)
+    MOD(tableHeader,           "tableHeader(label)",                 u_tableHeader)
+    MOD(tableGetRowIndex,      "tableGetRowIndex()",                 u_tableGetRowIndex)
+    MOD(tableGetColumnIndex,   "tableGetColumnIndex()",              u_tableGetColumnIndex)
+    MOD(tableGetColumnCount,   "tableGetColumnCount()",              u_tableGetColumnCount)
+
+    // columns(count) / (count, id) / (count, id, border)
+    ZymValue columns1v = zym_createNativeClosure(vm, "columns(count)",               (void*)u_columns1, context);
+    zym_pushRoot(vm, columns1v);
+    ZymValue columns2v = zym_createNativeClosure(vm, "columns(count, id)",           (void*)u_columns2, context);
+    zym_pushRoot(vm, columns2v);
+    ZymValue columns3v = zym_createNativeClosure(vm, "columns(count, id, border)",   (void*)u_columns3, context);
+    zym_pushRoot(vm, columns3v);
+    ZymValue columns   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, columns);
+    zym_addOverload(vm, columns, columns1v);
+    zym_addOverload(vm, columns, columns2v);
+    zym_addOverload(vm, columns, columns3v);
+
+    MOD(nextColumn, "nextColumn()", u_nextColumn)
+
+    // ----- batch 5: popups / menus -----
+
+    // popup(id, body) / popup(id, flags, body)
+    ZymValue popup2v = zym_createNativeClosure(vm, "popup(id, body)",        (void*)u_popup2, context);
+    zym_pushRoot(vm, popup2v);
+    ZymValue popup3v = zym_createNativeClosure(vm, "popup(id, flags, body)", (void*)u_popup3, context);
+    zym_pushRoot(vm, popup3v);
+    ZymValue popup   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, popup);
+    zym_addOverload(vm, popup, popup2v);
+    zym_addOverload(vm, popup, popup3v);
+
+    // popupModal(name, body) / popupModal(name, flags, body)
+    ZymValue popupModal2v = zym_createNativeClosure(vm, "popupModal(name, body)",        (void*)u_popupModal2, context);
+    zym_pushRoot(vm, popupModal2v);
+    ZymValue popupModal3v = zym_createNativeClosure(vm, "popupModal(name, flags, body)", (void*)u_popupModal3, context);
+    zym_pushRoot(vm, popupModal3v);
+    ZymValue popupModal   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, popupModal);
+    zym_addOverload(vm, popupModal, popupModal2v);
+    zym_addOverload(vm, popupModal, popupModal3v);
+
+    // openPopup(id) / openPopup(id, flags)
+    ZymValue openPopup1v = zym_createNativeClosure(vm, "openPopup(id)",        (void*)u_openPopup1, context);
+    zym_pushRoot(vm, openPopup1v);
+    ZymValue openPopup2v = zym_createNativeClosure(vm, "openPopup(id, flags)", (void*)u_openPopup2, context);
+    zym_pushRoot(vm, openPopup2v);
+    ZymValue openPopup   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, openPopup);
+    zym_addOverload(vm, openPopup, openPopup1v);
+    zym_addOverload(vm, openPopup, openPopup2v);
+
+    MOD(closeCurrentPopup, "closeCurrentPopup()", u_closeCurrentPopup)
+    MOD(menuBar,           "menuBar(body)",       u_menuBar)
+    MOD(mainMenuBar,       "mainMenuBar(body)",   u_mainMenuBar)
+
+    // menu(label, body) / menu(label, enabled, body)
+    ZymValue menu2v = zym_createNativeClosure(vm, "menu(label, body)",          (void*)u_menu2, context);
+    zym_pushRoot(vm, menu2v);
+    ZymValue menu3v = zym_createNativeClosure(vm, "menu(label, enabled, body)", (void*)u_menu3, context);
+    zym_pushRoot(vm, menu3v);
+    ZymValue menu   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, menu);
+    zym_addOverload(vm, menu, menu2v);
+    zym_addOverload(vm, menu, menu3v);
+
+    // menuItem(label) / (label, shortcut) / (label, shortcut, selected)
+    //   / (label, shortcut, selected, enabled)
+    ZymValue menuItem1v = zym_createNativeClosure(vm, "menuItem(label)",                              (void*)u_menuItem1, context);
+    zym_pushRoot(vm, menuItem1v);
+    ZymValue menuItem2v = zym_createNativeClosure(vm, "menuItem(label, shortcut)",                    (void*)u_menuItem2, context);
+    zym_pushRoot(vm, menuItem2v);
+    ZymValue menuItem3v = zym_createNativeClosure(vm, "menuItem(label, shortcut, selected)",          (void*)u_menuItem3, context);
+    zym_pushRoot(vm, menuItem3v);
+    ZymValue menuItem4v = zym_createNativeClosure(vm, "menuItem(label, shortcut, selected, enabled)", (void*)u_menuItem4, context);
+    zym_pushRoot(vm, menuItem4v);
+    ZymValue menuItem   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, menuItem);
+    zym_addOverload(vm, menuItem, menuItem1v);
+    zym_addOverload(vm, menuItem, menuItem2v);
+    zym_addOverload(vm, menuItem, menuItem3v);
+    zym_addOverload(vm, menuItem, menuItem4v);
+
+    // ----- batch 6: plots / color / drawList / demo -----
+
+    // plotLines / plotHistogram dispatchers (2/3/5-arg)
+    ZymValue plotLines2v = zym_createNativeClosure(vm, "plotLines(label, values)",                       (void*)u_plotLines2, context);
+    zym_pushRoot(vm, plotLines2v);
+    ZymValue plotLines3v = zym_createNativeClosure(vm, "plotLines(label, values, overlay)",              (void*)u_plotLines3, context);
+    zym_pushRoot(vm, plotLines3v);
+    ZymValue plotLines5v = zym_createNativeClosure(vm, "plotLines(label, values, overlay, min, max)",    (void*)u_plotLines5, context);
+    zym_pushRoot(vm, plotLines5v);
+    ZymValue plotLines   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, plotLines);
+    zym_addOverload(vm, plotLines, plotLines2v);
+    zym_addOverload(vm, plotLines, plotLines3v);
+    zym_addOverload(vm, plotLines, plotLines5v);
+
+    ZymValue plotHist2v = zym_createNativeClosure(vm, "plotHistogram(label, values)",                    (void*)u_plotHist2, context);
+    zym_pushRoot(vm, plotHist2v);
+    ZymValue plotHist3v = zym_createNativeClosure(vm, "plotHistogram(label, values, overlay)",           (void*)u_plotHist3, context);
+    zym_pushRoot(vm, plotHist3v);
+    ZymValue plotHist5v = zym_createNativeClosure(vm, "plotHistogram(label, values, overlay, min, max)", (void*)u_plotHist5, context);
+    zym_pushRoot(vm, plotHist5v);
+    ZymValue plotHistogram = zym_createDispatcher(vm);
+    zym_pushRoot(vm, plotHistogram);
+    zym_addOverload(vm, plotHistogram, plotHist2v);
+    zym_addOverload(vm, plotHistogram, plotHist3v);
+    zym_addOverload(vm, plotHistogram, plotHist5v);
+
+    // color widgets
+    MOD(colorEdit,   "colorEdit(label, ref)",   u_colorEdit)
+    MOD(colorPicker, "colorPicker(label, ref)", u_colorPicker)
+    MOD(colorButton, "colorButton(id, color)",  u_colorButton)
+
+    // color packer
+    MOD(color, "color(r, g, b, a)", u_color)
+
+    // drawList primitives — flat, operate on the current window's draw list
+    MOD(drawLine,           "drawLine(x1, y1, x2, y2, color)",           u_drawLine)
+    MOD(drawRect,           "drawRect(x, y, w, h, color)",               u_drawRect)
+    MOD(drawRectFilled,     "drawRectFilled(x, y, w, h, color)",         u_drawRectFilled)
+    MOD(drawCircle,         "drawCircle(cx, cy, r, color)",              u_drawCircle)
+    MOD(drawCircleFilled,   "drawCircleFilled(cx, cy, r, color)",        u_drawCircleFilled)
+    MOD(drawText,           "drawText(x, y, color, s)",                  u_drawText)
+    MOD(drawTriangle,       "drawTriangle(x1,y1,x2,y2,x3,y3, color)",    u_drawTriangle)
+    MOD(drawTriangleFilled, "drawTriangleFilled(x1,y1,x2,y2,x3,y3, c)",  u_drawTriangleFilled)
+
+    // position / state helpers
+    MOD(getCursorPos, "getCursorPos()", u_getCursorPos)
+    MOD(getMousePos,  "getMousePos()",  u_getMousePos)
+    MOD(framerate,    "framerate()",    u_framerate)
+
+    // demo / inspector
+    MOD(showDemoWindow,    "showDemoWindow()",    u_showDemoWindow)
+    MOD(showMetricsWindow, "showMetricsWindow()", u_showMetricsWindow)
+    MOD(showAboutWindow,   "showAboutWindow()",   u_showAboutWindow)
+
 #undef MOD
 
     ZymValue obj = zym_newMap(vm);
@@ -1018,10 +2108,122 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "inputTextMultiline",  inputTextMultiline);
     zym_mapSet(vm, obj, "combo",               combo);
 
+    // batch 3
+    zym_mapSet(vm, obj, "child",        child);
+    zym_mapSet(vm, obj, "group",        group);
+    zym_mapSet(vm, obj, "treeNode",     treeNode);
+    zym_mapSet(vm, obj, "disabled",     disabled);
+    zym_mapSet(vm, obj, "id",           id);
+    zym_mapSet(vm, obj, "clip",         clip);
+    zym_mapSet(vm, obj, "tooltipScope", tooltipScope);
+
+    // batch 4
+    zym_mapSet(vm, obj, "table",                  table);
+    zym_mapSet(vm, obj, "tableNextRow",           tableNextRow);
+    zym_mapSet(vm, obj, "tableNextColumn",        tableNextColumn);
+    zym_mapSet(vm, obj, "tableSetColumnIndex",    tableSetColumnIndex);
+    zym_mapSet(vm, obj, "tableSetupColumn",       tableSetupColumn);
+    zym_mapSet(vm, obj, "tableSetupScrollFreeze", tableSetupScrollFreeze);
+    zym_mapSet(vm, obj, "tableHeadersRow",        tableHeadersRow);
+    zym_mapSet(vm, obj, "tableHeader",            tableHeader);
+    zym_mapSet(vm, obj, "tableGetRowIndex",       tableGetRowIndex);
+    zym_mapSet(vm, obj, "tableGetColumnIndex",    tableGetColumnIndex);
+    zym_mapSet(vm, obj, "tableGetColumnCount",    tableGetColumnCount);
+    zym_mapSet(vm, obj, "columns",                columns);
+    zym_mapSet(vm, obj, "nextColumn",             nextColumn);
+
+    // batch 5
+    zym_mapSet(vm, obj, "popup",             popup);
+    zym_mapSet(vm, obj, "popupModal",        popupModal);
+    zym_mapSet(vm, obj, "openPopup",         openPopup);
+    zym_mapSet(vm, obj, "closeCurrentPopup", closeCurrentPopup);
+    zym_mapSet(vm, obj, "menuBar",           menuBar);
+    zym_mapSet(vm, obj, "mainMenuBar",       mainMenuBar);
+    zym_mapSet(vm, obj, "menu",              menu);
+    zym_mapSet(vm, obj, "menuItem",          menuItem);
+
+    // batch 6
+    zym_mapSet(vm, obj, "plotLines",         plotLines);
+    zym_mapSet(vm, obj, "plotHistogram",     plotHistogram);
+    zym_mapSet(vm, obj, "colorEdit",         colorEdit);
+    zym_mapSet(vm, obj, "colorPicker",       colorPicker);
+    zym_mapSet(vm, obj, "colorButton",       colorButton);
+    zym_mapSet(vm, obj, "color",             color);
+    zym_mapSet(vm, obj, "drawLine",          drawLine);
+    zym_mapSet(vm, obj, "drawRect",          drawRect);
+    zym_mapSet(vm, obj, "drawRectFilled",    drawRectFilled);
+    zym_mapSet(vm, obj, "drawCircle",        drawCircle);
+    zym_mapSet(vm, obj, "drawCircleFilled",  drawCircleFilled);
+    zym_mapSet(vm, obj, "drawText",          drawText);
+    zym_mapSet(vm, obj, "drawTriangle",      drawTriangle);
+    zym_mapSet(vm, obj, "drawTriangleFilled",drawTriangleFilled);
+    zym_mapSet(vm, obj, "getCursorPos",      getCursorPos);
+    zym_mapSet(vm, obj, "getMousePos",       getMousePos);
+    zym_mapSet(vm, obj, "framerate",         framerate);
+    zym_mapSet(vm, obj, "showDemoWindow",    showDemoWindow);
+    zym_mapSet(vm, obj, "showMetricsWindow", showMetricsWindow);
+    zym_mapSet(vm, obj, "showAboutWindow",   showAboutWindow);
+
     // Roots are popped in reverse-push order; everything we've pushed
     // is reachable from `obj`, which is itself rooted. Pop in groups
     // matching pushes (newest first).
     zym_popRoot(vm); // obj
+
+    // batch 6 (popped newest-first)
+    zym_popRoot(vm); // showAboutWindow
+    zym_popRoot(vm); // showMetricsWindow
+    zym_popRoot(vm); // showDemoWindow
+    zym_popRoot(vm); // framerate
+    zym_popRoot(vm); // getMousePos
+    zym_popRoot(vm); // getCursorPos
+    zym_popRoot(vm); // drawTriangleFilled
+    zym_popRoot(vm); // drawTriangle
+    zym_popRoot(vm); // drawText
+    zym_popRoot(vm); // drawCircleFilled
+    zym_popRoot(vm); // drawCircle
+    zym_popRoot(vm); // drawRectFilled
+    zym_popRoot(vm); // drawRect
+    zym_popRoot(vm); // drawLine
+    zym_popRoot(vm); // color
+    zym_popRoot(vm); // colorButton
+    zym_popRoot(vm); // colorPicker
+    zym_popRoot(vm); // colorEdit
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // plotHistogram{,2v,3v,5v}
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // plotLines{,2v,3v,5v}
+
+    // batch 5 (popped newest-first)
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // menuItem{,1v,2v,3v,4v}
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // menu{,2v,3v}
+    zym_popRoot(vm); // mainMenuBar
+    zym_popRoot(vm); // menuBar
+    zym_popRoot(vm); // closeCurrentPopup
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // openPopup{,1v,2v}
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // popupModal{,2v,3v}
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // popup{,2v,3v}
+
+    // batch 4 (popped newest-first)
+    zym_popRoot(vm); // nextColumn
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // columns{,1v,2v,3v}
+    zym_popRoot(vm); // tableGetColumnCount
+    zym_popRoot(vm); // tableGetColumnIndex
+    zym_popRoot(vm); // tableGetRowIndex
+    zym_popRoot(vm); // tableHeader
+    zym_popRoot(vm); // tableHeadersRow
+    zym_popRoot(vm); // tableSetupScrollFreeze
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // tableSetupColumn{,1v,2v,3v}
+    zym_popRoot(vm); // tableSetColumnIndex
+    zym_popRoot(vm); // tableNextColumn
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // tableNextRow{,0v,1v}
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // table{,3v,4v}
+
+    // batch 3 (popped newest-first)
+    zym_popRoot(vm); // tooltipScope
+    zym_popRoot(vm); // clip
+    zym_popRoot(vm); // id
+    zym_popRoot(vm); // disabled
+    zym_popRoot(vm); // treeNode
+    zym_popRoot(vm); // group
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // child{,2v,5v}
 
     // batch 2 (popped newest-first)
     zym_popRoot(vm); // combo

@@ -1,5 +1,7 @@
 #define DEBUG_RESOLUTION 0
 
+var PKG_URL = "https://raw.githubusercontent.com/zym-lang/modules/refs/heads/main/pkg.zym"
+
 var drainAndPrintDiagnostics = import("diagnostics.zym").drainAndPrintDiagnostics
 
 var ZYM_VERSION = "0.3.0"
@@ -72,53 +74,66 @@ func compileSource(fileName, source)
         print("[ spec , importer ]: [ %v , %v ]", spec, importer)
 #endif
         
-        if (startsWith(spec, "@/")) {
-            var relativePart = slice(spec, 2, length(spec))
-            
-            if (Path.extension(relativePart) == "") {
-                relativePart = relativePart + ".zym"
+        // ---------------------------------------------------------
+        // The Root Sigil (@)
+        // Catch @/, @./, and bare @something
+        // ---------------------------------------------------------
+        if (startsWith(spec, "@")) {
+            var relativePart = slice(spec, 1, length(spec))
+            if (startsWith(relativePart, "/")) {
+                relativePart = slice(relativePart, 1, length(relativePart))
+            } else if (startsWith(relativePart, "./")) {
+                relativePart = slice(relativePart, 2, length(relativePart))
             }
+            var resolved = "ROOT::./" + relativePart
 #if DEBUG_RESOLUTION
-            print("Resolved Import: [%v]", "ROOT::./" + relativePart)
+            print("Resolved Import: [%v]", resolved)
             print("**************************************************************************")
 #endif
-            return "ROOT::./" + relativePart
+            return resolved
         }
 
-        if (Path.extension(spec) == "") {
+        // ---------------------------------------------------------
+        // Relative / Explicit Paths
+        // ---------------------------------------------------------
+        if (startsWith(spec, "./") || startsWith(spec, "../") || startsWith(spec, "/")) {
+            var prefix = "ROOT::" 
+            var rawPath = ""
+            if (importer != null) {
+                if (startsWith(importer, "MODULES::")) {
+                    prefix = "MODULES::"
+                    rawPath = slice(importer, length("MODULES::"), length(importer))
+                } else if (startsWith(importer, "ROOT::")) {
+                    prefix = "ROOT::"
+                    rawPath = slice(importer, length("ROOT::"), length(importer))
+                } else {
+                    rawPath = importer
+                }
+            }
+            var baseDir = Path.dirname(rawPath)
+            var joined = Path.join(baseDir, spec)
+            if (startsWith(joined, "/")) {
+                joined = slice(joined, 1, length(joined))
+            }
+            var resolved = prefix + joined
 #if DEBUG_RESOLUTION
-            print("Resolved Import: [%v]", "MODULES::" + spec + ".zym")
+            print("Resolved Import: [%v]", resolved)
             print("**************************************************************************")
 #endif
-            return "MODULES::" + spec + ".zym"
+            return resolved
         }
 
-        var prefix = "ROOT::" 
-        var rawPath = ""
+        // ---------------------------------------------------------
+        // Bare Names (The Fallback)
+        // ---------------------------------------------------------
+        // If it doesn't start with @/, ./, ../, or /, it MUST be a user module.
+        var resolvedModule = "MODULES::" + spec
 
-        if (importer != null) {
-            if (startsWith(importer, "MODULES::")) {
-                prefix = "MODULES::"
-                rawPath = slice(importer, length("MODULES::"), length(importer))
-            } else if (startsWith(importer, "ROOT::")) {
-                prefix = "ROOT::"
-                rawPath = slice(importer, length("ROOT::"), length(importer))
-            } else {
-                rawPath = importer
-            }
-        }
-
-        var baseDir = Path.dirname(rawPath)
-        var joined = Path.join(baseDir, spec)
-
-        if (startsWith(joined, "/")) {
-            joined = slice(joined, 1, length(joined))
-        }
 #if DEBUG_RESOLUTION
-        print("Resolved Import: [%v]", prefix + joined)
+        print("Resolved Import: [%v]", resolvedModule)
         print("**************************************************************************")
 #endif
-        return prefix + joined
+        return resolvedModule
     }
 
     func readAndPreprocessCallback(virtualPath)
@@ -142,13 +157,31 @@ func compileSource(fileName, source)
             return null
         }
 
-        var source = readFile(physicalPath)
+        var source = null
+        var resolvedPhysicalPath = physicalPath
+        var ext = Path.extension(physicalPath)
+
+        if (ext == "") {
+            resolvedPhysicalPath = physicalPath + ".zym"
+            if (File.exists(resolvedPhysicalPath)) { source = readFile(resolvedPhysicalPath) }
+            else {
+                resolvedPhysicalPath = Path.normalize(Path.join(physicalPath, "main.zym"))
+                if (File.exists(resolvedPhysicalPath)) { source = readFile(resolvedPhysicalPath) }
+            }
+        } else if (ext == "zym") {
+            if (File.exists(physicalPath)) { source = readFile(physicalPath) }
+        } else {
+#if DEBUG_RESOLUTION
+            print("ERROR: Unsupported file extension: '.%v'", ext)
+#endif
+            return null
+        }
         if (!source) { return null }
 
-        sources[physicalPath] = source
+        sources[resolvedPhysicalPath] = source
 
         var sm = vm.newSourceMap()
-        var fid = vm.registerSourceFile(physicalPath, source)
+        var fid = vm.registerSourceFile(resolvedPhysicalPath, source)
         var ps = vm.preprocess(source, sm, fid)
 
         return {
@@ -239,6 +272,58 @@ func validateOutputPath(path)
     return true
 }
 
+func bootstrapPkg()
+{
+    var pkgPath = Path.join(MODULE_PATH, "pkg.zym")
+    if (File.exists(pkgPath)) { return true }
+
+    print("Bootstrapping Zym Package Manager...")
+
+    var host = "raw.githubusercontent.com"
+    var reqPath = "/zym-lang/modules/refs/heads/main/pkg.zym"
+    var request = "GET " + reqPath + " HTTP/1.1\r\n" +
+                  "Host: " + host + "\r\n" +
+                  "User-Agent: zym-cli\r\n" +
+                  "Connection: close\r\n" +
+                  "\r\n"
+
+    var s = TLS.connect(host, 443, 5000)
+    if (s == null) { 
+        print("Error: Failed to connect to %v", host)
+        return false 
+    }
+    s.write(Buffer.fromString(request), 5000)
+
+    var statusLine = s.readLine(5000)
+    if (typeof(statusLine) != "string" || !startsWith(statusLine, "HTTP/1.1 200")) {
+        print("Error: Failed to fetch pkg.zym (Status: %v)", statusLine)
+        s.close()
+        return false
+    }
+
+    while (true) {
+        var line = s.readLine(5000)
+        if (line == "") { break } 
+    }
+
+    var body = s.readAll(5000)
+    if (typeof(body) == "string") {
+        print("Error: Failed to read response body. (Status: %v)", body)
+        s.close()
+        return false
+    }
+
+    if (!File.writeBytes(pkgPath, body)) {
+        print("Error: Failed to write pkg.zym to %v", pkgPath)
+        s.close()
+        return false
+    }
+
+    s.close()
+    print("Successfully bootstrapped pkg.zym")
+    return true
+}
+
 func main(argv)
 {
     RUNNING_BINARY_PATH = argv[0]
@@ -263,6 +348,11 @@ func main(argv)
         }
 
         var entryArg = shift(cliArgs)
+
+        if (entryArg == "pkg") {
+            if (!bootstrapPkg()) { return null }
+        }
+
         if (contains([], entryArg)) {
             print("Arg Path")
         } else {
@@ -307,6 +397,52 @@ func main(argv)
                             } else { print("Error: zpk entry index corrupted: '%v'", entryArg); return null }
                         } else { print("Error: Failed to open .zpk file: '%v'", entryArg); return null }
                     } else { print("Error: file not found: %v", entryArg); return null }
+                    break
+                }
+                case "": {
+                    var checkFile = Path.join(MODULE_PATH, entryArg + ".zym")
+                    var checkDirFile = Path.join(MODULE_PATH, entryArg, "main.zym")
+
+                    var moduleArgs
+                    if (isScriptArgs) moduleArgs = [...cliArgs, "--", ...scriptArgs]
+                    else moduleArgs = [...cliArgs]
+
+                    if (File.exists(checkFile)) {
+                        source = readFile(checkFile)
+                        fileName = entryArg + ".zym"
+                        SCRIPT_PATH = MODULE_PATH
+                    } else if (File.exists(checkDirFile)) {
+                        source = readFile(checkDirFile)
+                        fileName = "main.zym"
+                        SCRIPT_PATH = Path.join(MODULE_PATH, entryArg)
+                    } else {
+                        print("Error: Module not found: '%v'", entryArg)
+                        return null
+                    }
+
+                    if (!source) { return null }
+                    bytecode = compileSource(fileName, source)
+                    if (!bytecode) { return null }
+                    
+                    var vm = Zym.newVM()
+                    vm.registerCliNative("ALL")
+                    var chunk = vm.newChunk()
+                    if (vm.deserializeChunk(chunk, bytecode) == Zym.STATUS.OK) {
+                        if (vm.runChunk(chunk) == Zym.STATUS.OK) {
+                            if (vm.hasFunc("cli", 1)) {
+                                var cliFunc = vm.getFunc("cli")
+                                var res = cliFunc([RUNNING_BINARY_PATH, ...moduleArgs])
+                            } else {
+                                print("Error: Module '%v' does not support the cli.", entryArg)
+                            }
+                        } else {
+                            //runtime error logged internally
+                        }
+                    } else {
+                        print("Error: failed to deserialize module bytecode.")
+                    }
+
+                    return null
                     break
                 }
                 default:{

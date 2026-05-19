@@ -8,13 +8,13 @@
 // Usage:
 //   zym run examples/gui/widgets.zym
 
-print("sdl version: %v", sdl.version())
+print("sdl version: %v", SDL.version())
 
-var win = sdl.createWindow("zym ui smoke test", 480, 240, {
+var win = SDL.createWindow("zym ui smoke test", 480, 240, {
     resizable: true,
 })
 if (win == null) {
-    print("createWindow failed: %v", sdl.lastError())
+    print("createWindow failed: %v", SDL.lastError())
     return
 }
 
@@ -24,20 +24,20 @@ var done   = false
 while (!win.shouldClose() and !done) {
     // Drain events. The ui native installs a hook so events flow to
     // ImGui automatically — scripts just keep pulling.
-    var e = sdl.pollEvent()
+    var e = SDL.pollEvent()
     while (e != null) {
         if (e.type == "quit") { done = true }
-        e = sdl.pollEvent()
+        e = SDL.pollEvent()
     }
 
-    ui.frame(win, func() {
-        ui.window("hello", func() {
-            ui.text("hello from zym + imgui")
-            if (ui.button("click me")) {
+    UI.frame(win, func() {
+        UI.window("hello", func() {
+            UI.text("hello from zym + imgui")
+            if (UI.button("click me")) {
                 clicks = clicks + 1
                 print("click %v", clicks)
             }
-            ui.text("clicks: " + str(clicks))
+            UI.text("clicks: " + str(clicks))
         })
     })
 }

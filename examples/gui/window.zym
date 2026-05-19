@@ -6,20 +6,20 @@
 // Usage:
 //   zym run examples/gui/window.zym
 
-print("sdl version: %v", sdl.version())
+print("sdl version: %v", SDL.version())
 
-var win = sdl.createWindow("zym sdl smoke test", 640, 360, {
+var win = SDL.createWindow("zym sdl smoke test", 640, 360, {
     resizable: true,
 })
 if (win == null) {
-    print("createWindow failed: ", sdl.lastError())
+    print("createWindow failed: ", SDL.lastError())
     return
 }
 
 print("window opened — close it to exit")
 
 while (!win.shouldClose()) {
-    var e = sdl.pollEvent()
+    var e = SDL.pollEvent()
     while (e != null) {
         if (e.type == "quit") {
             print("got quit event")
@@ -28,10 +28,10 @@ while (!win.shouldClose()) {
         } else if (e.type == "key.down") {
             print("key.down scancode=%v key=%v", e.scancode, e.key)
         }
-        e = sdl.pollEvent()
+        e = SDL.pollEvent()
     }
     // sleep-ish until the next event so we don't spin the CPU.
-    sdl.waitEvent(50)
+    SDL.waitEvent(50)
 }
 
 win.free()

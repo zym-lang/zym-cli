@@ -2763,6 +2763,211 @@ ZymValue u_setCursorScreenPos(ZymVM* vm, ZymValue, ZymValue xV, ZymValue yV) {
     return zym_newNull();
 }
 
+// ---- PR 2e: drag-and-drop, table sort specs, font atlas internals -------
+//
+// Drag and drop uses string-typed payloads only. The script passes a
+// payload string + a user "type" tag (max 32 chars per ImGui). On the
+// target side, the script asks for the same type tag and gets the
+// string back. Internally we store the payload bytes in a static
+// std::string (ImGui already copies them, so the static buffer is
+// just for the round-trip out to the script when accepting).
+
+static thread_local std::string g_ui_dndAcceptBuf;
+
+ZymValue u_beginDragDropSource(ZymVM* vm, ZymValue, ZymValue flagsV) {
+    if (!requireFrame(vm, "ui.beginDragDropSource")) return ZYM_ERROR;
+    int flags = (int)optNum(flagsV, 0);
+    return zym_newBool(ImGui::BeginDragDropSource((ImGuiDragDropFlags)flags));
+}
+
+ZymValue u_endDragDropSource(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.endDragDropSource")) return ZYM_ERROR;
+    ImGui::EndDragDropSource();
+    return zym_newNull();
+}
+
+ZymValue u_setDragDropPayload(ZymVM* vm, ZymValue, ZymValue typeV, ZymValue dataV) {
+    std::string type;
+    if (!reqStr(vm, typeV, "ui.setDragDropPayload(type, data)", &type)) return ZYM_ERROR;
+    std::string data;
+    if (!reqStr(vm, dataV, "ui.setDragDropPayload(type, data)", &data)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.setDragDropPayload")) return ZYM_ERROR;
+    return zym_newBool(ImGui::SetDragDropPayload(type.c_str(),
+                                                 data.data(),
+                                                 data.size()));
+}
+
+ZymValue u_beginDragDropTarget(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.beginDragDropTarget")) return ZYM_ERROR;
+    return zym_newBool(ImGui::BeginDragDropTarget());
+}
+
+ZymValue u_endDragDropTarget(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.endDragDropTarget")) return ZYM_ERROR;
+    ImGui::EndDragDropTarget();
+    return zym_newNull();
+}
+
+ZymValue u_acceptDragDropPayload(ZymVM* vm, ZymValue, ZymValue typeV, ZymValue flagsV) {
+    std::string type;
+    if (!reqStr(vm, typeV, "ui.acceptDragDropPayload(type, flags)", &type)) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.acceptDragDropPayload")) return ZYM_ERROR;
+    int flags = (int)optNum(flagsV, 0);
+    const ImGuiPayload* p = ImGui::AcceptDragDropPayload(type.c_str(),
+                                                        (ImGuiDragDropFlags)flags);
+    if (!p || !p->Data || p->DataSize <= 0) return zym_newNull();
+    g_ui_dndAcceptBuf.assign(static_cast<const char*>(p->Data), p->DataSize);
+    return zym_newStringN(vm, g_ui_dndAcceptBuf.data(),
+                          (int)g_ui_dndAcceptBuf.size());
+}
+
+ZymValue u_getDragDropPayload(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.getDragDropPayload")) return ZYM_ERROR;
+    const ImGuiPayload* p = ImGui::GetDragDropPayload();
+    if (!p || !p->Data || p->DataSize <= 0) return zym_newNull();
+    ZymValue m = zym_newMap(vm);
+    zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "type",
+               zym_newStringN(vm, p->DataType, (int)strlen(p->DataType)));
+    zym_mapSet(vm, m, "data",
+               zym_newStringN(vm, static_cast<const char*>(p->Data),
+                              p->DataSize));
+    zym_mapSet(vm, m, "preview",  zym_newBool(p->Preview));
+    zym_mapSet(vm, m, "delivery", zym_newBool(p->Delivery));
+    zym_popRoot(vm);
+    return m;
+}
+
+// `UI.tableGetSortSpecs() -> list | null`
+//
+// Returns the current sort specs for the active table as a list of
+// `{ column, direction, order }` maps, or `null` when the table is
+// not sorted (or has nothing dirty). `direction` is one of the
+// strings "asc" / "desc" / "none" to keep callers from having to
+// memorize integer constants. Pointer returned by ImGui has frame
+// lifetime — we copy everything out before returning.
+ZymValue u_tableGetSortSpecs(ZymVM* vm, ZymValue) {
+    if (!requireFrame(vm, "ui.tableGetSortSpecs")) return ZYM_ERROR;
+    ImGuiTableSortSpecs* s = ImGui::TableGetSortSpecs();
+    if (!s) return zym_newNull();
+    ZymValue list = zym_newList(vm);
+    zym_pushRoot(vm, list);
+    for (int i = 0; i < s->SpecsCount; i++) {
+        const ImGuiTableColumnSortSpecs& c = s->Specs[i];
+        ZymValue m = zym_newMap(vm);
+        zym_pushRoot(vm, m);
+        zym_mapSet(vm, m, "column",       zym_newNumber((double)c.ColumnIndex));
+        zym_mapSet(vm, m, "userId",       zym_newNumber((double)c.ColumnUserID));
+        zym_mapSet(vm, m, "order",        zym_newNumber((double)c.SortOrder));
+        const char* dir = "none";
+        if (c.SortDirection == ImGuiSortDirection_Ascending)  dir = "asc";
+        if (c.SortDirection == ImGuiSortDirection_Descending) dir = "desc";
+        zym_mapSet(vm, m, "direction", zym_newStringN(vm, dir, (int)strlen(dir)));
+        zym_listAppend(vm, list, m);
+        zym_popRoot(vm);
+    }
+    // Caller can choose to clear the dirty flag after handling.
+    s->SpecsDirty = false;
+    zym_popRoot(vm);
+    return list;
+}
+
+// ---- font atlas internals --------------------------------------------
+//
+// All atlas operations require an active ImGui context (so callers
+// must be inside `UI.frame(...)` or have one already created). They
+// affect the *current* context's atlas, same as every other font
+// API in this file. Note that adding/removing fonts during a frame
+// is risky — prefer doing it right after the first `UI.frame` tick
+// (when the context has been lazily created) and before any text
+// has been drawn this frame.
+
+ZymValue u_addFontDefault(ZymVM* vm, ZymValue) {
+    if (!ImGui::GetCurrentContext()) {
+        setError("ui.addFontDefault: no active ImGui context (call inside ui.frame)");
+        return zym_newNull();
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    if (!io.Fonts) {
+        setError("ui.addFontDefault: no font atlas on this context");
+        return zym_newNull();
+    }
+    ImFont* font = io.Fonts->AddFontDefault();
+    if (!font) {
+        setError("ui.addFontDefault: AddFontDefault returned null");
+        return zym_newNull();
+    }
+    return makeFontInstance(vm, font);
+}
+
+ZymValue u_clearFonts(ZymVM* vm, ZymValue) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.clearFonts: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.Fonts) io.Fonts->Clear();
+    return zym_newNull();
+}
+
+ZymValue u_getFontTexSize(ZymVM* vm, ZymValue) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.getFontTexSize: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    if (!io.Fonts || !io.Fonts->TexData) {
+        return zym_newNull();
+    }
+    ZymValue m = zym_newMap(vm);
+    zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "w", zym_newNumber((double)io.Fonts->TexData->Width));
+    zym_mapSet(vm, m, "h", zym_newNumber((double)io.Fonts->TexData->Height));
+    zym_popRoot(vm);
+    return m;
+}
+
+ZymValue u_getFontAtlasFlags(ZymVM* vm, ZymValue) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.getFontAtlasFlags: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    if (!io.Fonts) return zym_newNumber(0);
+    return zym_newNumber((double)io.Fonts->Flags);
+}
+
+ZymValue u_setFontAtlasFlags(ZymVM* vm, ZymValue, ZymValue fV) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.setFontAtlasFlags: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.Fonts) io.Fonts->Flags = (ImFontAtlasFlags)(int)optNum(fV, 0);
+    return zym_newNull();
+}
+
+ZymValue u_getFontCount(ZymVM* vm, ZymValue) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.getFontCount: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    if (!io.Fonts) return zym_newNumber(0);
+    return zym_newNumber((double)io.Fonts->Fonts.Size);
+}
+
+ZymValue u_getFontAt(ZymVM* vm, ZymValue, ZymValue iV) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm, "ui.getFontAt: no active ImGui context");
+        return ZYM_ERROR;
+    }
+    int i = (int)optNum(iV, 0);
+    ImGuiIO& io = ImGui::GetIO();
+    if (!io.Fonts || i < 0 || i >= io.Fonts->Fonts.Size) return zym_newNull();
+    return makeFontInstance(vm, io.Fonts->Fonts[i]);
+}
+
 ZymValue u_lastError(ZymVM* vm, ZymValue /*self*/) {
     return zym_newStringN(vm, g_ui_lastError.c_str(),
                           (int)g_ui_lastError.size());
@@ -3343,6 +3548,44 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(setCursorPos,            "setCursorPos(x, y)",         u_setCursorPos)
     MOD(setCursorScreenPos,      "setCursorScreenPos(x, y)",   u_setCursorScreenPos)
 
+    // PR 2e — drag-and-drop
+    ZymValue beginDragDropSource0 = zym_createNativeClosure(vm, "beginDragDropSource()", (void*)u_beginDragDropSource, context);
+    zym_pushRoot(vm, beginDragDropSource0);
+    ZymValue beginDragDropSource1 = zym_createNativeClosure(vm, "beginDragDropSource(flags)", (void*)u_beginDragDropSource, context);
+    zym_pushRoot(vm, beginDragDropSource1);
+    ZymValue beginDragDropSource = zym_createDispatcher(vm);
+    zym_pushRoot(vm, beginDragDropSource);
+    zym_addOverload(vm, beginDragDropSource, beginDragDropSource0);
+    zym_addOverload(vm, beginDragDropSource, beginDragDropSource1);
+
+    MOD(endDragDropSource,    "endDragDropSource()",                 u_endDragDropSource)
+    MOD(setDragDropPayload,   "setDragDropPayload(type, data)",      u_setDragDropPayload)
+    MOD(beginDragDropTarget,  "beginDragDropTarget()",               u_beginDragDropTarget)
+    MOD(endDragDropTarget,    "endDragDropTarget()",                 u_endDragDropTarget)
+
+    ZymValue acceptDragDropPayload1 = zym_createNativeClosure(vm, "acceptDragDropPayload(type)",         (void*)u_acceptDragDropPayload, context);
+    zym_pushRoot(vm, acceptDragDropPayload1);
+    ZymValue acceptDragDropPayload2 = zym_createNativeClosure(vm, "acceptDragDropPayload(type, flags)",  (void*)u_acceptDragDropPayload, context);
+    zym_pushRoot(vm, acceptDragDropPayload2);
+    ZymValue acceptDragDropPayload = zym_createDispatcher(vm);
+    zym_pushRoot(vm, acceptDragDropPayload);
+    zym_addOverload(vm, acceptDragDropPayload, acceptDragDropPayload1);
+    zym_addOverload(vm, acceptDragDropPayload, acceptDragDropPayload2);
+
+    MOD(getDragDropPayload,   "getDragDropPayload()",                u_getDragDropPayload)
+
+    // PR 2e — advanced table sort
+    MOD(tableGetSortSpecs,    "tableGetSortSpecs()",                 u_tableGetSortSpecs)
+
+    // PR 2e — font atlas internals
+    MOD(addFontDefault,       "addFontDefault()",                    u_addFontDefault)
+    MOD(clearFonts,           "clearFonts()",                        u_clearFonts)
+    MOD(getFontTexSize,       "getFontTexSize()",                    u_getFontTexSize)
+    MOD(getFontAtlasFlags,    "getFontAtlasFlags()",                 u_getFontAtlasFlags)
+    MOD(setFontAtlasFlags,    "setFontAtlasFlags(flags)",            u_setFontAtlasFlags)
+    MOD(getFontCount,         "getFontCount()",                      u_getFontCount)
+    MOD(getFontAt,            "getFontAt(i)",                        u_getFontAt)
+
 #undef MOD
 
     ZymValue obj = zym_newMap(vm);
@@ -3586,10 +3829,90 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "setCursorPos",            setCursorPos);
     zym_mapSet(vm, obj, "setCursorScreenPos",      setCursorScreenPos);
 
+    // PR 2e — drag-and-drop
+    zym_mapSet(vm, obj, "beginDragDropSource",  beginDragDropSource);
+    zym_mapSet(vm, obj, "endDragDropSource",    endDragDropSource);
+    zym_mapSet(vm, obj, "setDragDropPayload",   setDragDropPayload);
+    zym_mapSet(vm, obj, "beginDragDropTarget",  beginDragDropTarget);
+    zym_mapSet(vm, obj, "endDragDropTarget",    endDragDropTarget);
+    zym_mapSet(vm, obj, "acceptDragDropPayload",acceptDragDropPayload);
+    zym_mapSet(vm, obj, "getDragDropPayload",   getDragDropPayload);
+    // ImGuiDragDropFlags constants — most useful subset.
+    zym_mapSet(vm, obj, "DND_SRC_NO_PREVIEW_TOOLTIP",     zym_newNumber(1 << 0));
+    zym_mapSet(vm, obj, "DND_SRC_NO_DISABLE_HOVER",       zym_newNumber(1 << 1));
+    zym_mapSet(vm, obj, "DND_SRC_NO_HOLD_TO_OPEN_OTHERS", zym_newNumber(1 << 2));
+    zym_mapSet(vm, obj, "DND_SRC_ALLOW_NULL_ID",          zym_newNumber(1 << 3));
+    zym_mapSet(vm, obj, "DND_SRC_EXTERN",                 zym_newNumber(1 << 4));
+    zym_mapSet(vm, obj, "DND_SRC_PAYLOAD_AUTO_EXPIRE",    zym_newNumber(1 << 5));
+    zym_mapSet(vm, obj, "DND_ACCEPT_BEFORE_DELIVERY",     zym_newNumber(1 << 10));
+    zym_mapSet(vm, obj, "DND_ACCEPT_NO_DRAW_DEFAULT_RECT",zym_newNumber(1 << 11));
+    zym_mapSet(vm, obj, "DND_ACCEPT_NO_PREVIEW_TOOLTIP",  zym_newNumber(1 << 12));
+
+    // PR 2e — table sort
+    zym_mapSet(vm, obj, "tableGetSortSpecs",    tableGetSortSpecs);
+
+    // PR 2e — font atlas internals
+    zym_mapSet(vm, obj, "addFontDefault",    addFontDefault);
+    zym_mapSet(vm, obj, "clearFonts",        clearFonts);
+    zym_mapSet(vm, obj, "getFontTexSize",    getFontTexSize);
+    zym_mapSet(vm, obj, "getFontAtlasFlags", getFontAtlasFlags);
+    zym_mapSet(vm, obj, "setFontAtlasFlags", setFontAtlasFlags);
+    zym_mapSet(vm, obj, "getFontCount",      getFontCount);
+    zym_mapSet(vm, obj, "getFontAt",         getFontAt);
+    zym_mapSet(vm, obj, "FONT_ATLAS_NONE",                 zym_newNumber(0));
+    zym_mapSet(vm, obj, "FONT_ATLAS_NO_POWER_OF_TWO_HEIGHT", zym_newNumber(1 << 0));
+    zym_mapSet(vm, obj, "FONT_ATLAS_NO_MOUSE_CURSORS",     zym_newNumber(1 << 1));
+    zym_mapSet(vm, obj, "FONT_ATLAS_NO_BAKED_LINES",       zym_newNumber(1 << 2));
+
+    // ImGuiTableFlags_* — the practical subset for sortable, themed
+    // dashboards.  Pass these (bit-OR'd) as the `flags` arg to the
+    // 4-arg form of `UI.table(id, columns, flags, body)`.
+    zym_mapSet(vm, obj, "TABLE_NONE",            zym_newNumber(0));
+    zym_mapSet(vm, obj, "TABLE_RESIZABLE",       zym_newNumber(1 << 0));
+    zym_mapSet(vm, obj, "TABLE_REORDERABLE",     zym_newNumber(1 << 1));
+    zym_mapSet(vm, obj, "TABLE_HIDEABLE",        zym_newNumber(1 << 2));
+    zym_mapSet(vm, obj, "TABLE_SORTABLE",        zym_newNumber(1 << 3));
+    zym_mapSet(vm, obj, "TABLE_NO_SAVED_SETTINGS", zym_newNumber(1 << 4));
+    zym_mapSet(vm, obj, "TABLE_ROW_BG",          zym_newNumber(1 << 6));
+    zym_mapSet(vm, obj, "TABLE_BORDERS_INNER_H", zym_newNumber(1 << 7));
+    zym_mapSet(vm, obj, "TABLE_BORDERS_OUTER_H", zym_newNumber(1 << 8));
+    zym_mapSet(vm, obj, "TABLE_BORDERS_INNER_V", zym_newNumber(1 << 9));
+    zym_mapSet(vm, obj, "TABLE_BORDERS_OUTER_V", zym_newNumber(1 << 10));
+    zym_mapSet(vm, obj, "TABLE_BORDERS_H",       zym_newNumber((1 << 7) | (1 << 8)));
+    zym_mapSet(vm, obj, "TABLE_BORDERS_V",       zym_newNumber((1 << 9) | (1 << 10)));
+    zym_mapSet(vm, obj, "TABLE_BORDERS_INNER",   zym_newNumber((1 << 7) | (1 << 9)));
+    zym_mapSet(vm, obj, "TABLE_BORDERS_OUTER",   zym_newNumber((1 << 8) | (1 << 10)));
+    zym_mapSet(vm, obj, "TABLE_BORDERS",         zym_newNumber((1 << 7) | (1 << 8) | (1 << 9) | (1 << 10)));
+    zym_mapSet(vm, obj, "TABLE_SIZING_FIXED_FIT",     zym_newNumber(1 << 13));
+    zym_mapSet(vm, obj, "TABLE_SIZING_FIXED_SAME",    zym_newNumber(2 << 13));
+    zym_mapSet(vm, obj, "TABLE_SIZING_STRETCH_PROP",  zym_newNumber(3 << 13));
+    zym_mapSet(vm, obj, "TABLE_SIZING_STRETCH_SAME",  zym_newNumber(4 << 13));
+    zym_mapSet(vm, obj, "TABLE_SCROLL_X",         zym_newNumber(1 << 24));
+    zym_mapSet(vm, obj, "TABLE_SCROLL_Y",         zym_newNumber(1 << 25));
+    zym_mapSet(vm, obj, "TABLE_SORT_MULTI",       zym_newNumber(1 << 26));
+    zym_mapSet(vm, obj, "TABLE_SORT_TRISTATE",    zym_newNumber(1 << 27));
+
     // Roots are popped in reverse-push order; everything we've pushed
     // is reachable from `obj`, which is itself rooted. Pop in groups
     // matching pushes (newest first).
     zym_popRoot(vm); // obj
+
+    // PR 2e (popped newest-first, exact reverse of push order)
+    zym_popRoot(vm); // getFontAt
+    zym_popRoot(vm); // getFontCount
+    zym_popRoot(vm); // setFontAtlasFlags
+    zym_popRoot(vm); // getFontAtlasFlags
+    zym_popRoot(vm); // getFontTexSize
+    zym_popRoot(vm); // clearFonts
+    zym_popRoot(vm); // addFontDefault
+    zym_popRoot(vm); // tableGetSortSpecs
+    zym_popRoot(vm); // getDragDropPayload
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // acceptDragDropPayload{disp,2,1}
+    zym_popRoot(vm); // endDragDropTarget
+    zym_popRoot(vm); // beginDragDropTarget
+    zym_popRoot(vm); // setDragDropPayload
+    zym_popRoot(vm); // endDragDropSource
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // beginDragDropSource{disp,1,0}
 
     // PR 2d: widget parity batch (popped newest-first, exact reverse of push order)
     zym_popRoot(vm); // setCursorScreenPos

@@ -260,6 +260,32 @@ edit. `_` arguments are optional in the dispatched form.
 | `UI.tableGetColumnIndex()` | number | Current column index. |
 | `UI.tableGetColumnCount()` | number | Total declared columns. |
 
+### `UI.TABLE_*` flags
+
+Bit-or these and pass to the 4-arg form of `UI.table(id, columns, flags, body)`.
+
+| Constant | Meaning |
+|----------|---------|
+| `UI.TABLE_NONE` | No flags. |
+| `UI.TABLE_RESIZABLE` | Allow the user to resize columns by dragging the header borders. |
+| `UI.TABLE_REORDERABLE` | Allow the user to reorder columns by dragging their headers. |
+| `UI.TABLE_HIDEABLE` | Right-click on a header to hide/show columns. |
+| `UI.TABLE_SORTABLE` | Enable click-to-sort headers; query the order via `UI.tableGetSortSpecs()`. |
+| `UI.TABLE_NO_SAVED_SETTINGS` | Don't persist column state in the imgui ini file. |
+| `UI.TABLE_ROW_BG` | Alternate `TableRowBg` / `TableRowBgAlt` per row automatically. |
+| `UI.TABLE_BORDERS_INNER_H` / `UI.TABLE_BORDERS_OUTER_H` | Draw inner / outer horizontal borders. |
+| `UI.TABLE_BORDERS_INNER_V` / `UI.TABLE_BORDERS_OUTER_V` | Draw inner / outer vertical borders. |
+| `UI.TABLE_BORDERS_H` / `UI.TABLE_BORDERS_V` | Both inner and outer of one axis. |
+| `UI.TABLE_BORDERS_INNER` / `UI.TABLE_BORDERS_OUTER` | All inner / all outer borders. |
+| `UI.TABLE_BORDERS` | All inner + all outer borders. |
+| `UI.TABLE_SIZING_FIXED_FIT` | Columns default to fixed width fitting their content. |
+| `UI.TABLE_SIZING_FIXED_SAME` | Fixed width, all columns sized to the widest. |
+| `UI.TABLE_SIZING_STRETCH_PROP` | Stretch with weights proportional to content width. |
+| `UI.TABLE_SIZING_STRETCH_SAME` | Stretch with equal weights. |
+| `UI.TABLE_SCROLL_X` / `UI.TABLE_SCROLL_Y` | Make the table scrollable along the given axis (the table itself needs a sized outer container). |
+| `UI.TABLE_SORT_MULTI` | Hold shift while clicking headers to add a secondary sort key (`tableGetSortSpecs` may return multiple entries). |
+| `UI.TABLE_SORT_TRISTATE` | Allow "no sort" as a third header state. |
+
 ### Legacy columns (pre-`table` API)
 
 | Method | Notes |
@@ -693,6 +719,110 @@ The 2/3/4 suffix takes a list ref of that length and updates it in place.
 | `UI.getTextLineHeight()` / `UI.getTextLineHeightWithSpacing()` | Layout metrics. |
 | `UI.getFrameHeight()` / `UI.getFrameHeightWithSpacing()` | Standard widget row heights. |
 | `UI.getStyleColorVec4(name)` | Returns the live `[r, g, b, a]` for any `ImGuiCol_*` slot name. |
+
+### Drag and drop
+
+Drag-and-drop is exposed in its low-level Begin/End form so the same
+shape used in the ImGui C++ API is available to scripts. Payloads
+are **string-typed only** — `data` is a ZYM string, sent and received
+verbatim (encode any structured data with `JSON.encode` or similar
+yourself).
+
+| Call | Notes |
+|------|-------|
+| `UI.beginDragDropSource()` / `UI.beginDragDropSource(flags)` | Call after submitting an item. If `true`, call `setDragDropPayload(...)` then `endDragDropSource()`. |
+| `UI.setDragDropPayload(type, data)` | `type` is a user tag (max 32 chars; strings starting with `_` are reserved by ImGui). `data` is a ZYM string. Returns `true` once the payload is accepted. |
+| `UI.endDragDropSource()` | Only call when `beginDragDropSource()` returned `true`. |
+| `UI.beginDragDropTarget()` | Call after submitting an item that may receive a payload. |
+| `UI.acceptDragDropPayload(type)` / `UI.acceptDragDropPayload(type, flags)` | Returns the payload string on delivery, or `null` if no matching payload was delivered this frame. |
+| `UI.endDragDropTarget()` | Only call when `beginDragDropTarget()` returned `true`. |
+| `UI.getDragDropPayload()` | Peek the current in-flight payload from anywhere as `{type, data, preview, delivery}` or `null`. |
+
+Flag constants (use as bitmask in source/accept flags):
+
+| Constant | Meaning |
+|----------|---------|
+| `UI.DND_SRC_NO_PREVIEW_TOOLTIP` | Disable the source tooltip preview. |
+| `UI.DND_SRC_NO_DISABLE_HOVER` | By default, while dragging, no hover on the source. This flag re-enables it. |
+| `UI.DND_SRC_NO_HOLD_TO_OPEN_OTHERS` | Don't allow holding the source to open tree nodes / collapsing headers. |
+| `UI.DND_SRC_ALLOW_NULL_ID` | Allow drag-source on items with no ID. |
+| `UI.DND_SRC_EXTERN` | Source is external to ImGui (e.g. OS drag). |
+| `UI.DND_SRC_PAYLOAD_AUTO_EXPIRE` | Payload auto-expires if not re-set every frame. |
+| `UI.DND_ACCEPT_BEFORE_DELIVERY` | `acceptDragDropPayload` returns the string while hovering, before the button is released; check `getDragDropPayload().delivery` to know if it was actually dropped. |
+| `UI.DND_ACCEPT_NO_DRAW_DEFAULT_RECT` | Don't draw the default highlight rectangle on the target. |
+| `UI.DND_ACCEPT_NO_PREVIEW_TOOLTIP` | Hide the source's preview tooltip from the target site. |
+
+Minimal example:
+
+```zym
+UI.selectable("drag me", false)
+if (UI.beginDragDropSource()) {
+    UI.setDragDropPayload("ITEM", "row-7")
+    UI.text("dragging row-7")
+    UI.endDragDropSource()
+}
+UI.button("drop here")
+if (UI.beginDragDropTarget()) {
+    var data = UI.acceptDragDropPayload("ITEM")
+    if (data != null) { print("dropped: %v", data) }
+    UI.endDragDropTarget()
+}
+```
+
+### Advanced table sort
+
+For tables created with `ImGuiTableFlags_Sortable` (and friends),
+`UI.tableGetSortSpecs()` returns the current sort instructions. It
+must be called between `UI.table(...)`'s begin and end (i.e. from
+inside the table body, the same constraint ImGui has for
+`TableGetSortSpecs()`).
+
+| Call | Returns |
+|------|---------|
+| `UI.tableGetSortSpecs()` | `list` of `{column, userId, direction, order}` maps, or `null` if no sort is active. |
+
+Each entry:
+
+- `column` — integer column index this sort applies to.
+- `userId` — the `userId` you (optionally) passed to
+  `UI.tableSetupColumn` (or `0` if none).
+- `direction` — `"asc"`, `"desc"`, or `"none"`.
+- `order` — sort priority (`0` is primary; only nonzero with
+  `ImGuiTableFlags_SortMulti`).
+
+Calling this also clears ImGui's internal `SpecsDirty` flag, so the
+next frame won't re-report the same sort unless the user clicks a
+header again.
+
+### Font atlas internals
+
+All atlas calls require an active ImGui context (i.e. they must be
+made from inside a `UI.frame(win, ...)` body, or any other call site
+that already has one). They affect the *current* context's atlas, so
+each window/context has its own atlas state.
+
+> Avoid adding or clearing fonts mid-frame — call these right after
+> the first `UI.frame` tick for that window (when the context is
+> lazily created) and before any text has been drawn for the frame.
+
+| Call | Notes |
+|------|-------|
+| `UI.addFontDefault() -> Font \| null` | Push the built-in ProggyClean font onto the atlas and return its handle. |
+| `UI.clearFonts()` | Clear all fonts from the atlas (next text submission will use defaults). |
+| `UI.getFontCount() -> int` | Number of fonts currently in the atlas. |
+| `UI.getFontAt(i) -> Font \| null` | Wrap the i-th font as a `Font` handle (same shape as `UI.defaultFont()`). |
+| `UI.getFontTexSize() -> {w, h} \| null` | Backing texture dimensions (`null` before the atlas has been built). |
+| `UI.getFontAtlasFlags() -> int` | Current atlas build flags (`ImFontAtlasFlags_*`). |
+| `UI.setFontAtlasFlags(flags)` | Replace the atlas flags. |
+
+Flag constants:
+
+| Constant | Meaning |
+|----------|---------|
+| `UI.FONT_ATLAS_NONE` | No special flags. |
+| `UI.FONT_ATLAS_NO_POWER_OF_TWO_HEIGHT` | Don't round the atlas height to the next power of two. |
+| `UI.FONT_ATLAS_NO_MOUSE_CURSORS` | Don't bake software mouse cursors into the atlas. |
+| `UI.FONT_ATLAS_NO_BAKED_LINES` | Don't bake thick line textures (saves memory; antialiased lines fall back to polygons). |
 
 ---
 

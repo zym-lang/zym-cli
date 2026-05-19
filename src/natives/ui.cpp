@@ -850,6 +850,19 @@ ZymValue u_child2(ZymVM* vm, ZymValue self, ZymValue idV, ZymValue bodyV) {
     return u_child5(vm, self, idV, zym_newNumber(0.0), zym_newNumber(0.0),
                     zym_newBool(false), bodyV);
 }
+// `ui.child(id, opts, body)` — opts map with optional `w`, `h`, `border`.
+ZymValue u_child3(ZymVM* vm, ZymValue self, ZymValue idV, ZymValue optsV,
+                  ZymValue bodyV) {
+    if (!zym_isMap(optsV)) {
+        zym_runtimeError(vm,
+            "ui.child(id, opts, body): opts must be a map");
+        return ZYM_ERROR;
+    }
+    ZymValue wV      = zym_mapHas(optsV, "w")      ? zym_mapGet(vm, optsV, "w")      : zym_newNumber(0.0);
+    ZymValue hV      = zym_mapHas(optsV, "h")      ? zym_mapGet(vm, optsV, "h")      : zym_newNumber(0.0);
+    ZymValue borderV = zym_mapHas(optsV, "border") ? zym_mapGet(vm, optsV, "border") : zym_newBool(false);
+    return u_child5(vm, self, idV, wV, hV, borderV, bodyV);
+}
 
 // `ui.group(body)` — BeginGroup/EndGroup (always paired, no bool).
 ZymValue u_group(ZymVM* vm, ZymValue, ZymValue bodyV) {
@@ -1684,6 +1697,392 @@ ZymValue u_framerate(ZymVM* vm, ZymValue) {
 }
 
 
+// ---- PR 2c: style stacks, fonts ----------------------------------------
+//
+// Scoped style/font wrappers: `withStyleColor(map, body)`,
+// `withStyleVar(map, body)`, `withFont(font, body)`. Each pushes the
+// requested state, invokes the body, then pops in reverse — matching
+// ImGui's stack discipline. The bridge owns the push/pop so scripts
+// can never desync.
+//
+// Fonts: `loadFont(path, sizePx, opts?) -> Font | null` and
+// `defaultFont() -> Font`. A Font handle is a Zym map carrying a
+// `__font__` native context whose userdata is the underlying
+// `ImFont*`. Fonts live in ImGui's shared font atlas (per-context),
+// so there's no per-handle teardown — the context's destructor
+// already releases them when the owning window closes.
+//
+// Themes (`UI.themes.dark/light/classic` + `UI.applyTheme`) and
+// `UI.raw.*` escape hatches are explicitly deferred from PR 2c.
+
+// --- color slot name table (script string key -> ImGuiCol enum) -----
+struct ColSlot { const char* name; ImGuiCol slot; };
+const ColSlot kColSlots[] = {
+    { "Text",                  ImGuiCol_Text },
+    { "TextDisabled",          ImGuiCol_TextDisabled },
+    { "WindowBg",              ImGuiCol_WindowBg },
+    { "ChildBg",               ImGuiCol_ChildBg },
+    { "PopupBg",               ImGuiCol_PopupBg },
+    { "Border",                ImGuiCol_Border },
+    { "BorderShadow",          ImGuiCol_BorderShadow },
+    { "FrameBg",               ImGuiCol_FrameBg },
+    { "FrameBgHovered",        ImGuiCol_FrameBgHovered },
+    { "FrameBgActive",         ImGuiCol_FrameBgActive },
+    { "TitleBg",               ImGuiCol_TitleBg },
+    { "TitleBgActive",         ImGuiCol_TitleBgActive },
+    { "TitleBgCollapsed",      ImGuiCol_TitleBgCollapsed },
+    { "MenuBarBg",             ImGuiCol_MenuBarBg },
+    { "ScrollbarBg",           ImGuiCol_ScrollbarBg },
+    { "ScrollbarGrab",         ImGuiCol_ScrollbarGrab },
+    { "ScrollbarGrabHovered",  ImGuiCol_ScrollbarGrabHovered },
+    { "ScrollbarGrabActive",   ImGuiCol_ScrollbarGrabActive },
+    { "CheckMark",             ImGuiCol_CheckMark },
+    { "CheckboxSelectedBg",    ImGuiCol_CheckboxSelectedBg },
+    { "SliderGrab",            ImGuiCol_SliderGrab },
+    { "SliderGrabActive",      ImGuiCol_SliderGrabActive },
+    { "Button",                ImGuiCol_Button },
+    { "ButtonHovered",         ImGuiCol_ButtonHovered },
+    { "ButtonActive",          ImGuiCol_ButtonActive },
+    { "Header",                ImGuiCol_Header },
+    { "HeaderHovered",         ImGuiCol_HeaderHovered },
+    { "HeaderActive",          ImGuiCol_HeaderActive },
+    { "Separator",             ImGuiCol_Separator },
+    { "SeparatorHovered",      ImGuiCol_SeparatorHovered },
+    { "SeparatorActive",       ImGuiCol_SeparatorActive },
+    { "ResizeGrip",            ImGuiCol_ResizeGrip },
+    { "ResizeGripHovered",     ImGuiCol_ResizeGripHovered },
+    { "ResizeGripActive",      ImGuiCol_ResizeGripActive },
+    { "InputTextCursor",       ImGuiCol_InputTextCursor },
+    { "TabHovered",            ImGuiCol_TabHovered },
+    { "Tab",                   ImGuiCol_Tab },
+    { "TabSelected",           ImGuiCol_TabSelected },
+    { "TabSelectedOverline",   ImGuiCol_TabSelectedOverline },
+    { "TabDimmed",             ImGuiCol_TabDimmed },
+    { "TabDimmedSelected",     ImGuiCol_TabDimmedSelected },
+    { "TabDimmedSelectedOverline", ImGuiCol_TabDimmedSelectedOverline },
+    { "PlotLines",             ImGuiCol_PlotLines },
+    { "PlotLinesHovered",      ImGuiCol_PlotLinesHovered },
+    { "PlotHistogram",         ImGuiCol_PlotHistogram },
+    { "PlotHistogramHovered",  ImGuiCol_PlotHistogramHovered },
+    { "TableHeaderBg",         ImGuiCol_TableHeaderBg },
+    { "TableBorderStrong",     ImGuiCol_TableBorderStrong },
+    { "TableBorderLight",      ImGuiCol_TableBorderLight },
+    { "TableRowBg",            ImGuiCol_TableRowBg },
+    { "TableRowBgAlt",         ImGuiCol_TableRowBgAlt },
+    { "TextLink",              ImGuiCol_TextLink },
+    { "TextSelectedBg",        ImGuiCol_TextSelectedBg },
+    { "TreeLines",             ImGuiCol_TreeLines },
+    { "DragDropTarget",        ImGuiCol_DragDropTarget },
+    { "DragDropTargetBg",      ImGuiCol_DragDropTargetBg },
+    { "UnsavedMarker",         ImGuiCol_UnsavedMarker },
+    { "NavCursor",             ImGuiCol_NavCursor },
+    { "NavWindowingHighlight", ImGuiCol_NavWindowingHighlight },
+    { "NavWindowingDimBg",     ImGuiCol_NavWindowingDimBg },
+    { "ModalWindowDimBg",      ImGuiCol_ModalWindowDimBg },
+};
+const size_t kColSlotsCount = sizeof(kColSlots) / sizeof(kColSlots[0]);
+
+bool lookupColSlot(const char* key, ImGuiCol* out) {
+    if (!key) return false;
+    for (size_t i = 0; i < kColSlotsCount; i++) {
+        if (std::strcmp(kColSlots[i].name, key) == 0) {
+            *out = kColSlots[i].slot;
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- style var name table -------------------------------------------
+// kind: 1 = float scalar, 2 = ImVec2 pair.
+struct VarSlot { const char* name; ImGuiStyleVar var; int kind; };
+const VarSlot kVarSlots[] = {
+    { "Alpha",                  ImGuiStyleVar_Alpha,                  1 },
+    { "DisabledAlpha",          ImGuiStyleVar_DisabledAlpha,          1 },
+    { "WindowPadding",          ImGuiStyleVar_WindowPadding,          2 },
+    { "WindowRounding",         ImGuiStyleVar_WindowRounding,         1 },
+    { "WindowBorderSize",       ImGuiStyleVar_WindowBorderSize,       1 },
+    { "WindowMinSize",          ImGuiStyleVar_WindowMinSize,          2 },
+    { "WindowTitleAlign",       ImGuiStyleVar_WindowTitleAlign,       2 },
+    { "ChildRounding",          ImGuiStyleVar_ChildRounding,          1 },
+    { "ChildBorderSize",        ImGuiStyleVar_ChildBorderSize,        1 },
+    { "PopupRounding",          ImGuiStyleVar_PopupRounding,          1 },
+    { "PopupBorderSize",        ImGuiStyleVar_PopupBorderSize,        1 },
+    { "FramePadding",           ImGuiStyleVar_FramePadding,           2 },
+    { "FrameRounding",          ImGuiStyleVar_FrameRounding,          1 },
+    { "FrameBorderSize",        ImGuiStyleVar_FrameBorderSize,        1 },
+    { "ItemSpacing",            ImGuiStyleVar_ItemSpacing,            2 },
+    { "ItemInnerSpacing",       ImGuiStyleVar_ItemInnerSpacing,       2 },
+    { "IndentSpacing",          ImGuiStyleVar_IndentSpacing,          1 },
+    { "CellPadding",            ImGuiStyleVar_CellPadding,            2 },
+    { "ScrollbarSize",          ImGuiStyleVar_ScrollbarSize,          1 },
+    { "ScrollbarRounding",      ImGuiStyleVar_ScrollbarRounding,      1 },
+    { "ScrollbarPadding",       ImGuiStyleVar_ScrollbarPadding,       1 },
+    { "GrabMinSize",            ImGuiStyleVar_GrabMinSize,            1 },
+    { "GrabRounding",           ImGuiStyleVar_GrabRounding,           1 },
+    { "ImageRounding",          ImGuiStyleVar_ImageRounding,          1 },
+    { "ImageBorderSize",        ImGuiStyleVar_ImageBorderSize,        1 },
+    { "TabRounding",            ImGuiStyleVar_TabRounding,            1 },
+    { "TabBorderSize",          ImGuiStyleVar_TabBorderSize,          1 },
+    { "TabMinWidthBase",        ImGuiStyleVar_TabMinWidthBase,        1 },
+    { "TabMinWidthShrink",      ImGuiStyleVar_TabMinWidthShrink,      1 },
+    { "TabBarBorderSize",       ImGuiStyleVar_TabBarBorderSize,       1 },
+    { "TabBarOverlineSize",     ImGuiStyleVar_TabBarOverlineSize,     1 },
+    { "TableAngledHeadersAngle",ImGuiStyleVar_TableAngledHeadersAngle, 1 },
+    { "TableAngledHeadersTextAlign", ImGuiStyleVar_TableAngledHeadersTextAlign, 2 },
+    { "TreeLinesSize",          ImGuiStyleVar_TreeLinesSize,          1 },
+    { "TreeLinesRounding",      ImGuiStyleVar_TreeLinesRounding,      1 },
+    { "DragDropTargetRounding", ImGuiStyleVar_DragDropTargetRounding, 1 },
+    { "ButtonTextAlign",        ImGuiStyleVar_ButtonTextAlign,        2 },
+    { "SelectableTextAlign",    ImGuiStyleVar_SelectableTextAlign,    2 },
+    { "SeparatorSize",          ImGuiStyleVar_SeparatorSize,          1 },
+    { "SeparatorTextBorderSize",ImGuiStyleVar_SeparatorTextBorderSize,1 },
+    { "SeparatorTextAlign",     ImGuiStyleVar_SeparatorTextAlign,     2 },
+    { "SeparatorTextPadding",   ImGuiStyleVar_SeparatorTextPadding,   2 },
+};
+const size_t kVarSlotsCount = sizeof(kVarSlots) / sizeof(kVarSlots[0]);
+
+bool lookupVarSlot(const char* key, ImGuiStyleVar* out, int* outKind) {
+    if (!key) return false;
+    for (size_t i = 0; i < kVarSlotsCount; i++) {
+        if (std::strcmp(kVarSlots[i].name, key) == 0) {
+            *out     = kVarSlots[i].var;
+            *outKind = kVarSlots[i].kind;
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- withStyleColor(map, body) --------------------------------------
+//
+// `map` maps slot-name string -> color list ([r,g,b] / [r,g,b,a]).
+// We collect first, then push all, run body, pop in reverse.
+
+struct StyleColorCollect {
+    ZymVM* vm;
+    bool   ok;
+    std::vector<std::pair<ImGuiCol, ImVec4>> entries;
+};
+
+bool styleColorIter(ZymVM* vm, const char* key, ZymValue val, void* ud) {
+    auto* c = static_cast<StyleColorCollect*>(ud);
+    ImGuiCol slot;
+    if (!lookupColSlot(key, &slot)) {
+        zym_runtimeError(vm, "ui.withStyleColor: unknown color slot '%s'", key);
+        c->ok = false;
+        return false;
+    }
+    float rgba[4] = { 0, 0, 0, 1.0f };
+    if (refReadColor(vm, val, "ui.withStyleColor", rgba) == 0) {
+        c->ok = false;
+        return false;
+    }
+    c->entries.emplace_back(slot, ImVec4(rgba[0], rgba[1], rgba[2], rgba[3]));
+    return true;
+}
+
+ZymValue u_withStyleColor(ZymVM* vm, ZymValue, ZymValue mapV, ZymValue bodyV) {
+    if (!zym_isMap(mapV)) {
+        zym_runtimeError(vm, "ui.withStyleColor(map, body): map must be a map");
+        return ZYM_ERROR;
+    }
+    if (!reqCallable(vm, bodyV, "ui.withStyleColor(map, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.withStyleColor")) return ZYM_ERROR;
+
+    StyleColorCollect c{ vm, true, {} };
+    zym_mapForEach(vm, mapV, styleColorIter, &c);
+    if (!c.ok) return ZYM_ERROR;
+
+    for (auto& e : c.entries) ImGui::PushStyleColor(e.first, e.second);
+    zym_pushRoot(vm, bodyV);
+    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+    zym_popRoot(vm);
+    if (!c.entries.empty()) ImGui::PopStyleColor((int)c.entries.size());
+    if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    return zym_newNull();
+}
+
+// --- withStyleVar(map, body) ----------------------------------------
+//
+// `map` maps var-name string -> number (scalar var) or [x, y] list
+// (ImVec2 var). Mixing is fine — the table tells us which is which.
+
+struct StyleVarCollect {
+    ZymVM* vm;
+    bool   ok;
+    // Tracks push count for the matching pop after body.
+    int    pushCount;
+};
+
+bool styleVarIter(ZymVM* vm, const char* key, ZymValue val, void* ud) {
+    auto* c = static_cast<StyleVarCollect*>(ud);
+    ImGuiStyleVar var; int kind;
+    if (!lookupVarSlot(key, &var, &kind)) {
+        zym_runtimeError(vm, "ui.withStyleVar: unknown style var '%s'", key);
+        c->ok = false;
+        return false;
+    }
+    if (kind == 1) {
+        double d;
+        if (!reqNum(vm, val, "ui.withStyleVar (scalar)", &d)) {
+            c->ok = false;
+            return false;
+        }
+        ImGui::PushStyleVar(var, (float)d);
+        c->pushCount++;
+    } else {
+        if (!zym_isList(val) || zym_listLength(val) < 2) {
+            zym_runtimeError(vm,
+                "ui.withStyleVar: '%s' expects [x, y] list", key);
+            c->ok = false;
+            return false;
+        }
+        ZymValue xV = zym_listGet(vm, val, 0);
+        ZymValue yV = zym_listGet(vm, val, 1);
+        if (!zym_isNumber(xV) || !zym_isNumber(yV)) {
+            zym_runtimeError(vm,
+                "ui.withStyleVar: '%s' [x, y] elements must be numbers", key);
+            c->ok = false;
+            return false;
+        }
+        ImGui::PushStyleVar(var, ImVec2((float)zym_asNumber(xV),
+                                        (float)zym_asNumber(yV)));
+        c->pushCount++;
+    }
+    return true;
+}
+
+ZymValue u_withStyleVar(ZymVM* vm, ZymValue, ZymValue mapV, ZymValue bodyV) {
+    if (!zym_isMap(mapV)) {
+        zym_runtimeError(vm, "ui.withStyleVar(map, body): map must be a map");
+        return ZYM_ERROR;
+    }
+    if (!reqCallable(vm, bodyV, "ui.withStyleVar(map, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.withStyleVar")) return ZYM_ERROR;
+
+    StyleVarCollect c{ vm, true, 0 };
+    zym_mapForEach(vm, mapV, styleVarIter, &c);
+    if (!c.ok) {
+        // Pop anything we managed to push before failing so the stack
+        // stays balanced.
+        if (c.pushCount > 0) ImGui::PopStyleVar(c.pushCount);
+        return ZYM_ERROR;
+    }
+
+    zym_pushRoot(vm, bodyV);
+    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+    zym_popRoot(vm);
+    if (c.pushCount > 0) ImGui::PopStyleVar(c.pushCount);
+    if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    return zym_newNull();
+}
+
+// --- Fonts ----------------------------------------------------------
+//
+// A Font value is a Zym map carrying a `__font__` native context. The
+// userdata is the `ImFont*` pointer; the font itself is owned by the
+// ImGui context's font atlas (created lazily on the first
+// `UI.frame(...)` for that window). No per-handle finalizer.
+
+ImFont* unwrapFont(ZymVM* vm, ZymValue v) {
+    if (!zym_isMap(v)) return nullptr;
+    if (!zym_mapHas(v, "__font__")) return nullptr;
+    ZymValue ctx = zym_mapGet(vm, v, "__font__");
+    return static_cast<ImFont*>(zym_getNativeData(ctx));
+}
+
+ZymValue makeFontInstance(ZymVM* vm, ImFont* font) {
+    ZymValue ctx = zym_createNativeContext(vm, font, nullptr);
+    zym_pushRoot(vm, ctx);
+    ZymValue obj = zym_newMap(vm);
+    zym_pushRoot(vm, obj);
+    zym_mapSet(vm, obj, "__font__", ctx);
+    zym_popRoot(vm);
+    zym_popRoot(vm);
+    return obj;
+}
+
+// `UI.loadFont(path, sizePx, opts?) -> Font | null`
+//
+// Loads a TTF/OTF font into the current ImGui context's atlas at the
+// requested size. Requires an active ImGui context — call from inside
+// `UI.frame(...)` so a window has lazily created one, or after any
+// other `UI.*` call has done so. On failure returns null and stamps
+// `UI.lastError()`. `opts` is currently ignored (reserved for future
+// glyph-range / merge options).
+ZymValue u_loadFont3(ZymVM* vm, ZymValue, ZymValue pathV, ZymValue sizeV,
+                    ZymValue /*optsV*/) {
+    std::string path;
+    if (!reqStr(vm, pathV, "ui.loadFont(path, sizePx)", &path)) return ZYM_ERROR;
+    double size;
+    if (!reqNum(vm, sizeV, "ui.loadFont(path, sizePx)", &size)) return ZYM_ERROR;
+    if (!ImGui::GetCurrentContext()) {
+        setError("ui.loadFont: no active ImGui context (call inside ui.frame)");
+        return zym_newNull();
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    if (!io.Fonts) {
+        setError("ui.loadFont: no font atlas on this context");
+        return zym_newNull();
+    }
+    ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), (float)size);
+    if (!font) {
+        setError("ui.loadFont: AddFontFromFileTTF failed");
+        return zym_newNull();
+    }
+    return makeFontInstance(vm, font);
+}
+
+ZymValue u_loadFont2(ZymVM* vm, ZymValue self, ZymValue pathV, ZymValue sizeV) {
+    return u_loadFont3(vm, self, pathV, sizeV, zym_newNull());
+}
+
+// `UI.defaultFont() -> Font` — wraps the ImGui context's first/default
+// font (ProggyClean unless something else was loaded earlier).
+ZymValue u_defaultFont(ZymVM* vm, ZymValue) {
+    if (!ImGui::GetCurrentContext()) {
+        zym_runtimeError(vm,
+            "ui.defaultFont: no active ImGui context (call inside ui.frame)");
+        return ZYM_ERROR;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    ImFont* font = (io.Fonts && !io.Fonts->Fonts.empty())
+        ? io.Fonts->Fonts[0] : ImGui::GetFont();
+    if (!font) {
+        zym_runtimeError(vm, "ui.defaultFont: no default font available");
+        return ZYM_ERROR;
+    }
+    return makeFontInstance(vm, font);
+}
+
+// `UI.withFont(font, body)` — scoped PushFont/PopFont. Uses the font's
+// LegacySize (the size passed to `UI.loadFont`) so scripts get the
+// size they asked for. To layer a different size on the same font,
+// pass `defaultFont()` and use the per-call ImGui sizing APIs in a
+// later slice.
+ZymValue u_withFont(ZymVM* vm, ZymValue, ZymValue fontV, ZymValue bodyV) {
+    ImFont* font = unwrapFont(vm, fontV);
+    if (!font) {
+        zym_runtimeError(vm, "ui.withFont(font, body): invalid font handle");
+        return ZYM_ERROR;
+    }
+    if (!reqCallable(vm, bodyV, "ui.withFont(font, body)")) return ZYM_ERROR;
+    if (!requireFrame(vm, "ui.withFont")) return ZYM_ERROR;
+
+    // PushFont(font, font->LegacySize) preserves the user-requested
+    // size for fonts loaded via `UI.loadFont`. For the default font,
+    // LegacySize matches its build size as well.
+    ImGui::PushFont(font, font->LegacySize);
+    zym_pushRoot(vm, bodyV);
+    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
+    zym_popRoot(vm);
+    ImGui::PopFont();
+    if (st != ZYM_STATUS_OK) return ZYM_ERROR;
+    return zym_newNull();
+}
+
+
 ZymValue u_lastError(ZymVM* vm, ZymValue /*self*/) {
     return zym_newStringN(vm, g_ui_lastError.c_str(),
                           (int)g_ui_lastError.size());
@@ -1923,14 +2322,17 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // ----- batch 3: scoped containers -----
 
-    // child(id, body) / child(id, w, h, border, body)
+    // child(id, body) / child(id, opts, body) / child(id, w, h, border, body)
     ZymValue child2v = zym_createNativeClosure(vm, "child(id, body)",                 (void*)u_child2, context);
     zym_pushRoot(vm, child2v);
+    ZymValue child3v = zym_createNativeClosure(vm, "child(id, opts, body)",           (void*)u_child3, context);
+    zym_pushRoot(vm, child3v);
     ZymValue child5v = zym_createNativeClosure(vm, "child(id, w, h, border, body)",   (void*)u_child5, context);
     zym_pushRoot(vm, child5v);
     ZymValue child   = zym_createDispatcher(vm);
     zym_pushRoot(vm, child);
     zym_addOverload(vm, child, child2v);
+    zym_addOverload(vm, child, child3v);
     zym_addOverload(vm, child, child5v);
 
     MOD(group,        "group(body)",                 u_group)
@@ -2113,6 +2515,23 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(getMousePos,  "getMousePos()",  u_getMousePos)
     MOD(framerate,    "framerate()",    u_framerate)
 
+    // ----- PR 2c: style stacks + fonts -----
+    MOD(withStyleColor, "withStyleColor(map, body)", u_withStyleColor)
+    MOD(withStyleVar,   "withStyleVar(map, body)",   u_withStyleVar)
+    MOD(withFont,       "withFont(font, body)",      u_withFont)
+
+    // loadFont: 2-arg (path, sizePx) or 3-arg (path, sizePx, opts)
+    ZymValue loadFont2v = zym_createNativeClosure(vm, "loadFont(path, sizePx)",       (void*)u_loadFont2, context);
+    zym_pushRoot(vm, loadFont2v);
+    ZymValue loadFont3v = zym_createNativeClosure(vm, "loadFont(path, sizePx, opts)", (void*)u_loadFont3, context);
+    zym_pushRoot(vm, loadFont3v);
+    ZymValue loadFont   = zym_createDispatcher(vm);
+    zym_pushRoot(vm, loadFont);
+    zym_addOverload(vm, loadFont, loadFont2v);
+    zym_addOverload(vm, loadFont, loadFont3v);
+
+    MOD(defaultFont,    "defaultFont()",             u_defaultFont)
+
 #undef MOD
 
     ZymValue obj = zym_newMap(vm);
@@ -2249,10 +2668,24 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "getMousePos",       getMousePos);
     zym_mapSet(vm, obj, "framerate",         framerate);
 
+    // PR 2c: style stacks + fonts
+    zym_mapSet(vm, obj, "withStyleColor",    withStyleColor);
+    zym_mapSet(vm, obj, "withStyleVar",      withStyleVar);
+    zym_mapSet(vm, obj, "withFont",          withFont);
+    zym_mapSet(vm, obj, "loadFont",          loadFont);
+    zym_mapSet(vm, obj, "defaultFont",       defaultFont);
+
     // Roots are popped in reverse-push order; everything we've pushed
     // is reachable from `obj`, which is itself rooted. Pop in groups
     // matching pushes (newest first).
     zym_popRoot(vm); // obj
+
+    // PR 2c (popped newest-first)
+    zym_popRoot(vm); // defaultFont
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // loadFont{,2v,3v}
+    zym_popRoot(vm); // withFont
+    zym_popRoot(vm); // withStyleVar
+    zym_popRoot(vm); // withStyleColor
 
     // batch 6 (popped newest-first)
     zym_popRoot(vm); // framerate
@@ -2305,7 +2738,7 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_popRoot(vm); // disabled
     zym_popRoot(vm); // treeNode
     zym_popRoot(vm); // group
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // child{,2v,5v}
+    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // child{,2v,3v,5v}
 
     // batch 2 (popped newest-first)
     zym_popRoot(vm); // combo

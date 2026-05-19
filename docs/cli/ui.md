@@ -124,6 +124,7 @@ full-pane root.
 | Method | Returns | Notes |
 | --- | --- | --- |
 | `UI.child(id, body)` | bool | Nested scrollable region. |
+| `UI.child(id, opts, body)` | bool | Same, with an options map. Recognised keys: `w` (number, default `0`), `h` (number, default `0`), `border` (bool, default `false`). Unknown keys are ignored. |
 | `UI.child(id, w, h, border, body)` | bool | Same, with explicit size and an optional border. |
 | `UI.group(body)` | null | Treats the body's widgets as a single layout item. |
 | `UI.disabled(cond, body)` | null | Greys out and disables interaction within `body` when `cond` is `true`. |
@@ -344,6 +345,157 @@ colors are packed 32-bit values — build them with `UI.color(r, g, b, a)`.
 | `UI.getCursorPos()` | map | `{ x, y }` of the current layout cursor position. |
 | `UI.getMousePos()` | map | `{ x, y }` of the mouse in window-local coordinates. |
 | `UI.framerate()` | number | ImGui's smoothed framerate estimate (`io.Framerate`). |
+
+---
+
+## Theming
+
+Theming in `UI` is a thin layer over ImGui's two style stacks
+(`PushStyleColor` / `PushStyleVar`) plus the font atlas. Everything is
+**scoped**: each helper takes a `body` callback, pushes the requested
+state before invoking it, and pops back on return — even if the body
+mutates state or raises. The same panel can be rendered three different
+ways simply by wrapping it in different scopes.
+
+### Style stacks
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `UI.withStyleColor(map, body)` | null | Push one or more color slots for the duration of `body`. Keys are slot names (see below); values are 3- or 4-element `[r, g, b]` / `[r, g, b, a]` lists of floats in `0.0 .. 1.0`. |
+| `UI.withStyleVar(map, body)` | null | Push one or more style variables for the duration of `body`. Keys are var names (see below); scalar vars take a number, `ImVec2` vars take a `[x, y]` list. |
+| `UI.withFont(font, body)` | null | Push a font handle for the duration of `body`. `font` must come from `UI.loadFont` or `UI.defaultFont`. |
+
+Unknown slot/var names raise a runtime error, so typos surface at the
+first frame. Nest the scopes freely — colors and vars compose, and the
+unwind order is balanced regardless of how the body returns.
+
+```zym
+var accent = {
+    Button:        [0.20, 0.55, 0.85, 1.0],
+    ButtonHovered: [0.30, 0.70, 0.95, 1.0],
+    ButtonActive:  [0.10, 0.40, 0.75, 1.0],
+    CheckMark:     [0.95, 0.80, 0.20, 1.0],
+}
+var spacing = {
+    FrameRounding: 6.0,
+    FramePadding:  [8, 6],
+    ItemSpacing:   [10, 8],
+}
+
+UI.withStyleColor(accent, func() {
+    UI.withStyleVar(spacing, func() {
+        UI.button("Save")
+        UI.sameLine()
+        UI.button("Cancel")
+    })
+})
+```
+
+### Color slot names (`UI.withStyleColor` keys)
+
+These are the `ImGuiCol_*` enumerators with the `ImGuiCol_` prefix
+dropped:
+
+`Text`, `TextDisabled`, `WindowBg`, `ChildBg`, `PopupBg`, `Border`,
+`BorderShadow`, `FrameBg`, `FrameBgHovered`, `FrameBgActive`, `TitleBg`,
+`TitleBgActive`, `TitleBgCollapsed`, `MenuBarBg`, `ScrollbarBg`,
+`ScrollbarGrab`, `ScrollbarGrabHovered`, `ScrollbarGrabActive`,
+`CheckMark`, `CheckboxSelectedBg`, `SliderGrab`, `SliderGrabActive`,
+`Button`, `ButtonHovered`, `ButtonActive`, `Header`, `HeaderHovered`,
+`HeaderActive`, `Separator`, `SeparatorHovered`, `SeparatorActive`,
+`ResizeGrip`, `ResizeGripHovered`, `ResizeGripActive`, `InputTextCursor`,
+`TabHovered`, `Tab`, `TabSelected`, `TabSelectedOverline`, `TabDimmed`,
+`TabDimmedSelected`, `TabDimmedSelectedOverline`, `PlotLines`,
+`PlotLinesHovered`, `PlotHistogram`, `PlotHistogramHovered`,
+`TableHeaderBg`, `TableBorderStrong`, `TableBorderLight`, `TableRowBg`,
+`TableRowBgAlt`, `TextLink`, `TextSelectedBg`, `TreeLines`,
+`DragDropTarget`, `DragDropTargetBg`, `UnsavedMarker`, `NavCursor`,
+`NavWindowingHighlight`, `NavWindowingDimBg`, `ModalWindowDimBg`.
+
+### Style var names (`UI.withStyleVar` keys)
+
+These are the `ImGuiStyleVar_*` enumerators with the `ImGuiStyleVar_`
+prefix dropped. The **Kind** column indicates the expected value shape:
+`scalar` = a single number, `vec2` = a `[x, y]` list of numbers.
+
+| Name | Kind |
+| --- | --- |
+| `Alpha` | scalar |
+| `DisabledAlpha` | scalar |
+| `WindowPadding` | vec2 |
+| `WindowRounding` | scalar |
+| `WindowBorderSize` | scalar |
+| `WindowMinSize` | vec2 |
+| `WindowTitleAlign` | vec2 |
+| `ChildRounding` | scalar |
+| `ChildBorderSize` | scalar |
+| `PopupRounding` | scalar |
+| `PopupBorderSize` | scalar |
+| `FramePadding` | vec2 |
+| `FrameRounding` | scalar |
+| `FrameBorderSize` | scalar |
+| `ItemSpacing` | vec2 |
+| `ItemInnerSpacing` | vec2 |
+| `IndentSpacing` | scalar |
+| `CellPadding` | vec2 |
+| `ScrollbarSize` | scalar |
+| `ScrollbarRounding` | scalar |
+| `ScrollbarPadding` | scalar |
+| `GrabMinSize` | scalar |
+| `GrabRounding` | scalar |
+| `ImageRounding` | scalar |
+| `ImageBorderSize` | scalar |
+| `TabRounding` | scalar |
+| `TabBorderSize` | scalar |
+| `TabMinWidthBase` | scalar |
+| `TabMinWidthShrink` | scalar |
+| `TabBarBorderSize` | scalar |
+| `TabBarOverlineSize` | scalar |
+| `TableAngledHeadersAngle` | scalar |
+| `TableAngledHeadersTextAlign` | vec2 |
+| `TreeLinesSize` | scalar |
+| `TreeLinesRounding` | scalar |
+| `DragDropTargetRounding` | scalar |
+| `ButtonTextAlign` | vec2 |
+| `SelectableTextAlign` | vec2 |
+| `SeparatorSize` | scalar |
+| `SeparatorTextBorderSize` | scalar |
+| `SeparatorTextAlign` | vec2 |
+| `SeparatorTextPadding` | vec2 |
+
+### Fonts
+
+A **Font** is an opaque handle wrapping an `ImFont*` owned by the
+current ImGui context's font atlas. The atlas lives as long as the
+context, so font handles do not need to be freed and remain valid for
+the lifetime of the window that owns the context.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `UI.loadFont(path, sizePx)` | Font \| null | Load a TTF/OTF at the given pixel size into the active context's atlas. Returns `null` and stamps `UI.lastError()` on failure (missing file, bad font, no active context). |
+| `UI.loadFont(path, sizePx, opts)` | Font \| null | Same, with an options map. `opts` is currently reserved for future glyph-range / merge options and is ignored. |
+| `UI.defaultFont()` | Font | Handle to the context's default font (ProggyClean unless something else was loaded earlier). |
+| `UI.withFont(font, body)` | null | Push `font` for the duration of `body`. Uses the size the font was loaded at. |
+
+Both `UI.loadFont` and `UI.defaultFont` must be called inside a
+`UI.frame(...)` body — they need the lazily-created per-window ImGui
+context. Calling `UI.loadFont` outside a frame returns `null`;
+`UI.defaultFont` raises a runtime error.
+
+```zym
+var bigFont = null
+
+UI.frame(win, func() {
+    if (bigFont == null) {
+        bigFont = UI.loadFont("assets/Inter.ttf", 24)
+        if (bigFont == null) { bigFont = UI.defaultFont() }
+    }
+    UI.withFont(bigFont, func() {
+        UI.text("Headline")
+    })
+    UI.text("Body text in the surrounding font.")
+})
+```
 
 ---
 

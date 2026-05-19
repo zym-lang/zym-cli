@@ -35,8 +35,8 @@ elseif(PGO_MODE STREQUAL "USE")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use -fprofile-correction")
 endif()
 
-set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION ON)
+set(CMAKE_BUILD_TYPE Debug)
+set(USE_COMPRESSION OFF)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
 set(RUNTIME_ONLY OFF)

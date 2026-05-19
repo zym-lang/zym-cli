@@ -1,0 +1,516 @@
+// ZYM UI dashboard — a modern, themed single-page app driven entirely
+// by the Slice 1 primitives + the PR 2c theming surface.
+//
+// What this is:
+//   * a borderless, full-window dashboard split into a left sidebar
+//     (nav via `UI.selectable`) and a right content pane that swaps
+//     between four "pages" — Overview, Analytics, Transactions,
+//     Settings — without any modal/tab widgets (none are exposed).
+//   * a dark accent theme built by hand with `UI.withStyleColor` /
+//     `UI.withStyleVar`, applied once at the top of every frame so the
+//     whole UI inherits it. The accent color is itself editable on the
+//     Settings page (`UI.colorEdit`) and re-feeds the theme map next
+//     frame — live theming round-tripped through the script.
+//   * live mock metrics: KPI tiles (custom-drawn rounded cards via
+//     `drawRectFilled`), animated sparklines (`plotLines`), traffic
+//     histogram (`plotHistogram`), progress bars, and a virtual-ish
+//     transactions table (`UI.table`) with filterable rows.
+//   * interactivity everywhere: time-range combo, refresh button,
+//     row selection (`selectable`), per-row action context menu
+//     (`popup` + `openPopup`), settings sliders that retune the theme
+//     in place (`FrameRounding`, `WindowRounding`, density preset).
+//
+// Manual run only — needs a display, so not wired into runAll.sh.
+//
+// Usage:
+//   zym run examples/gui/dashboard.zym
+
+var win = SDL.createWindow("zym dashboard", 1180, 720, { resizable: true })
+if (win == null) {
+    print("createWindow failed: %v", SDL.lastError())
+    return
+}
+
+// ---------------------------------------------------------------------------
+// Theme — a single source of truth. `accent[0]` is the live accent color
+// (editable on the Settings page); the `theme()` helper rebuilds the
+// color map each frame so edits flow through immediately.
+// ---------------------------------------------------------------------------
+
+var accent = [[0.36, 0.65, 1.00, 1.0]]   // ref-list so colorEdit can mutate
+
+// Density preset: 0 = compact, 1 = cozy, 2 = comfortable.
+var density   = [1]
+var rounding  = [6.0]
+
+// Mix `a*(1-t) + b*t` for two `[r,g,b,a]` lists — used to derive
+// hover/active shades from the single accent color.
+var mix = func(a, b, t) {
+    return [
+        a[0] * (1.0 - t) + b[0] * t,
+        a[1] * (1.0 - t) + b[1] * t,
+        a[2] * (1.0 - t) + b[2] * t,
+        a[3] * (1.0 - t) + b[3] * t,
+    ]
+}
+
+var black = [0.0, 0.0, 0.0, 1.0]
+var white = [1.0, 1.0, 1.0, 1.0]
+
+var themeColors = func() {
+    var ac = accent[0]
+    var acHover  = mix(ac, white, 0.15)
+    var acActive = mix(ac, black, 0.15)
+    return {
+        WindowBg:             [0.09, 0.10, 0.13, 1.0],
+        ChildBg:              [0.12, 0.13, 0.17, 1.0],
+        PopupBg:              [0.14, 0.15, 0.20, 1.0],
+        Border:               [0.20, 0.22, 0.28, 1.0],
+        BorderShadow:         [0.00, 0.00, 0.00, 0.0],
+        Text:                 [0.90, 0.92, 0.96, 1.0],
+        TextDisabled:         [0.45, 0.48, 0.55, 1.0],
+        TextSelectedBg:       mix(ac, [0.0,0.0,0.0,1.0], 0.4),
+        FrameBg:              [0.16, 0.18, 0.23, 1.0],
+        FrameBgHovered:       [0.20, 0.23, 0.30, 1.0],
+        FrameBgActive:        [0.24, 0.28, 0.36, 1.0],
+        TitleBg:              [0.10, 0.11, 0.15, 1.0],
+        TitleBgActive:        [0.13, 0.14, 0.19, 1.0],
+        TitleBgCollapsed:     [0.08, 0.09, 0.12, 1.0],
+        MenuBarBg:            [0.10, 0.11, 0.15, 1.0],
+        ScrollbarBg:          [0.09, 0.10, 0.13, 0.0],
+        ScrollbarGrab:        [0.22, 0.25, 0.32, 1.0],
+        ScrollbarGrabHovered: [0.30, 0.34, 0.43, 1.0],
+        ScrollbarGrabActive:  ac,
+        CheckMark:            ac,
+        SliderGrab:           ac,
+        SliderGrabActive:     acActive,
+        Button:               [0.18, 0.20, 0.26, 1.0],
+        ButtonHovered:        mix([0.18,0.20,0.26,1.0], ac, 0.45),
+        ButtonActive:         ac,
+        Header:               mix(ac, [0.0,0.0,0.0,1.0], 0.55),
+        HeaderHovered:        mix(ac, [0.0,0.0,0.0,1.0], 0.35),
+        HeaderActive:         ac,
+        Separator:            [0.20, 0.22, 0.28, 1.0],
+        SeparatorHovered:     acHover,
+        SeparatorActive:      ac,
+        ResizeGrip:           [0.20, 0.22, 0.28, 1.0],
+        ResizeGripHovered:    acHover,
+        ResizeGripActive:     ac,
+        PlotLines:            ac,
+        PlotLinesHovered:     acHover,
+        PlotHistogram:        ac,
+        PlotHistogramHovered: acHover,
+        TableHeaderBg:        [0.14, 0.15, 0.20, 1.0],
+        TableBorderStrong:    [0.20, 0.22, 0.28, 1.0],
+        TableBorderLight:     [0.16, 0.17, 0.22, 1.0],
+        TableRowBg:           [0.00, 0.00, 0.00, 0.0],
+        TableRowBgAlt:        [1.00, 1.00, 1.00, 0.03],
+        NavCursor:            ac,
+    }
+}
+
+var themeVars = func() {
+    // Density preset feeds padding/spacing.
+    var pad = [6.0, 4.0]   // compact
+    var isp = [6.0, 4.0]
+    if (density[0] == 1) { pad = [10.0, 6.0]; isp = [10.0, 6.0] }   // cozy
+    if (density[0] == 2) { pad = [14.0, 10.0]; isp = [14.0, 10.0] } // comfy
+    return {
+        WindowRounding:     rounding[0],
+        ChildRounding:      rounding[0],
+        FrameRounding:      rounding[0],
+        PopupRounding:      rounding[0],
+        ScrollbarRounding:  rounding[0],
+        GrabRounding:       rounding[0],
+        TabRounding:        rounding[0],
+        WindowPadding:      [16.0, 14.0],
+        FramePadding:       pad,
+        ItemSpacing:        isp,
+        ItemInnerSpacing:   [6.0, 6.0],
+        ScrollbarSize:      12.0,
+        WindowBorderSize:   0.0,
+        FrameBorderSize:    0.0,
+        ChildBorderSize:    1.0,
+        SeparatorTextAlign: [0.0, 0.5],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mock data — small ring buffers for sparklines, a static-ish set of
+// transactions, and a few KPI scalars. `tick` advances every frame so
+// the plots animate.
+// ---------------------------------------------------------------------------
+
+var tick = 0
+
+// Ring of N samples. We update by shifting in-place (cheap enough for
+// the sample sizes here).
+var pushSample = func(buf, v) {
+    var i = 0
+    var n = length(buf) - 1
+    while (i < n) { buf[i] = buf[i + 1]; i = i + 1 }
+    buf[n] = v
+}
+
+var revenue   = [120,125,118,130,142,138,151,160,158,165,172,170,178,185,182,190,198,205,210,215,220,228,234,240]
+var users     = [40,42,45,44,48,52,55,58,60,62,65,68,70,72,75,78,80,82,85,88,90,92,95,98]
+var requests  = [8,12,9,15,11,18,14,22,17,25,19,28,21,31,24,33,27,36,30,38,32,40,34,42]
+var errors    = [0,1,0,0,2,0,1,0,0,1,0,2,0,0,1,0,0,2,0,1,0,0,1,0]
+var traffic   = [22,28,35,40,48,55,62,70,78,82,76,68,60,52,45,38,30,25,20,18,16,14,12,10]
+
+var txns = [
+    { id: "TX-10432", who: "Alice Chen",   amt:  124.50, status: "paid",     time: "09:14" },
+    { id: "TX-10433", who: "Marcus Diaz",  amt:   58.20, status: "pending",  time: "09:22" },
+    { id: "TX-10434", who: "Priya Shah",   amt:  812.00, status: "paid",     time: "09:41" },
+    { id: "TX-10435", who: "Yuki Tanaka",  amt:   16.99, status: "refunded", time: "10:02" },
+    { id: "TX-10436", who: "Omar Haddad",  amt: 1450.00, status: "paid",     time: "10:18" },
+    { id: "TX-10437", who: "Lena Becker",  amt:   42.00, status: "failed",   time: "10:25" },
+    { id: "TX-10438", who: "Sam Patel",    amt:  299.99, status: "paid",     time: "10:51" },
+    { id: "TX-10439", who: "Nora Lindqvist",amt:  76.40, status: "pending",  time: "11:07" },
+    { id: "TX-10440", who: "Ravi Kapoor",  amt:  204.10, status: "paid",     time: "11:33" },
+    { id: "TX-10441", who: "Mei Wong",     amt:   18.75, status: "refunded", time: "11:48" },
+    { id: "TX-10442", who: "Jonas Hart",   amt:  650.00, status: "paid",     time: "12:02" },
+    { id: "TX-10443", who: "Iris Moreau",  amt:   95.30, status: "pending",  time: "12:24" },
+]
+
+// ---------------------------------------------------------------------------
+// UI state
+// ---------------------------------------------------------------------------
+
+var pages         = ["Overview", "Analytics", "Transactions", "Settings"]
+var pageIdx       = 0
+var rangeIdx      = [1]                       // 24h
+var ranges        = ["1h", "24h", "7d", "30d"]
+var search        = Buffer.new(64)
+var statusFilter  = [0]
+var statuses      = ["all", "paid", "pending", "refunded", "failed"]
+var selectedRow   = -1
+var contextRow    = -1
+var notes         = Buffer.new(512)
+var notifications = [[true], [true], [false]]   // checkbox refs
+var autoRefresh   = [true]
+
+// ---------------------------------------------------------------------------
+// Small helpers — KPI tile, section header, status pill (drawn).
+// ---------------------------------------------------------------------------
+
+var kpiTile = func(label, value, delta, spark) {
+    UI.child("kpi-" + label, { w: 240, h: 110, border: false }, func() {
+        // Subtle inner card via drawRectFilled in window coords.
+        var p = UI.getCursorPos()
+        UI.textDisabled(label)
+        UI.dummy(0, 2)
+        UI.withStyleVar({ ItemSpacing: [4, 2] }, func() {
+            UI.text(value)
+            UI.sameLine()
+            var col = accent[0]
+            if (charAt(delta, 0) == "-") { col = [0.95, 0.45, 0.40, 1.0] }
+            UI.textColored(col, delta)
+        })
+        UI.plotLines("##spark-" + label, spark, "", 0, 0)
+    })
+}
+
+var sectionHeader = func(title, sub) {
+    UI.withStyleVar({ ItemSpacing: [10, 2] }, func() {
+        UI.text(title)
+        if (sub != "") { UI.textDisabled("  " + sub) }
+    })
+    UI.separator()
+    UI.dummy(0, 4)
+}
+
+// ---------------------------------------------------------------------------
+// Pages
+// ---------------------------------------------------------------------------
+
+var pageOverview = func() {
+    sectionHeader("Overview", "live snapshot of the last " + ranges[rangeIdx[0]])
+
+    // KPI row — four tiles laid out horizontally.
+    kpiTile("Revenue",  "$" + str(revenue[length(revenue) - 1]) + "k", "+8.4%", revenue)
+    UI.sameLine()
+    kpiTile("Users",    str(users[length(users) - 1]),                  "+2.1%", users)
+    UI.sameLine()
+    kpiTile("Requests", str(requests[length(requests) - 1]) + "/s",     "+12.0%", requests)
+    UI.sameLine()
+    kpiTile("Errors",   str(errors[length(errors) - 1]),                "-0.3%",  errors)
+
+    UI.dummy(0, 6)
+
+    // Two-up: traffic histogram + system health.
+    UI.child("traffic", { w: 640, h: 240, border: true }, func() {
+        sectionHeader("Traffic", "requests per minute")
+        UI.plotHistogram("##traffic", traffic, "rpm", 0, 100)
+    })
+    UI.sameLine()
+    UI.child("health", { w: 0, h: 240, border: true }, func() {
+        sectionHeader("System health", "")
+        UI.text("CPU")
+        UI.progressBar(0.42, -1, 0, "42%")
+        UI.dummy(0, 4)
+        UI.text("Memory")
+        UI.progressBar(0.71, -1, 0, "71%")
+        UI.dummy(0, 4)
+        UI.text("Disk")
+        UI.progressBar(0.28, -1, 0, "28%")
+        UI.dummy(0, 4)
+        UI.text("Network")
+        UI.progressBar(0.55, -1, 0, "55%")
+        UI.dummy(0, 8)
+        UI.separator()
+        UI.textDisabled("auto-refresh")
+        UI.sameLine()
+        UI.checkbox("##autoref", autoRefresh)
+    })
+}
+
+var pageAnalytics = func() {
+    sectionHeader("Analytics", "drill into the live signals")
+
+    // Big sparkline.
+    UI.child("rev", { w: 0, h: 200, border: true }, func() {
+        sectionHeader("Revenue trend", "rolling window")
+        UI.plotLines("##rev", revenue, "$k", 0, 260)
+    })
+
+    UI.dummy(0, 6)
+
+    UI.child("usr", { w: 440, h: 200, border: true }, func() {
+        sectionHeader("Active users", "")
+        UI.plotLines("##usr", users, "", 0, 120)
+    })
+    UI.sameLine()
+    UI.child("req", { w: 0, h: 200, border: true }, func() {
+        sectionHeader("Request volume", "")
+        UI.plotHistogram("##req", requests, "/s", 0, 50)
+    })
+}
+
+var matchesFilter = func(row) {
+    var s = statuses[statusFilter[0]]
+    if (s != "all" and row.status != s) { return false }
+    var q = toLowerCase(search.toUtf8())
+    if (q == "") { return true }
+    var hay = toLowerCase(row.id + " " + row.who + " " + row.status)
+    return contains(hay, q)
+}
+
+var pageTransactions = func() {
+    sectionHeader("Transactions", "recent activity")
+
+    // Filter bar.
+    UI.text("search")
+    UI.sameLine()
+    UI.inputText("##search", search)
+    UI.sameLine()
+    UI.text("status")
+    UI.sameLine()
+    UI.combo("##status", statusFilter, statuses)
+    UI.sameLine()
+    if (UI.button("Clear")) {
+        search = Buffer.new(64)
+        statusFilter[0] = 0
+    }
+    UI.sameLine()
+    if (UI.button("Export")) { print("[dashboard] exported %v rows", length(txns)) }
+
+    UI.dummy(0, 4)
+
+    UI.table("txns", 5, func() {
+        UI.tableSetupColumn("ID")
+        UI.tableSetupColumn("Customer")
+        UI.tableSetupColumn("Amount")
+        UI.tableSetupColumn("Status")
+        UI.tableSetupColumn("Time")
+        UI.tableHeadersRow()
+
+        var i = 0
+        while (i < length(txns)) {
+            var row = txns[i]
+            if (matchesFilter(row)) {
+                UI.tableNextRow()
+                UI.tableNextColumn()
+                UI.id(i, func() {
+                    if (UI.selectable(row.id, selectedRow == i)) {
+                        selectedRow = i
+                    }
+                    // Right-click on the selectable → open the per-row popup.
+                    if (UI.isItemHovered() and UI.isItemClicked()) {
+                        contextRow = i
+                        UI.openPopup("rowmenu")
+                    }
+                    UI.popup("rowmenu", func() {
+                        UI.text(row.id + " — " + row.who)
+                        UI.separator()
+                        if (UI.menuItem("View details"))  { print("view %v", row.id) }
+                        if (UI.menuItem("Refund"))        { print("refund %v", row.id) }
+                        if (UI.menuItem("Mark as paid"))  { print("paid %v", row.id) }
+                        UI.separator()
+                        if (UI.menuItem("Copy ID"))       { print("copy %v", row.id) }
+                    })
+                })
+                UI.tableNextColumn()
+                UI.text(row.who)
+                UI.tableNextColumn()
+                UI.text("$" + str(row.amt))
+                UI.tableNextColumn()
+                var c = [0.70, 0.78, 0.90, 1.0]
+                if (row.status == "paid")     { c = [0.40, 0.85, 0.55, 1.0] }
+                if (row.status == "pending")  { c = [0.95, 0.80, 0.30, 1.0] }
+                if (row.status == "refunded") { c = [0.60, 0.70, 0.95, 1.0] }
+                if (row.status == "failed")   { c = [0.95, 0.45, 0.40, 1.0] }
+                UI.textColored(c, row.status)
+                UI.tableNextColumn()
+                UI.text(row.time)
+            }
+            i = i + 1
+        }
+    })
+
+    UI.dummy(0, 6)
+    if (selectedRow >= 0 and selectedRow < length(txns)) {
+        var sel = txns[selectedRow]
+        UI.child("detail", { w: 0, h: 110, border: true }, func() {
+            sectionHeader("Selected", sel.id)
+            UI.labelText("customer", sel.who)
+            UI.labelText("amount",   "$" + str(sel.amt))
+            UI.labelText("status",   sel.status)
+        })
+    }
+}
+
+var pageSettings = func() {
+    sectionHeader("Settings", "live-tune the theme")
+
+    UI.child("theme-card", { w: 460, h: 280, border: true }, func() {
+        sectionHeader("Appearance", "")
+        UI.colorEdit("accent", accent[0])
+        UI.sliderFloat("rounding", rounding, 0.0, 14.0)
+        UI.combo("density", density, ["compact", "cozy", "comfortable"])
+        UI.dummy(0, 6)
+        UI.text("preview")
+        UI.separator()
+        UI.button("Primary")
+        UI.sameLine()
+        UI.smallButton("Small")
+        UI.sameLine()
+        var on = [true]
+        UI.checkbox("On", on)
+    })
+    UI.sameLine()
+    UI.child("notify-card", { w: 0, h: 280, border: true }, func() {
+        sectionHeader("Notifications", "")
+        UI.checkbox("Email alerts",      notifications[0])
+        UI.checkbox("Push notifications",notifications[1])
+        UI.checkbox("Weekly digest",     notifications[2])
+        UI.dummy(0, 6)
+        UI.text("Note")
+        UI.inputTextMultiline("##note", notes, -1, 90)
+    })
+
+    UI.dummy(0, 6)
+    UI.child("about", { w: 0, h: 0, border: true }, func() {
+        sectionHeader("About", "")
+        UI.bulletText("zym + ImGui dashboard demo")
+        UI.bulletText("theme is rebuilt every frame from `accent`, `rounding`, `density`")
+        UI.bulletText("right-click a transaction row for a context menu")
+        UI.bulletText("nav lives in the sidebar (UI.selectable)")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Top-level chrome: borderless full-window root, sidebar + content.
+// ---------------------------------------------------------------------------
+
+var renderApp = func() {
+    var size = win.getSize()
+    UI.setNextWindowPos(0, 0)
+    UI.setNextWindowSize(size.w, size.h)
+
+    var flags = UI.WINDOW_NO_TITLE_BAR + UI.WINDOW_NO_RESIZE
+              + UI.WINDOW_NO_MOVE      + UI.WINDOW_NO_COLLAPSE
+              + UI.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
+
+    UI.window("root", flags, func() {
+        // Top bar — title, time-range combo, refresh.
+        UI.text("◆  zym dashboard")
+        UI.sameLine(0, 24)
+        UI.textDisabled("range")
+        UI.sameLine()
+        UI.combo("##range", rangeIdx, ranges)
+        UI.sameLine(0, 16)
+        if (UI.button("Refresh")) { print("[dashboard] manual refresh") }
+        UI.sameLine()
+        UI.textDisabled("  " + str(UI.framerate()) + " fps")
+        UI.separator()
+        UI.dummy(0, 2)
+
+        // Sidebar.
+        UI.child("sidebar", { w: 200, h: 0, border: false }, func() {
+            UI.textDisabled("NAVIGATION")
+            UI.dummy(0, 4)
+            var i = 0
+            while (i < length(pages)) {
+                if (UI.selectable(pages[i], pageIdx == i)) {
+                    pageIdx = i
+                }
+                i = i + 1
+            }
+            UI.dummy(0, 12)
+            UI.separator()
+            UI.dummy(0, 4)
+            UI.textDisabled("ACCOUNT")
+            UI.dummy(0, 4)
+            if (UI.selectable("Profile", false))  { pageIdx = 3 }
+            if (UI.selectable("Sign out", false)) { print("[dashboard] sign out") }
+        })
+        UI.sameLine()
+
+        // Content pane.
+        UI.child("content", { w: 0, h: 0, border: true }, func() {
+            if      (pageIdx == 0) { pageOverview() }
+            else if (pageIdx == 1) { pageAnalytics() }
+            else if (pageIdx == 2) { pageTransactions() }
+            else                   { pageSettings() }
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Main loop. Every frame: drain events, advance the mock metrics, then
+// apply the theme around the whole UI.
+// ---------------------------------------------------------------------------
+
+var done = false
+while (!win.shouldClose() and !done) {
+    var e = SDL.pollEvent()
+    while (e != null) {
+        if (e.type == "quit") { done = true }
+        e = SDL.pollEvent()
+    }
+
+    tick = tick + 1
+    if (autoRefresh[0] and tick % 6 == 0) {
+        // Walk the ring buffers a bit so the sparklines breathe.
+        var last = revenue[length(revenue) - 1]
+        var step = ((tick * 13) % 11) - 5
+        pushSample(revenue,  last + step)
+        pushSample(users,    users[length(users) - 1] + ((tick * 7) % 5) - 2)
+        pushSample(requests, requests[length(requests) - 1] + ((tick * 3) % 7) - 3)
+        var er = errors[length(errors) - 1] + ((tick * 5) % 3) - 1
+        if (er < 0) { er = 0 }
+        pushSample(errors,   er)
+        pushSample(traffic,  ((tick * 17) % 80) + 10)
+    }
+
+    UI.frame(win, func() {
+        UI.withStyleColor(themeColors(), func() {
+            UI.withStyleVar(themeVars(), func() {
+                renderApp()
+            })
+        })
+    })
+}
+
+win.free()

@@ -18,13 +18,13 @@ func compileSource(fileName, source)
     var fid = vm.registerSourceFile(fileName, source)
     var ps = vm.preprocess(source, sm, fid)
 
-    var loaded = vm.loadModules(ps.source, sm, fileName, readAndPreprocessCallback, { debugNames: true })
+    var loaded = vm.loadModules(ps.source, sm, fileName, readAndPreprocessCallback, { debugNames: false })
     if (loaded.status == Zym.STATUS.OK) {
         var chunk = vm.newChunk()
-        var status = vm.compile(loaded.combinedSource, chunk, loaded.combinedSourceMap, fileName, { includeLineInfo: true })
+        var status = vm.compile(loaded.combinedSource, chunk, loaded.combinedSourceMap, fileName, { includeLineInfo: false })
         if (status == Zym.STATUS.OK) {
             //print("COMPILATION SUCCEEDED")
-            var zbcBuf = vm.serializeChunk(chunk, { includeLineInfo: true }).bytes
+            var zbcBuf = vm.serializeChunk(chunk, { includeLineInfo: false }).bytes
             //print(" > bytecode size: %v bytes", zbcBuf.size())
             return zbcBuf
         } else {
@@ -32,7 +32,10 @@ func compileSource(fileName, source)
             //drainAndPrintDiagnostics(vm, sources)
         }
     } else {
-        print(" -- COMPILATION FAILED --")
+        print(" -- MODULE LOADING FAILED --")
+        if (loaded.error != null) {
+            print("%v", loaded.error)
+        }
         //drainAndPrintDiagnostics(vm, sources)
     }
 

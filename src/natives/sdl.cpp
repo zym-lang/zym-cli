@@ -1287,29 +1287,10 @@ ZymValue s_surfaceFromBuffer(ZymVM* vm, ZymValue /*self*/, ZymValue bv, ZymValue
 // Without it, the texture is independent and texture.source() returns
 // null.
 
-struct TextureHandle {
-    SDL_Texture*  texture = nullptr;
-    // The owning Window's renderer. We capture the WindowHandle*
-    // rather than the SDL_Renderer* directly because we want to
-    // detect "renderer was destroyed under us" (use after free of
-    // the window) and raise a clean Zym runtime error.
-    WindowHandle* owner   = nullptr;
-    // Cached width/height so size() doesn't need a live renderer.
-    int w = 0;
-    int h = 0;
-    // Linked source surface (opt-in via `link: true` / `linkSurface`).
-    // Kept GC-rooted via the `__link__` slot on the Texture instance
-    // map so the Surface stays alive for the texture's lifetime; the
-    // pointer here is for tx_refresh / tx_source access without going
-    // back through the map.
-    SurfaceHandle* linkedSurface = nullptr;
-    // The Zym `Surface` value behind `linkedSurface`, returned as-is
-    // by tx_source() so scripts get the same map they passed in.
-    // ZymValue is a plain handle/word; storing it in a C struct does
-    // not root it for GC — we additionally stash it in the texture
-    // map's `__link__` slot for rooting (see makeTextureInstance).
-    ZymValue       linkedValue;
-};
+// TextureHandle is declared in sdl_internal.hpp so ui.cpp can reach
+// the SDL_Texture* + cached size behind a script-facing Texture value
+// (needed for UI.image / DrawList image methods in PR 7). Keep the
+// header definition in lockstep with this comment block.
 
 void textureFinalizer(ZymVM*, void* data) {
     auto* t = static_cast<TextureHandle*>(data);
@@ -1371,6 +1352,13 @@ ZymValue tx_source(ZymVM* /*vm*/, ZymValue ctx) {
     auto* t = unwrapTexture(ctx);
     if (!t || !t->linkedSurface) return zym_newNull();
     return t->linkedValue;
+}
+
+// Re-cast helper: TextureHandle::linkedSurface is `void*` in the
+// header (to keep SurfaceHandle out of the cross-TU contract); inside
+// sdl.cpp we always handle it as a SurfaceHandle*.
+static inline SurfaceHandle* linkedSH(TextureHandle* t) {
+    return static_cast<SurfaceHandle*>(t->linkedSurface);
 }
 
 // Internal helper: do a full or partial update from a Surface.
@@ -1444,16 +1432,17 @@ ZymValue tx_updateRect(ZymVM* vm, ZymValue ctx, ZymValue sv, ZymValue xv, ZymVal
 // slot so the GC keeps it alive — see makeTextureInstance.
 ZymValue tx_refresh(ZymVM* vm, ZymValue ctx, ZymValue rv) {
     TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.refresh(dirtyRect?)", &t)) return ZYM_ERROR;
-    if (!t->linkedSurface || !t->linkedSurface->surface) {
+    SurfaceHandle* lsh = linkedSH(t);
+    if (!lsh || !lsh->surface) {
         zym_runtimeError(vm, "Texture.refresh: texture has no linked Surface (create with { link: true })");
         return ZYM_ERROR;
     }
     if (zym_isNull(rv)) {
-        return zym_newBool(textureUpdateFromSurface(t->texture, t->linkedSurface->surface, nullptr));
+        return zym_newBool(textureUpdateFromSurface(t->texture, lsh->surface, nullptr));
     }
     SDL_Rect r;
     if (!parseRect(vm, rv, "Texture.refresh(dirtyRect?)", &r)) return ZYM_ERROR;
-    return zym_newBool(textureUpdateFromSurface(t->texture, t->linkedSurface->surface, &r));
+    return zym_newBool(textureUpdateFromSurface(t->texture, lsh->surface, &r));
 }
 
 ZymValue tx_setBlendMode(ZymVM* vm, ZymValue ctx, ZymValue mv) {

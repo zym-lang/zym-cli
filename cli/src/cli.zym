@@ -2,7 +2,7 @@
 
 var PKG_URL = "https://raw.githubusercontent.com/zym-lang/modules/refs/heads/main/pkg.zym"
 
-var drainAndPrintDiagnostics = import("diagnostics.zym").drainAndPrintDiagnostics
+var drainAndPrintDiagnostics = import("./diagnostics.zym").drainAndPrintDiagnostics
 
 var ZYM_VERSION = "0.3.0"
 var RUNNING_BINARY_PATH

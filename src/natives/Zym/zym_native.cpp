@@ -1171,16 +1171,41 @@ static ModuleReadResult zym_loadModules_trampoline(const char* path, void* user_
     zym_pushRoot(ctx->parentVm, pathV);
     ZymValue argv[1] = { pathV };
     ZymStatus st = zym_callClosurev(ctx->parentVm, ctx->parentCallback, 1, argv);
-    if (st != ZYM_STATUS_OK) { zym_popRoot(ctx->parentVm); return result; }
+    if (st != ZYM_STATUS_OK) {
+        zym_runtimeError(ctx->parentVm,
+            "loadModules: read/preprocess callback for [%s] raised an error",
+            path ? path : "(null)");
+        zym_popRoot(ctx->parentVm);
+        return result;
+    }
 
     ZymValue ret = zym_getCallResult(ctx->parentVm);
-    if (zym_isNull(ret) || !zym_isMap(ret)) { zym_popRoot(ctx->parentVm); return result; }
+    if (zym_isNull(ret)) {
+        zym_runtimeError(ctx->parentVm,
+            "loadModules: read/preprocess callback for [%s] returned null "
+            "(expected map { source, sourceMap, fileId })",
+            path ? path : "(null)");
+        zym_popRoot(ctx->parentVm);
+        return result;
+    }
+    if (!zym_isMap(ret)) {
+        zym_runtimeError(ctx->parentVm,
+            "loadModules: read/preprocess callback for [%s] returned a "
+            "non-map value (expected map { source, sourceMap, fileId })",
+            path ? path : "(null)");
+        zym_popRoot(ctx->parentVm);
+        return result;
+    }
     zym_pushRoot(ctx->parentVm, ret);
 
     // Pull `source` (string), `sourceMap` (parent-side wrapper), `fileId`
     // (number) from the returned map. Root the string while we copy it.
     ZymValue srcV = zym_mapGet(ctx->parentVm, ret, "source");
     if (srcV == ZYM_ERROR || zym_isNull(srcV) || !zym_isString(srcV)) {
+        zym_runtimeError(ctx->parentVm,
+            "loadModules: read/preprocess callback for [%s] returned a map "
+            "whose `source` field is missing or not a string",
+            path ? path : "(null)");
         zym_popRoot(ctx->parentVm); // ret
         zym_popRoot(ctx->parentVm); // pathV
         return result;
@@ -1191,6 +1216,10 @@ static ModuleReadResult zym_loadModules_trampoline(const char* path, void* user_
 
     const char* src = zym_asCString(srcV);
     if (!src) {
+        zym_runtimeError(ctx->parentVm,
+            "loadModules: read/preprocess callback for [%s] returned a "
+            "`source` string that could not be read as a C string",
+            path ? path : "(null)");
         zym_popRoot(ctx->parentVm); // srcV
         zym_popRoot(ctx->parentVm); // ret
         zym_popRoot(ctx->parentVm); // pathV

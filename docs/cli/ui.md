@@ -360,9 +360,10 @@ Bit-or these and pass to the 4-arg form of `UI.table(id, columns, flags, body)`.
 
 ## Custom 2D drawing
 
-`UI` exposes the full ImGui `ImDrawList` surface (minus image / texture
-APIs, which are deferred until the SDL image layer lands). Two flavours
-are available:
+`UI` exposes the full ImGui `ImDrawList` surface, including the image
+methods that bind an `SDL.Texture` for sampling (see *Images* below
+for the widget-level `UI.image` / `UI.imageButton` and the
+`dl.addImage*` DrawList methods). Two flavours are available:
 
 1. **Flat helpers** — one-shot calls on the current window's draw list,
    for short scripts and ad-hoc overlays. Convenient but limited: no
@@ -552,11 +553,81 @@ UI.frame(win, func() {
 })
 ```
 
-#### Image-touching APIs — deferred
+#### Image methods — `addImage*`
 
-`AddImage`, `AddImageQuad`, `AddImageRounded`, `PathImageRect`, and
-`PushTextureID` / `PopTextureID` are **not** exposed yet. They require
-a script-side texture handle, which lands with the SDL image layer.
+These DrawList methods sample pixels from an `SDL.Texture` (built via
+`win.createTexture` / `win.textureFromSurface` — see `sdl.md`). The
+texture handle is **stable** for its lifetime: editing the upstream
+`SDL.Surface` and calling `tex.update(...)` / `tex.refresh()` mutates
+the GPU contents behind the same handle, so the very same
+`dl.addImage(tex, ...)` call sees the updated pixels on the next
+frame — no rebinding required.
+
+| Method | Notes |
+| --- | --- |
+| `dl.addImage(tex, x, y, w, h, uv0?, uv1?, color?)` | Axis-aligned image quad. `uv0` / `uv1` default to `[0,0]` / `[1,1]` (full texture); pass 2-element lists to crop. `color` is a packed `ImU32` tint (defaults to opaque white). |
+| `dl.addImageQuad(tex, x1, y1, x2, y2, x3, y3, x4, y4, uv1?, uv2?, uv3?, uv4?, color?)` | Free-form four-corner quad. UVs default to a CCW square (`[0,0]`, `[1,0]`, `[1,1]`, `[0,1]`). Variadic — pass between 9 and 14 args. |
+| `dl.addImageRounded(tex, x, y, w, h, color, rounding, flags?, uv0?, uv1?)` | Rounded-rect image, useful for avatars and rounded thumbnails. `flags` accepts `UI.DRAW_ROUND_CORNERS_*`. Variadic — pass between 7 and 10 args. |
+
+`uv0` / `uv1` / `uv*` are 2-element `[u, v]` lists in normalised texture
+coordinates (`0..1`). Out-of-range values sample with the texture's
+configured scale mode (set via `tex.setScaleMode("nearest" | "linear")`).
+
+---
+
+## Images
+
+`UI.image` and `UI.imageButton` are widget-level image bindings that
+participate in ImGui's layout flow (cursor advances by the image size,
+the image becomes the "last item" for `UI.isItemHovered()` etc.). They
+consume the same `SDL.Texture` values as the `dl.addImage*` methods
+above and inherit the same handle-stability guarantee — pass the
+texture into `UI.image` once per frame body, edit the upstream
+surface, call `tex.update(...)` / `tex.refresh()`, and the next frame
+renders with the new pixels automatically.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `UI.image(tex, w, h, uv0?, uv1?, tint?, border?)` | null | Render the texture inline at `w × h` pixels. `uv0` / `uv1` are 2-element `[u, v]` lists (default `[0,0]` / `[1,1]`). `tint` is a packed `ImU32` (defaults to opaque white). `border` is accepted for API stability but ignored on modern ImGui (the border colour was promoted to a style slot — push `ImGuiCol_ImageBorder` via `UI.withStyleColor` instead). |
+| `UI.imageButton(id, tex, w, h, uv0?, uv1?, bgColor?, tint?)` | bool | Render a clickable image button with the given string `id`. Returns `true` on the frame the button is clicked. `bgColor` defaults to transparent; `tint` to opaque white. |
+
+> **`null` for "use the default".** Every optional argument (`uv0`,
+> `uv1`, `tint`, `border`, `bgColor`) accepts `null` to mean "use the
+> ImGui default for this slot." Pass an explicit value to override.
+
+> **Frame context.** Both calls must happen inside a `UI.window` /
+> `UI.child` body (and therefore inside `UI.frame(win, body)`) — same
+> rule as every other widget. Calling them outside a frame raises a
+> Zym runtime error.
+
+### Example — live editable image
+
+```zym
+var src = SDL.Surface.new(64, 64, null)
+src.fill([0.10, 0.40, 0.85, 1.0], null)
+
+// `link: true` lets us push surface edits via tex.refresh() without
+// having to keep a separate reference to the surface around.
+var tex = win.textureFromSurface(src, { link: true })
+
+while (!win.shouldClose()) {
+  UI.frame(win, func() {
+    UI.window("Badge", func() {
+      if (UI.button("Recolour")) {
+        src.fill([0.85, 0.20, 0.20, 1.0], null)
+        tex.refresh(null)        // explicit publish
+      }
+      UI.image(tex, 128, 128, null, null, null, null)
+    })
+  })
+}
+```
+
+The `UI.image(tex, ...)` call runs every frame (that's just how
+immediate-mode UI works), but it does **not** re-upload pixels —
+ImGui samples whatever the texture currently contains. The upload
+only happens inside `tex.refresh(null)`, which only runs when the
+button is clicked.
 
 ---
 

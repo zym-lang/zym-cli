@@ -58,4 +58,33 @@ inline WindowHandle* sdlGetWindowHandle(ZymVM* vm, ZymValue v) {
     return static_cast<WindowHandle*>(zym_getNativeData(ctx));
 }
 
+// Texture handle shape — declared here (not just inside sdl.cpp) so
+// `ui.cpp` can pull the `SDL_Texture*` + cached size out of a
+// script-facing Texture value for `UI.image` / DrawList image methods.
+// Definition must stay in lockstep with the one used by sdl.cpp's
+// texture factories; the layout is part of the cross-TU contract.
+struct TextureHandle {
+    SDL_Texture*  texture       = nullptr;
+    WindowHandle* owner         = nullptr;
+    int           w             = 0;
+    int           h             = 0;
+    // Opaque `SurfaceHandle*` — declared as `void*` here because the
+    // SurfaceHandle struct lives inside sdl.cpp's anonymous namespace
+    // and isn't part of the cross-TU contract. sdl.cpp casts back to
+    // its own SurfaceHandle*; ui.cpp never dereferences this pointer.
+    void*         linkedSurface = nullptr;
+    ZymValue      linkedValue;
+};
+
+// Fetch the `TextureHandle*` behind a script-facing Texture value.
+// Texture values are maps with a `__tex__` slot whose native context
+// userdata is the `TextureHandle*`. Returns nullptr if `v` doesn't
+// match the expected shape — callers must check.
+inline TextureHandle* sdlGetTextureHandle(ZymVM* vm, ZymValue v) {
+    if (!zym_isMap(v)) return nullptr;
+    if (!zym_mapHas(v, "__tex__")) return nullptr;
+    ZymValue ctx = zym_mapGet(vm, v, "__tex__");
+    return static_cast<TextureHandle*>(zym_getNativeData(ctx));
+}
+
 #endif // ZYM_SDL_ENABLED

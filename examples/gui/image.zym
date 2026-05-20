@@ -1,0 +1,110 @@
+// Slice 2 smoke test (future/gui.md §2.3, PR 7).
+//
+// Exercises the UI image surface — the last piece of the GUI graphics
+// stack that turns SDL.Texture into something visible inside an ImGui
+// window:
+//
+//   * UI.image(tex, w, h)                — basic widget binding
+//   * UI.image(tex, w, h, uv0, uv1, tint) — UV clipping + tint
+//   * UI.imageButton(id, tex, w, h, ...) — clickable image
+//   * dl.addImage / dl.addImageQuad / dl.addImageRounded — DrawList
+//     image methods (the PR 3 deferrals)
+//
+// Demonstrates the handle-stability guarantee: the Texture is passed
+// to UI.image ONCE per frame body, but the underlying GPU pixels are
+// edited via the upstream Surface + tex.update(...) when the script
+// pushes a button. The same UI.image call sees the updated pixels on
+// the next frame automatically — no rebinding required.
+//
+// Requires a display. Runs for ~3 seconds then exits.
+
+print("sdl version: %v", SDL.version())
+
+var win = SDL.createWindow("ui image smoke test", 480, 360, null)
+if (win == null) {
+    print("createWindow failed: %s", SDL.lastError())
+    return
+}
+
+// Build a procedural 64x64 surface — a 4-colour quadrant pattern.
+var src = SDL.Surface.new(64, 64, null)
+src.fill([0.10, 0.40, 0.85, 1.0], { x: 0,  y: 0,  w: 32, h: 32 })
+src.fill([0.85, 0.20, 0.20, 1.0], { x: 32, y: 0,  w: 32, h: 32 })
+src.fill([0.20, 0.80, 0.30, 1.0], { x: 0,  y: 32, w: 32, h: 32 })
+src.fill([0.95, 0.85, 0.15, 1.0], { x: 32, y: 32, w: 32, h: 32 })
+
+// Linked texture — refresh() pushes upstream surface edits to the GPU.
+var tex = win.textureFromSurface(src, { link: true })
+if (tex == null) {
+    print("textureFromSurface failed: %s", SDL.lastError())
+    win.free()
+    return
+}
+
+var clicks  = [0]
+var frame   = [0]
+var stopAt  = 180   // ~3 seconds at 60 Hz; we exit when frame counter passes this
+
+while (!win.shouldClose()) {
+    var ev = SDL.pollEvent()
+    while (ev != null) {
+        ev = SDL.pollEvent()
+    }
+
+    UI.frame(win, func() {
+        UI.window("Images", func() {
+            UI.text("UI.image — basic")
+            UI.image(tex, 128, 128, null, null, null, null)
+
+            UI.text("UI.image — UV crop (top-left quadrant) + tint")
+            UI.image(tex, 64, 64,
+                     [0.0, 0.0], [0.5, 0.5],
+                     UI.color(255, 255, 255, 200),
+                     null)
+
+            UI.text("UI.imageButton — click to recolour upstream surface")
+            if (UI.imageButton("btn", tex, 96, 96, null, null, null, null)) {
+                clicks[0] = clicks[0] + 1
+                // Mutate the upstream surface and publish via refresh().
+                // The texture handle stays stable; the next UI.image
+                // / UI.imageButton call samples the new pixels.
+                var c = clicks[0] % 3
+                if (c == 0) {
+                    src.fill([0.10, 0.40, 0.85, 1.0], null)
+                } else {
+                    if (c == 1) {
+                        src.fill([0.85, 0.20, 0.20, 1.0], null)
+                    } else {
+                        src.fill([0.20, 0.80, 0.30, 1.0], null)
+                    }
+                }
+                tex.refresh(null)
+            }
+            UI.text("clicks recorded")
+
+            // DrawList image methods land in PR 7. addImage paints
+            // directly into the window's draw list at absolute screen
+            // coords; addImageRounded gives a rounded clip.
+            var dl = UI.drawList()
+            var p  = UI.getCursorPos()
+            dl.addImage(tex, p.x, p.y, 48, 48,
+                        [0.0, 0.0], [1.0, 1.0],
+                        UI.color(255, 255, 255, 255))
+            dl.addImageRounded(tex, p.x + 56, p.y, 48, 48,
+                               UI.color(255, 255, 255, 255), 12, 0,
+                               [0.0, 0.0], [1.0, 1.0])
+            UI.dummy(0, 56)   // reserve layout space for the drawlist art
+        })
+    })
+
+    frame[0] = frame[0] + 1
+    if (frame[0] > stopAt) {
+        break
+    }
+}
+
+tex.free()
+src.free()
+win.free()
+print("done — frames=%v", frame[0])
+print("clicks=%v", clicks[0])

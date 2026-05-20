@@ -36,10 +36,10 @@ elseif(PGO_MODE STREQUAL "USE")
 endif()
 
 set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION OFF)
+set(USE_COMPRESSION ON)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
-set(RUNTIME_ONLY OFF)
+set(RUNTIME_ONLY ON)
 # USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
 # on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
 # binary so engine-level error and warning output is suppressed at startup
@@ -54,7 +54,7 @@ set(USE_ENGINE_ERRORS OFF)
 #     authors can opt back in to produce a UI-capable runtime export).
 if(NOT DEFINED ZYM_SDL)
     if(RUNTIME_ONLY)
-        set(ZYM_SDL OFF)
+        set(ZYM_SDL ON)
     else()
         set(ZYM_SDL ON)
     endif()
@@ -70,7 +70,7 @@ endif()
 # runtime-export builds where size dominates.
 if(NOT DEFINED ZYM_UI)
     if(RUNTIME_ONLY)
-        set(ZYM_UI OFF)
+        set(ZYM_UI ON)
     else()
         set(ZYM_UI ON)
     endif()

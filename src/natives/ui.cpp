@@ -2134,9 +2134,13 @@ ZymValue u_withFont(ZymVM* vm, ZymValue, ZymValue fontV, ZymValue bodyV) {
 // is populated with method closures that take the handle's ctx as
 // `self` and forward to the underlying `ImDrawList*`.
 //
-// Image-touching APIs (AddImage, AddImageQuad, AddImageRounded,
-// PathImageRect, PushTextureID) are intentionally NOT exposed — they
-// will land alongside the SDL image / texture layer.
+// Image-touching APIs (AddImage, AddImageQuad, AddImageRounded) land
+// in PR 7 — see the "image widgets" block below for their wiring on
+// the module-level (`UI.image` / `UI.imageButton`) and on the DrawList
+// instance (`dl.addImage` / `dl.addImageQuad` / `dl.addImageRounded`).
+// They consume a Zym Texture value (a map with a `__tex__` slot whose
+// native context wraps a TextureHandle*); the bridge extracts the
+// `SDL_Texture*` and hands it to ImGui as an `ImTextureID`.
 
 ImDrawList* unwrapDrawList(ZymValue ctx) {
     return static_cast<ImDrawList*>(zym_getNativeData(ctx));
@@ -3512,6 +3516,14 @@ ZymValue dl_channelsSetCurrent(ZymVM* vm, ZymValue self, ZymValue nV) {
 
 #undef DL_PROLOGUE
 
+// Forward decls — image methods are defined further down (PR 7 block)
+// but registered here in `makeDrawListInstance` to keep all DrawList
+// wiring in one place.
+ZymValue dl_addImage(ZymVM*, ZymValue, ZymValue, ZymValue, ZymValue,
+                     ZymValue, ZymValue, ZymValue, ZymValue, ZymValue);
+ZymValue dl_addImageQuad(ZymVM*, ZymValue, ZymValue*, int);
+ZymValue dl_addImageRounded(ZymVM*, ZymValue, ZymValue*, int);
+
 // --- DrawList instance factory --------------------------------------------
 
 ZymValue makeDrawListInstance(ZymVM* vm, ImDrawList* dl) {
@@ -3584,6 +3596,26 @@ ZymValue makeDrawListInstance(ZymVM* vm, ImDrawList* dl) {
     DLM("channelsMerge",      "channelsMerge()",               dl_channelsMerge);
     DLM("channelsSetCurrent", "channelsSetCurrent(n)",         dl_channelsSetCurrent);
 
+    // PR 7: image methods. `addImage` fits the fixed-arity path (9
+    // positional args including self). `addImageQuad` and
+    // `addImageRounded` need the variadic path — `dl_addBezierCubic`
+    // does the same trick for the same reason.
+    DLM("addImage", "addImage(tex,x,y,w,h,uv0,uv1,color)", dl_addImage);
+    {
+        ZymValue cl = zym_createNativeClosureVariadic(
+            vm, "addImageQuad(...args)", (void*)dl_addImageQuad, ctx);
+        zym_pushRoot(vm, cl);
+        zym_mapSet(vm, obj, "addImageQuad", cl);
+        zym_popRoot(vm);
+    }
+    {
+        ZymValue cl = zym_createNativeClosureVariadic(
+            vm, "addImageRounded(...args)", (void*)dl_addImageRounded, ctx);
+        zym_pushRoot(vm, cl);
+        zym_mapSet(vm, obj, "addImageRounded", cl);
+        zym_popRoot(vm);
+    }
+
 #undef DLM
 
     zym_popRoot(vm); // obj
@@ -3618,6 +3650,214 @@ ZymValue u_foregroundDrawList(ZymVM* vm, ZymValue) {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     if (!dl) return zym_newNull();
     return makeDrawListInstance(vm, dl);
+}
+
+// ---- PR 7: image widgets + DrawList image methods ----------------------
+//
+// `UI.image` / `UI.imageButton` consume a script-facing Texture value
+// (a Zym map with a `__tex__` slot whose native context wraps a
+// TextureHandle*). The bridge pulls the SDL_Texture* from the handle
+// and passes it to ImGui as the low-level ImTextureID — ImGui's
+// SDLRenderer3 backend samples exactly that pointer. The texture
+// handle is stable for its lifetime (see future/gui.md §2.0), so the
+// same `UI.image(tex, ...)` call sees updated pixels on every frame
+// whenever the script mutates the upstream Surface and pushes
+// `tex.update(...)` / `tex.refresh()` — no rebinding required.
+//
+// DrawList image methods (`dl.addImage` / `dl.addImageQuad` /
+// `dl.addImageRounded`) mirror ImGui's `ImDrawList::AddImage*` on the
+// DrawList instance map. They were intentionally deferred in PR 3 and
+// only land here, after PR 6 has given us a Texture handle to feed
+// them. Image-touching APIs sit alongside the existing DrawList
+// method registrations; the wiring is done in `makeDrawListInstance`.
+
+// Pull `SDL_Texture*` out of a script-facing Texture value. On any
+// failure, raises a Zym runtime error with `where` and returns null.
+// Use `optTexture` (no error on null) for arguments that may be null
+// (none in PR 7, but cheap to keep symmetric with optU32 / optNum).
+SDL_Texture* reqTexture(ZymVM* vm, ZymValue v, const char* where) {
+    TextureHandle* t = sdlGetTextureHandle(vm, v);
+    if (!t || !t->texture) {
+        zym_runtimeError(vm, "%s: expected a Texture value (from win.createTexture / win.textureFromSurface)", where);
+        return nullptr;
+    }
+    if (!t->owner || !t->owner->renderer) {
+        zym_runtimeError(vm, "%s: owning Window/renderer has been destroyed", where);
+        return nullptr;
+    }
+    return t->texture;
+}
+
+// Read a 2-element list [x, y] into ImVec2, falling back to `fallback`
+// if `v` is null. Returns false on type error (raises runtime error).
+bool optVec2(ZymVM* vm, ZymValue v, ImVec2 fallback, const char* where, ImVec2* out) {
+    if (zym_isNull(v)) { *out = fallback; return true; }
+    if (!zym_isList(v) || zym_listLength(v) != 2) {
+        zym_runtimeError(vm, "%s: expected a 2-element list [x, y]", where);
+        return false;
+    }
+    ZymValue xv = zym_listGet(vm, v, 0);
+    ZymValue yv = zym_listGet(vm, v, 1);
+    if (!zym_isNumber(xv) || !zym_isNumber(yv)) {
+        zym_runtimeError(vm, "%s: [x, y] elements must be numbers", where);
+        return false;
+    }
+    *out = ImVec2((float)zym_asNumber(xv), (float)zym_asNumber(yv));
+    return true;
+}
+
+// Convert a packed ImU32 RGBA into an ImVec4 (0..1). Used for
+// imageButton's bg/tint parameters where ImGui takes ImVec4 directly.
+inline ImVec4 u32ToVec4(ImU32 c) {
+    return ImVec4(
+        (float)((c >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
+        (float)((c >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
+        (float)((c >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
+        (float)((c >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f);
+}
+
+// UI.image(tex, w, h, uv0?, uv1?, tint?, border?)
+//
+// Border colour is ignored on modern ImGui (the parameter was removed
+// in favour of ImGuiCol_ImageBorder), but we keep the slot so the
+// public surface stays stable with what's documented in
+// future/gui.md §2.2. When `tint` is given we route through
+// `ImageWithBg` so the tint actually applies; otherwise plain
+// `Image()` is used.
+ZymValue u_image(ZymVM* vm, ZymValue, ZymValue texV, ZymValue wV, ZymValue hV,
+                 ZymValue uv0V, ZymValue uv1V, ZymValue tintV, ZymValue /*borderV*/) {
+    if (!requireFrame(vm, "ui.image")) return ZYM_ERROR;
+    SDL_Texture* tex = reqTexture(vm, texV, "ui.image(tex, w, h, ...)");
+    if (!tex) return ZYM_ERROR;
+    double w, h;
+    if (!reqNum(vm, wV, "ui.image", &w)) return ZYM_ERROR;
+    if (!reqNum(vm, hV, "ui.image", &h)) return ZYM_ERROR;
+    ImVec2 uv0, uv1;
+    if (!optVec2(vm, uv0V, ImVec2(0, 0), "ui.image uv0", &uv0)) return ZYM_ERROR;
+    if (!optVec2(vm, uv1V, ImVec2(1, 1), "ui.image uv1", &uv1)) return ZYM_ERROR;
+    ImTextureRef ref((ImTextureID)(intptr_t)tex);
+    if (zym_isNull(tintV)) {
+        ImGui::Image(ref, ImVec2((float)w, (float)h), uv0, uv1);
+    } else {
+        ImU32 tint = optU32(tintV, IM_COL32_WHITE);
+        ImGui::ImageWithBg(ref, ImVec2((float)w, (float)h), uv0, uv1,
+                           ImVec4(0, 0, 0, 0), u32ToVec4(tint));
+    }
+    return zym_newNull();
+}
+
+// UI.imageButton(id, tex, w, h, uv0?, uv1?, bgColor?, tint?) -> bool
+ZymValue u_imageButton(ZymVM* vm, ZymValue, ZymValue idV, ZymValue texV,
+                       ZymValue wV, ZymValue hV,
+                       ZymValue uv0V, ZymValue uv1V,
+                       ZymValue bgV, ZymValue tintV) {
+    if (!requireFrame(vm, "ui.imageButton")) return ZYM_ERROR;
+    std::string id;
+    if (!reqStr(vm, idV, "ui.imageButton(id, tex, ...)", &id)) return ZYM_ERROR;
+    SDL_Texture* tex = reqTexture(vm, texV, "ui.imageButton(id, tex, ...)");
+    if (!tex) return ZYM_ERROR;
+    double w, h;
+    if (!reqNum(vm, wV, "ui.imageButton", &w)) return ZYM_ERROR;
+    if (!reqNum(vm, hV, "ui.imageButton", &h)) return ZYM_ERROR;
+    ImVec2 uv0, uv1;
+    if (!optVec2(vm, uv0V, ImVec2(0, 0), "ui.imageButton uv0", &uv0)) return ZYM_ERROR;
+    if (!optVec2(vm, uv1V, ImVec2(1, 1), "ui.imageButton uv1", &uv1)) return ZYM_ERROR;
+    ImVec4 bg   = u32ToVec4(optU32(bgV,   0u));
+    ImVec4 tint = u32ToVec4(optU32(tintV, IM_COL32_WHITE));
+    ImTextureRef ref((ImTextureID)(intptr_t)tex);
+    bool clicked = ImGui::ImageButton(id.c_str(), ref,
+                                      ImVec2((float)w, (float)h),
+                                      uv0, uv1, bg, tint);
+    return zym_newBool(clicked);
+}
+
+// --- DrawList image methods (registered in makeDrawListInstance) --------
+
+// dl.addImage(tex, x, y, w, h, uv0?, uv1?, color?)
+ZymValue dl_addImage(ZymVM* vm, ZymValue self,
+                     ZymValue texV, ZymValue xV, ZymValue yV,
+                     ZymValue wV, ZymValue hV,
+                     ZymValue uv0V, ZymValue uv1V, ZymValue colV) {
+    ImDrawList* dl;
+    if (!reqDL(vm, self, "DrawList.addImage", &dl)) return ZYM_ERROR;
+    SDL_Texture* tex = reqTexture(vm, texV, "DrawList.addImage(tex, x, y, w, h, ...)");
+    if (!tex) return ZYM_ERROR;
+    double x = optNum(xV, 0), y = optNum(yV, 0);
+    double w = optNum(wV, 0), h = optNum(hV, 0);
+    ImVec2 uv0, uv1;
+    if (!optVec2(vm, uv0V, ImVec2(0, 0), "DrawList.addImage uv0", &uv0)) return ZYM_ERROR;
+    if (!optVec2(vm, uv1V, ImVec2(1, 1), "DrawList.addImage uv1", &uv1)) return ZYM_ERROR;
+    ImTextureRef ref((ImTextureID)(intptr_t)tex);
+    dl->AddImage(ref,
+                 ImVec2((float)x, (float)y),
+                 ImVec2((float)(x + w), (float)(y + h)),
+                 uv0, uv1, optU32(colV, IM_COL32_WHITE));
+    return zym_newNull();
+}
+
+// dl.addImageQuad(tex, x1, y1, x2, y2, x3, y3, x4, y4, uv1?, uv2?, uv3?, uv4?, color?)
+// Variadic because the arg count (14) exceeds the fixed-arity native
+// dispatcher cap. Unpacks by index — `vargv[0]` is `self`, indices
+// thereafter are positional args. Matches how `dl_addBezierCubic` is
+// wired (see makeDrawListInstance + zym_createNativeClosureVariadic).
+ZymValue dl_addImageQuad(ZymVM* vm, ZymValue self, ZymValue* vargv, int vargc) {
+    ImDrawList* dl;
+    if (!reqDL(vm, self, "DrawList.addImageQuad", &dl)) return ZYM_ERROR;
+    if (vargc < 9 || vargc > 14) {
+        zym_runtimeError(vm,
+            "DrawList.addImageQuad expects 9..14 args (tex, x1..y4, uv1?..uv4?, color?), got %d",
+            vargc);
+        return ZYM_ERROR;
+    }
+    auto a = [&](int i)->ZymValue { return (i < vargc) ? vargv[i] : zym_newNull(); };
+    SDL_Texture* tex = reqTexture(vm, a(0), "DrawList.addImageQuad");
+    if (!tex) return ZYM_ERROR;
+    double x1 = optNum(a(1), 0), y1 = optNum(a(2), 0);
+    double x2 = optNum(a(3), 0), y2 = optNum(a(4), 0);
+    double x3 = optNum(a(5), 0), y3 = optNum(a(6), 0);
+    double x4 = optNum(a(7), 0), y4 = optNum(a(8), 0);
+    ImVec2 uv1, uv2, uv3, uv4;
+    if (!optVec2(vm, a(9),  ImVec2(0, 0), "DrawList.addImageQuad uv1", &uv1)) return ZYM_ERROR;
+    if (!optVec2(vm, a(10), ImVec2(1, 0), "DrawList.addImageQuad uv2", &uv2)) return ZYM_ERROR;
+    if (!optVec2(vm, a(11), ImVec2(1, 1), "DrawList.addImageQuad uv3", &uv3)) return ZYM_ERROR;
+    if (!optVec2(vm, a(12), ImVec2(0, 1), "DrawList.addImageQuad uv4", &uv4)) return ZYM_ERROR;
+    ImU32 col = optU32(a(13), IM_COL32_WHITE);
+    ImTextureRef ref((ImTextureID)(intptr_t)tex);
+    dl->AddImageQuad(ref,
+                     ImVec2((float)x1, (float)y1), ImVec2((float)x2, (float)y2),
+                     ImVec2((float)x3, (float)y3), ImVec2((float)x4, (float)y4),
+                     uv1, uv2, uv3, uv4, col);
+    return zym_newNull();
+}
+
+// dl.addImageRounded(tex, x, y, w, h, color, rounding, flags?, uv0?, uv1?)
+// Also variadic — 10 fixed positional args is just over the limit.
+ZymValue dl_addImageRounded(ZymVM* vm, ZymValue self, ZymValue* vargv, int vargc) {
+    ImDrawList* dl;
+    if (!reqDL(vm, self, "DrawList.addImageRounded", &dl)) return ZYM_ERROR;
+    if (vargc < 7 || vargc > 10) {
+        zym_runtimeError(vm,
+            "DrawList.addImageRounded expects 7..10 args (tex, x, y, w, h, color, rounding, flags?, uv0?, uv1?), got %d",
+            vargc);
+        return ZYM_ERROR;
+    }
+    auto a = [&](int i)->ZymValue { return (i < vargc) ? vargv[i] : zym_newNull(); };
+    SDL_Texture* tex = reqTexture(vm, a(0), "DrawList.addImageRounded");
+    if (!tex) return ZYM_ERROR;
+    double x = optNum(a(1), 0), y = optNum(a(2), 0);
+    double w = optNum(a(3), 0), h = optNum(a(4), 0);
+    ImU32  col      = optU32(a(5), IM_COL32_WHITE);
+    double rounding = optNum(a(6), 0);
+    ImDrawFlags flags = (ImDrawFlags)optU32(a(7), 0);
+    ImVec2 uv0, uv1;
+    if (!optVec2(vm, a(8), ImVec2(0, 0), "DrawList.addImageRounded uv0", &uv0)) return ZYM_ERROR;
+    if (!optVec2(vm, a(9), ImVec2(1, 1), "DrawList.addImageRounded uv1", &uv1)) return ZYM_ERROR;
+    ImTextureRef ref((ImTextureID)(intptr_t)tex);
+    dl->AddImageRounded(ref,
+                        ImVec2((float)x, (float)y),
+                        ImVec2((float)(x + w), (float)(y + h)),
+                        uv0, uv1, col, (float)rounding, flags);
+    return zym_newNull();
 }
 
 } // namespace
@@ -4051,6 +4291,10 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(backgroundDrawList, "backgroundDrawList()",  u_backgroundDrawList)
     MOD(foregroundDrawList, "foregroundDrawList()",  u_foregroundDrawList)
 
+    // PR 7: image widgets — accept a Texture value from SDL.
+    MOD(image,       "image(tex, w, h, uv0, uv1, tint, border)",            u_image)
+    MOD(imageButton, "imageButton(id, tex, w, h, uv0, uv1, bgColor, tint)", u_imageButton)
+
     // position / state helpers
     MOD(getCursorPos, "getCursorPos()", u_getCursorPos)
     MOD(getMousePos,  "getMousePos()",  u_getMousePos)
@@ -4381,6 +4625,8 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "drawList",           drawList);
     zym_mapSet(vm, obj, "backgroundDrawList", backgroundDrawList);
     zym_mapSet(vm, obj, "foregroundDrawList", foregroundDrawList);
+    zym_mapSet(vm, obj, "image",              image);
+    zym_mapSet(vm, obj, "imageButton",        imageButton);
 
     // ImDrawFlags_* constants for AddRect / AddRectFilled / AddPolyline /
     // PathStroke / PathRect rounding-corner and closed-shape selection.
@@ -4704,6 +4950,8 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_popRoot(vm); // getMousePos
     zym_popRoot(vm); // getCursorPos
     // PR 3 DrawList factories (pushed between drawTriangleFilled and getCursorPos)
+    zym_popRoot(vm); // imageButton
+    zym_popRoot(vm); // image
     zym_popRoot(vm); // foregroundDrawList
     zym_popRoot(vm); // backgroundDrawList
     zym_popRoot(vm); // drawList

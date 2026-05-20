@@ -83,6 +83,35 @@ In addition to events, scripts can poll current input state directly.
 | `SDL.mouseButtons()` | map | `{ left, right, middle }` booleans. |
 | `SDL.modifiers()` | map | `{ shift, ctrl, alt, super }` booleans for current modifier state. |
 
+### Image I/O
+
+PNG + JPG are decoded / encoded via SDL_image (vendored — see
+`future/gui.md` §2.1). BMP routes through SDL3 core's
+`SDL_LoadBMP` / `SDL_SaveBMP` directly. All four entry points return a
+`Surface` (CPU-side image) — never a `Texture` — so the "edit before
+showing" workflow is encoded into the type system.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `SDL.loadImage(path)` | `Surface` \| `null` | Decode the file at `path`. Format is sniffed from the extension; falls back to magic-byte sniff inside SDL_image. Returns `null` on failure (see `SDL.lastError`). |
+| `SDL.loadImageFromBuffer(buf, fmt)` | `Surface` \| `null` | Decode the bytes in the `Buffer`. `fmt` is a hint (`"png"` / `"jpg"` / `"bmp"`) — pass `null` to let SDL_image sniff. |
+| `SDL.saveImage(surface, path, fmt)` | bool | Encode `surface` to `path`. `fmt` defaults to the path extension (`"png"` if none); pass `null` to use the default. PNG/JPG go through SDL_image; BMP through SDL3 core. JPEG quality is fixed at 90. |
+| `SDL.saveImageToBuffer(surface, fmt)` | `Buffer` \| `null` | Same as `saveImage` but returns the encoded bytes as an in-memory `Buffer` instead of writing to disk. Useful for sending encoded images over the network, embedding into a packed app, or computing hashes without touching the filesystem. |
+
+> All arguments are required — pass `null` for any optional you want to
+> skip (the bridge takes `null` to mean "use the default"). This mirrors
+> the rest of the SDL surface; named-argument syntax is not part of the
+> language today.
+
+### `SDL.Surface` factories
+
+Surfaces can also be created directly without decoding an image:
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `SDL.Surface.new(w, h, fmt)` | `Surface` \| `null` | Allocate a fresh surface, zero-filled. `fmt` is a string like `"RGBA32"` (default), `"ARGB32"`, `"RGB24"`, `"INDEX8"` — pass `null` for `"RGBA32"`. |
+| `SDL.Surface.fromBuffer(buf, w, h, pitch, fmt)` | `Surface` \| `null` | Allocate a fresh `w`×`h` surface in `fmt` (default `"RGBA32"` when `fmt` is `null`) and **copy** the pixel bytes from `buf` row-by-row using `pitch` as the source row stride. The buffer is consumed at call time — mutating it afterwards does not affect the surface. |
+
 ---
 
 ## Events
@@ -149,6 +178,80 @@ Returned by `SDL.createWindow`. Methods are invoked as
 
 `Window` handles are also finalised automatically when the VM garbage-
 collects them; an explicit `.free()` is the deterministic option.
+
+---
+
+## `Surface`
+
+Returned by `SDL.loadImage*` / `SDL.Surface.new` / `SDL.Surface.fromBuffer`
+/ `surf.clone` / `surf.convert`. A `Surface` is a CPU-side, mutable
+pixel buffer — the "unit of authorship" in the image pipeline. Edits
+(blits, fills, masks, per-pixel writes) all happen on a `Surface`;
+displaying it via the UI native is a separate publish step against a
+`Texture` (deferred to a later slice).
+
+### Queries
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `surf.size()` | map | `{ w, h }` of the surface in pixels. |
+| `surf.format()` | string | Short pixel-format name (e.g. `"RGBA32"`, `"ABGR8888"`, `"RGB24"`). |
+| `surf.pitch()` | number | Bytes per row of pixels — `w × bpp` rounded up to SDL's alignment. |
+
+### Whole-surface ops
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `surf.clone()` | `Surface` \| `null` | Deep copy of the surface (pixels + format). |
+| `surf.convert(fmt)` | `Surface` \| `null` | Returns a fresh surface with the same pixels in `fmt`. Errors if `fmt` is not recognised. |
+| `surf.fill(color, rect)` | bool | Fill `rect` (or the whole surface when `rect` is `null`) with `color`. Color is either a 3/4-element list (floats `0..1` or ints `0..255`) or a packed `0xAARRGGBB` number. |
+| `surf.clear(color)` | bool | Shorthand for filling the whole surface; pass `null` for `[0,0,0,0]` (fully transparent). |
+
+### Pixel access
+
+These are *slow* at script speed — they cross the Zym↔C boundary for
+every pixel. Favour bulk ops (`fill`, `blit`, `applyMask`) when
+possible. A future revision will add a `lock(body)` / `pixels()`
+`Buffer` escape hatch.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `surf.getPixel(x, y)` | list \| `null` | `[r, g, b, a]` in floats `0..1`. Returns `null` if `(x, y)` is out of bounds. |
+| `surf.setPixel(x, y, color)` | bool | Write a single pixel. Same color shape as `fill`. |
+
+### Blits / composition
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `surf.blit(src, srcRect, dstRect)` | bool | Copy from `src` into this surface. Pass `null` for either rect to mean "whole thing". |
+| `surf.blitScaled(src, srcRect, dstRect, mode)` | bool | Like `blit` but rescales. `mode` ∈ `"nearest"` / `"linear"`; pass `null` for `"linear"`. |
+| `surf.setBlendMode(mode)` | bool | `mode` ∈ `"none"` / `"blend"` / `"add"` / `"mod"` / `"mul"`. |
+| `surf.getBlendMode()` | string | Current blend mode name (or `"custom"` for non-standard). |
+| `surf.setAlphaMod(a)` | bool | Per-blit alpha multiplier `0..255`. |
+| `surf.setColorMod(r, g, b)` | bool | Per-blit colour multiplier `0..255`. |
+| `surf.setColorKey(color)` | bool | Treat pixels matching `color` as fully transparent during blits. Pass `null` to clear the key. |
+| `surf.getClipRect()` | map | `{ x, y, w, h }` of the current clip rectangle. |
+| `surf.setClipRect(rect)` | bool | Restrict subsequent draws to `rect`. Pass `null` to clear. |
+
+### Masking
+
+`applyMask` is the headline composability verb — there is no
+equivalent in SDL3 core, so we implement it on top of the per-pixel
+read/write API.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `surf.applyMask(mask, mode)` | bool | Combine the alpha channel of `mask` into `surf`. `mode` ∈ `"alpha"` (default, `dst.a *= mask.a / 255`), `"luminance"` (`dst.a *= luma(mask.rgb) / 255` using BT.601), `"key"` (`dst.a := 0` where `mask.a == 0`, else unchanged). Pass `null` for the default. The mask is read pixel-by-pixel; it can be any format SDL understands. |
+
+### Lifetime
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `surf.free()` | null | Releases the pixel buffer immediately. Safe to call more than once. |
+
+`Surface` handles are also finalised automatically by the GC; an
+explicit `.free()` is the deterministic option, useful when working
+with large images.
 
 ---
 

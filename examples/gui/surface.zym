@@ -1,0 +1,156 @@
+// Slice 2 smoke test (future/gui.md §2.3, PR 5).
+//
+// Round-trip image I/O + a couple of Surface compositions, all
+// CPU-side — no window required.
+//
+// Usage:
+//   zym run examples/gui/surface.zym
+//
+// What it exercises:
+//   1. Create a blank RGBA surface and fill it (background + a rect).
+//   2. Save it to PNG on disk, then re-load it from disk.
+//   3. Encode the in-memory surface to a Buffer (saveImageToBuffer)
+//      and decode it back (loadImageFromBuffer). Confirm byte size
+//      matches the disk file and that the decoded surface size
+//      matches the source.
+//   4. Build a circular alpha mask and applyMask("alpha") it onto the
+//      surface. Save the result so the user can eyeball it.
+//   5. Demonstrate `clone`, `convert`, `setColorMod` / `setAlphaMod`,
+//      blits, colorkey + clip rect.
+//
+// All artifacts are written under /tmp/zym-surface-test/.
+
+print("sdl version: %v", SDL.version())
+
+var outDir = "/tmp/zym-surface-test"
+Dir.makeDirRecursive(outDir)
+
+// ----- 1. blank surface, filled with a background + a centered rect -----
+
+var W = 256
+var H = 256
+var src = SDL.Surface.new(W, H, null)
+if (src == null) {
+    print("Surface.new failed: %s", SDL.lastError())
+    return
+}
+
+// Background: solid blue, with a 200-pixel-wide white rect centered.
+src.fill([0.10, 0.20, 0.50, 1.0], null)
+src.fill([1.0, 1.0, 1.0, 1.0], { x: 28, y: 28, w: 200, h: 200 })
+
+// A red dot dead center (single-pixel write — slow path, fine for a few).
+var i = 0
+while (i < 9) {
+    var j = 0
+    while (j < 9) {
+        src.setPixel(W/2 - 4 + i, H/2 - 4 + j, [1.0, 0.0, 0.0, 1.0])
+        j = j + 1
+    }
+    i = i + 1
+}
+
+print("source surface: %v, format=%s, pitch=%v", src.size(), src.format(), src.pitch())
+
+// ----- 2. save to disk, reload, compare sizes -----
+
+var diskPath = outDir + "/src.png"
+if (!SDL.saveImage(src, diskPath, null)) {
+    print("saveImage failed: %s", SDL.lastError())
+    return
+}
+print("wrote %s", diskPath)
+
+var reloaded = SDL.loadImage(diskPath)
+if (reloaded == null) {
+    print("loadImage failed: %s", SDL.lastError())
+    return
+}
+print("reload: %v, format=%s", reloaded.size(), reloaded.format())
+
+// ----- 3. encode to Buffer, decode back -----
+
+var encoded = SDL.saveImageToBuffer(src, "png")
+if (encoded == null) {
+    print("saveImageToBuffer failed: %s", SDL.lastError())
+    return
+}
+print("encoded %v bytes (PNG, in-memory)", encoded.size())
+
+var fromBuf = SDL.loadImageFromBuffer(encoded, "png")
+if (fromBuf == null) {
+    print("loadImageFromBuffer failed: %s", SDL.lastError())
+    return
+}
+print("decoded from buffer: %v", fromBuf.size())
+
+// ----- 4. build a circular alpha mask and apply it -----
+
+var mask = SDL.Surface.new(W, H, null)
+mask.clear([0, 0, 0, 0])     // fully transparent
+// Stamp a soft-ish disc by sampling pixels inside a radius. Pure
+// script-side draw — slow but fine for a smoke test.
+var cx = W / 2
+var cy = H / 2
+var r  = (W / 2) - 8
+var y = 0
+while (y < H) {
+    var x = 0
+    while (x < W) {
+        var dx = x - cx
+        var dy = y - cy
+        var d2 = dx*dx + dy*dy
+        if (d2 <= r*r) {
+            mask.setPixel(x, y, [1, 1, 1, 1])
+        }
+        x = x + 1
+    }
+    y = y + 1
+}
+
+var masked = src.clone()
+masked.applyMask(mask, "alpha")
+SDL.saveImage(masked, outDir + "/masked.png", null)
+print("wrote %s", outDir + "/masked.png")
+
+// ----- 5. clone, convert, mods, blit, colorkey, clip -----
+
+var tinted = src.clone()
+tinted.setColorMod(255, 128, 64)
+tinted.setAlphaMod(180)
+SDL.saveImage(tinted, outDir + "/tinted.png", null)
+
+// Blit a tile from `src` onto a smaller canvas, with a clip rect.
+var canvas = SDL.Surface.new(128, 128, null)
+canvas.clear([0, 0, 0, 1])
+canvas.setClipRect({ x: 16, y: 16, w: 96, h: 96 })
+canvas.blit(src, { x: 0, y: 0, w: 200, h: 200 }, { x: 0, y: 0, w: 128, h: 128 })
+SDL.saveImage(canvas, outDir + "/blit.png", null)
+canvas.setClipRect(null)
+print("clip rect now: %v", canvas.getClipRect())
+
+// Color-key a pixel: anywhere we drew the red dot, treat it as transparent.
+var keyed = src.clone()
+keyed.setColorKey([1.0, 0.0, 0.0, 1.0])
+keyed.setBlendMode("blend")
+SDL.saveImage(keyed, outDir + "/keyed.bmp", "bmp")  // BMP via SDL3 core
+print("wrote %s", outDir + "/keyed.bmp")
+
+// Convert format.
+var conv = src.convert("RGB24")
+if (conv != null) {
+    print("converted: format=%s pitch=%v", conv.format(), conv.pitch())
+    conv.free()
+}
+
+// Cleanup (finalizer would do it; demonstrating explicit form).
+src.free()
+reloaded.free()
+fromBuf.free()
+mask.free()
+masked.free()
+tinted.free()
+canvas.free()
+keyed.free()
+
+print("done — see %s", outDir)

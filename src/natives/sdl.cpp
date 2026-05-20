@@ -12,7 +12,11 @@
 #include "sdl_internal.hpp"  // shared `WindowHandle` + `sdlGetWindowHandle`
 
 #include <SDL3/SDL.h>
+#if defined(ZYM_SDL_IMAGE_ENABLED)
+#  include <SDL3_image/SDL_image.h>
+#endif
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -533,6 +537,730 @@ ZymValue s_modifiers(ZymVM* vm, ZymValue /*self*/) {
     return m;
 }
 
+// ---- Surface (CPU-side image, mutable) -----------------------------------
+//
+// Compiled in unconditionally when ZYM_SDL_ENABLED is on. The decode
+// path (loadImage / saveImage / saveImageToBuffer for PNG/JPG) routes
+// through SDL_image which is built when ZYM_SDL_IMAGE_ENABLED is on
+// (currently the default whenever ZYM_SDL is on). BMP routes through
+// SDL3 core's built-in SDL_LoadBMP / SDL_SaveBMP, which is always
+// available.
+
+struct SurfaceHandle {
+    SDL_Surface* surface = nullptr;
+};
+
+void surfaceFinalizer(ZymVM*, void* data) {
+    auto* s = static_cast<SurfaceHandle*>(data);
+    if (!s) return;
+    if (s->surface) SDL_DestroySurface(s->surface);
+    delete s;
+}
+
+SurfaceHandle* unwrapSurface(ZymValue ctx) {
+    return static_cast<SurfaceHandle*>(zym_getNativeData(ctx));
+}
+
+bool reqSurface(ZymVM* vm, ZymValue ctx, const char* where, SurfaceHandle** out) {
+    auto* s = unwrapSurface(ctx);
+    if (!s || !s->surface) {
+        zym_runtimeError(vm, "%s: invalid Surface handle", where);
+        return false;
+    }
+    *out = s;
+    return true;
+}
+
+// Extract a SurfaceHandle* from a Zym `Surface` value (map with __surface__).
+// Returns nullptr on shape mismatch — callers must check.
+SurfaceHandle* surfaceFromValue(ZymVM* vm, ZymValue v) {
+    if (!zym_isMap(v)) return nullptr;
+    if (!zym_mapHas(v, "__surface__")) return nullptr;
+    ZymValue ctx = zym_mapGet(vm, v, "__surface__");
+    return unwrapSurface(ctx);
+}
+
+// Parse a color argument. Accepts either:
+//   - a 3/4-element list of numbers (floats 0..1 or ints 0..255 — we
+//     auto-detect by looking for any value > 1.0), or
+//   - a single packed number (0xAARRGGBB-shaped).
+// Returns SDL_Color (RGBA in [0..255]).
+bool parseColor(ZymVM* vm, ZymValue v, const char* where, SDL_Color* out) {
+    if (zym_isList(v)) {
+        int n = zym_listLength(v);
+        if (n != 3 && n != 4) {
+            zym_runtimeError(vm, "%s: color list must have 3 or 4 elements", where);
+            return false;
+        }
+        double comps[4] = {0,0,0,1};
+        bool anyAboveOne = false;
+        for (int i = 0; i < n; i++) {
+            ZymValue e = zym_listGet(vm, v, i);
+            if (!zym_isNumber(e)) {
+                zym_runtimeError(vm, "%s: color component %d not a number", where, i);
+                return false;
+            }
+            comps[i] = zym_asNumber(e);
+            if (comps[i] > 1.0) anyAboveOne = true;
+        }
+        auto clamp01 = [](double d){ return d < 0 ? 0.0 : (d > 1.0 ? 1.0 : d); };
+        auto clamp255 = [](double d){ return d < 0 ? 0.0 : (d > 255.0 ? 255.0 : d); };
+        if (anyAboveOne) {
+            out->r = (Uint8)clamp255(comps[0]);
+            out->g = (Uint8)clamp255(comps[1]);
+            out->b = (Uint8)clamp255(comps[2]);
+            out->a = (Uint8)clamp255(comps[3]);
+        } else {
+            out->r = (Uint8)(clamp01(comps[0]) * 255.0 + 0.5);
+            out->g = (Uint8)(clamp01(comps[1]) * 255.0 + 0.5);
+            out->b = (Uint8)(clamp01(comps[2]) * 255.0 + 0.5);
+            out->a = (Uint8)(clamp01(comps[3]) * 255.0 + 0.5);
+        }
+        if (n == 3) out->a = 255;
+        return true;
+    }
+    if (zym_isNumber(v)) {
+        uint32_t packed = (uint32_t)zym_asNumber(v);
+        out->a = (Uint8)((packed >> 24) & 0xFF);
+        out->r = (Uint8)((packed >> 16) & 0xFF);
+        out->g = (Uint8)((packed >> 8)  & 0xFF);
+        out->b = (Uint8)((packed >> 0)  & 0xFF);
+        return true;
+    }
+    zym_runtimeError(vm, "%s: color must be a list or a packed number", where);
+    return false;
+}
+
+// Parse a rect argument: a map with { x, y, w, h }. Returns true on
+// success; on failure, leaves *out untouched and raises a runtime error.
+bool parseRect(ZymVM* vm, ZymValue v, const char* where, SDL_Rect* out) {
+    if (!zym_isMap(v)) {
+        zym_runtimeError(vm, "%s: rect must be a map { x, y, w, h }", where);
+        return false;
+    }
+    double x=0, y=0, w=0, h=0;
+    if (!mapNum(vm, v, "x", &x) || !mapNum(vm, v, "y", &y) ||
+        !mapNum(vm, v, "w", &w) || !mapNum(vm, v, "h", &h)) {
+        zym_runtimeError(vm, "%s: rect needs numeric x, y, w, h", where);
+        return false;
+    }
+    out->x = (int)x; out->y = (int)y; out->w = (int)w; out->h = (int)h;
+    return true;
+}
+
+// Build a Zym { x, y, w, h } map from an SDL_Rect.
+ZymValue rectToZym(ZymVM* vm, const SDL_Rect& r) {
+    ZymValue m = zym_newMap(vm); zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "x", zym_newNumber(r.x));
+    zym_mapSet(vm, m, "y", zym_newNumber(r.y));
+    zym_mapSet(vm, m, "w", zym_newNumber(r.w));
+    zym_mapSet(vm, m, "h", zym_newNumber(r.h));
+    zym_popRoot(vm);
+    return m;
+}
+
+// Build a Zym [r, g, b, a] list of floats 0..1 from a packed pixel value.
+ZymValue colorToZym(ZymVM* vm, Uint8 r, Uint8 g, Uint8 b, Uint8 a) {
+    ZymValue l = zym_newList(vm); zym_pushRoot(vm, l);
+    zym_listAppend(vm, l, zym_newNumber(r / 255.0));
+    zym_listAppend(vm, l, zym_newNumber(g / 255.0));
+    zym_listAppend(vm, l, zym_newNumber(b / 255.0));
+    zym_listAppend(vm, l, zym_newNumber(a / 255.0));
+    zym_popRoot(vm);
+    return l;
+}
+
+SDL_BlendMode parseBlendMode(const std::string& s) {
+    if (s == "none")  return SDL_BLENDMODE_NONE;
+    if (s == "blend") return SDL_BLENDMODE_BLEND;
+    if (s == "add")   return SDL_BLENDMODE_ADD;
+    if (s == "mod")   return SDL_BLENDMODE_MOD;
+    if (s == "mul")   return SDL_BLENDMODE_MUL;
+    return SDL_BLENDMODE_BLEND;
+}
+
+const char* blendModeName(SDL_BlendMode m) {
+    switch (m) {
+        case SDL_BLENDMODE_NONE:  return "none";
+        case SDL_BLENDMODE_BLEND: return "blend";
+        case SDL_BLENDMODE_ADD:   return "add";
+        case SDL_BLENDMODE_MOD:   return "mod";
+        case SDL_BLENDMODE_MUL:   return "mul";
+        default:                  return "custom";
+    }
+}
+
+// Format-name helper. SDL3 ships SDL_GetPixelFormatName which returns
+// "SDL_PIXELFORMAT_RGBA32" etc; strip the prefix for the script API.
+const char* shortFormatName(SDL_PixelFormat fmt) {
+    const char* n = SDL_GetPixelFormatName(fmt);
+    if (!n) return "UNKNOWN";
+    const char* p = std::strstr(n, "SDL_PIXELFORMAT_");
+    return p ? p + std::strlen("SDL_PIXELFORMAT_") : n;
+}
+
+SDL_PixelFormat parseFormatName(const std::string& name, SDL_PixelFormat dflt) {
+    if (name.empty()) return dflt;
+    std::string full = "SDL_PIXELFORMAT_" + name;
+    // Quick lookup: probe a small set we actually support / are likely
+    // to encounter. SDL3 has no string→enum helper.
+    struct Row { const char* name; SDL_PixelFormat fmt; };
+    static const Row rows[] = {
+        { "SDL_PIXELFORMAT_RGBA32",  SDL_PIXELFORMAT_RGBA32  },
+        { "SDL_PIXELFORMAT_ARGB32",  SDL_PIXELFORMAT_ARGB32  },
+        { "SDL_PIXELFORMAT_BGRA32",  SDL_PIXELFORMAT_BGRA32  },
+        { "SDL_PIXELFORMAT_ABGR32",  SDL_PIXELFORMAT_ABGR32  },
+        { "SDL_PIXELFORMAT_RGB24",   SDL_PIXELFORMAT_RGB24   },
+        { "SDL_PIXELFORMAT_BGR24",   SDL_PIXELFORMAT_BGR24   },
+        { "SDL_PIXELFORMAT_RGBX32",  SDL_PIXELFORMAT_RGBX32  },
+        { "SDL_PIXELFORMAT_XRGB8888",SDL_PIXELFORMAT_XRGB8888},
+        { "SDL_PIXELFORMAT_INDEX8",  SDL_PIXELFORMAT_INDEX8  },
+    };
+    for (auto& r : rows) {
+        if (full == r.name) return r.fmt;
+    }
+    return dflt;
+}
+
+// ---- image I/O (module-level) --------------------------------------------
+
+// Forward: build a Surface instance map wrapping a SurfaceHandle*.
+ZymValue makeSurfaceInstance(ZymVM* vm, SurfaceHandle* s);
+
+// Decide the encoded format from an explicit format string (preferred)
+// or a path extension (fallback). Returns one of "png" / "jpg" / "bmp"
+// (lowercased) or "" on unrecognised input.
+std::string pickFormat(const std::string& explicitFmt, const std::string& path) {
+    auto lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+        return s;
+    };
+    if (!explicitFmt.empty()) {
+        std::string f = lower(explicitFmt);
+        if (f == "jpeg") f = "jpg";
+        return f;
+    }
+    // Fall back to extension parsing.
+    auto dot = path.find_last_of('.');
+    if (dot == std::string::npos) return "";
+    std::string f = lower(path.substr(dot + 1));
+    if (f == "jpeg") f = "jpg";
+    return f;
+}
+
+SDL_Surface* loadSurfaceFromIO(SDL_IOStream* io, const std::string& fmt) {
+    if (!io) return nullptr;
+    if (fmt == "bmp") {
+        return SDL_LoadBMP_IO(io, true);
+    }
+#if defined(ZYM_SDL_IMAGE_ENABLED)
+    // IMG_Load_IO sniffs the magic bytes for PNG/JPG/... when type is
+    // null; IMG_LoadTyped_IO forces a particular decoder. We prefer
+    // the typed variant when the script gave us a hint.
+    if (!fmt.empty()) {
+        return IMG_LoadTyped_IO(io, true, fmt.c_str());
+    }
+    return IMG_Load_IO(io, true);
+#else
+    SDL_CloseIO(io);
+    SDL_SetError("SDL_image not built (PNG/JPG decoders unavailable)");
+    return nullptr;
+#endif
+}
+
+bool saveSurfaceToIO(SDL_Surface* surf, SDL_IOStream* io, const std::string& fmt) {
+    if (!surf || !io) return false;
+    if (fmt == "bmp") {
+        return SDL_SaveBMP_IO(surf, io, true);
+    }
+#if defined(ZYM_SDL_IMAGE_ENABLED)
+    if (fmt == "png" || fmt.empty()) {
+        return IMG_SavePNG_IO(surf, io, true);
+    }
+    if (fmt == "jpg") {
+        return IMG_SaveJPG_IO(surf, io, true, 90);
+    }
+    SDL_CloseIO(io);
+    SDL_SetError("unsupported image format: %s", fmt.c_str());
+    return false;
+#else
+    SDL_CloseIO(io);
+    SDL_SetError("SDL_image not built; only BMP can be saved");
+    return false;
+#endif
+}
+
+ZymValue s_loadImage(ZymVM* vm, ZymValue /*self*/, ZymValue pv) {
+    std::string path;
+    if (!reqStr(vm, pv, "sdl.loadImage(path)", &path)) return ZYM_ERROR;
+    if (!ensureInit(SDL_INIT_VIDEO)) return zym_newNull();
+    std::string fmt = pickFormat("", path);
+    SDL_IOStream* io = SDL_IOFromFile(path.c_str(), "rb");
+    if (!io) return zym_newNull();
+    SDL_Surface* surf = loadSurfaceFromIO(io, fmt);
+    if (!surf) return zym_newNull();
+    auto* h = new SurfaceHandle();
+    h->surface = surf;
+    return makeSurfaceInstance(vm, h);
+}
+
+ZymValue s_loadImageFromBuffer(ZymVM* vm, ZymValue /*self*/, ZymValue bv, ZymValue fv) {
+    const char* data = nullptr;
+    size_t size = 0;
+    if (!readBufferBytes(vm, bv, &data, &size)) {
+        zym_runtimeError(vm, "sdl.loadImageFromBuffer(buf, format?): first arg must be a Buffer");
+        return ZYM_ERROR;
+    }
+    std::string fmt;
+    if (!zym_isNull(fv)) {
+        if (!reqStr(vm, fv, "sdl.loadImageFromBuffer(buf, format?)", &fmt)) return ZYM_ERROR;
+    }
+    fmt = pickFormat(fmt, "");
+    if (!ensureInit(SDL_INIT_VIDEO)) return zym_newNull();
+    SDL_IOStream* io = SDL_IOFromConstMem(data, size);
+    if (!io) return zym_newNull();
+    SDL_Surface* surf = loadSurfaceFromIO(io, fmt);
+    if (!surf) return zym_newNull();
+    auto* h = new SurfaceHandle();
+    h->surface = surf;
+    return makeSurfaceInstance(vm, h);
+}
+
+ZymValue s_saveImage(ZymVM* vm, ZymValue /*self*/, ZymValue sv, ZymValue pv, ZymValue fv) {
+    auto* sh = surfaceFromValue(vm, sv);
+    if (!sh || !sh->surface) {
+        zym_runtimeError(vm, "sdl.saveImage(surface, path, format?): first arg must be a Surface");
+        return ZYM_ERROR;
+    }
+    std::string path;
+    if (!reqStr(vm, pv, "sdl.saveImage(surface, path, format?)", &path)) return ZYM_ERROR;
+    std::string fmt;
+    if (!zym_isNull(fv)) {
+        if (!reqStr(vm, fv, "sdl.saveImage(surface, path, format?)", &fmt)) return ZYM_ERROR;
+    }
+    fmt = pickFormat(fmt, path);
+    if (fmt.empty()) fmt = "png";
+    SDL_IOStream* io = SDL_IOFromFile(path.c_str(), "wb");
+    if (!io) return zym_newBool(false);
+    return zym_newBool(saveSurfaceToIO(sh->surface, io, fmt));
+}
+
+ZymValue s_saveImageToBuffer(ZymVM* vm, ZymValue /*self*/, ZymValue sv, ZymValue fv) {
+    auto* sh = surfaceFromValue(vm, sv);
+    if (!sh || !sh->surface) {
+        zym_runtimeError(vm, "sdl.saveImageToBuffer(surface, format?): first arg must be a Surface");
+        return ZYM_ERROR;
+    }
+    std::string fmt;
+    if (!zym_isNull(fv)) {
+        if (!reqStr(vm, fv, "sdl.saveImageToBuffer(surface, format?)", &fmt)) return ZYM_ERROR;
+    }
+    fmt = pickFormat(fmt, "");
+    if (fmt.empty()) fmt = "png";
+    SDL_IOStream* io = SDL_IOFromDynamicMem();
+    if (!io) return zym_newNull();
+    // saveSurfaceToIO closes `io` on success or failure (closeio=true).
+    // We need the encoded bytes BEFORE the close happens — so on success
+    // we have to grab the dynamic memory pointer + size via the IO
+    // properties first, then let the save close it. Trick: stash the
+    // properties handle now so we can read it after the call... but
+    // SDL_CloseIO frees the dynamic buffer. So instead: do the write
+    // ourselves and avoid letting saveSurfaceToIO close the stream.
+    //
+    // Roll a copy of the save dispatch with closeio=false so we own
+    // the buffer extraction.
+    bool ok = false;
+    if (fmt == "bmp") {
+        ok = SDL_SaveBMP_IO(sh->surface, io, false);
+    }
+#if defined(ZYM_SDL_IMAGE_ENABLED)
+    else if (fmt == "png") {
+        ok = IMG_SavePNG_IO(sh->surface, io, false);
+    } else if (fmt == "jpg") {
+        ok = IMG_SaveJPG_IO(sh->surface, io, false, 90);
+    } else {
+        SDL_SetError("unsupported image format: %s", fmt.c_str());
+    }
+#else
+    else {
+        SDL_SetError("SDL_image not built; only BMP can be saved");
+    }
+#endif
+    if (!ok) {
+        SDL_CloseIO(io);
+        return zym_newNull();
+    }
+    // Read back the encoded bytes from the dynamic-memory IOStream.
+    Sint64 size64 = SDL_GetIOSize(io);
+    SDL_PropertiesID props = SDL_GetIOProperties(io);
+    void* mem = SDL_GetPointerProperty(props, SDL_PROP_IOSTREAM_DYNAMIC_MEMORY_POINTER, nullptr);
+    ZymValue buf = zym_newNull();
+    if (mem && size64 >= 0) {
+        buf = makeBufferFromBytes(vm, (const char*)mem, (size_t)size64);
+    }
+    SDL_CloseIO(io);
+    return buf;
+}
+
+// ---- Surface instance methods --------------------------------------------
+
+ZymValue sf_size(ZymVM* vm, ZymValue ctx) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.size()", &s)) return ZYM_ERROR;
+    ZymValue m = zym_newMap(vm); zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "w", zym_newNumber(s->surface->w));
+    zym_mapSet(vm, m, "h", zym_newNumber(s->surface->h));
+    zym_popRoot(vm);
+    return m;
+}
+
+ZymValue sf_format(ZymVM* vm, ZymValue ctx) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.format()", &s)) return ZYM_ERROR;
+    return strToZym(vm, shortFormatName(s->surface->format));
+}
+
+ZymValue sf_pitch(ZymVM* vm, ZymValue ctx) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.pitch()", &s)) return ZYM_ERROR;
+    return zym_newNumber(s->surface->pitch);
+}
+
+ZymValue sf_clone(ZymVM* vm, ZymValue ctx) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.clone()", &s)) return ZYM_ERROR;
+    SDL_Surface* dup = SDL_DuplicateSurface(s->surface);
+    if (!dup) return zym_newNull();
+    auto* h = new SurfaceHandle();
+    h->surface = dup;
+    return makeSurfaceInstance(vm, h);
+}
+
+ZymValue sf_convert(ZymVM* vm, ZymValue ctx, ZymValue fv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.convert(format)", &s)) return ZYM_ERROR;
+    std::string fmt;
+    if (!reqStr(vm, fv, "Surface.convert(format)", &fmt)) return ZYM_ERROR;
+    SDL_PixelFormat target = parseFormatName(fmt, SDL_PIXELFORMAT_UNKNOWN);
+    if (target == SDL_PIXELFORMAT_UNKNOWN) {
+        zym_runtimeError(vm, "Surface.convert: unknown format '%s'", fmt.c_str());
+        return ZYM_ERROR;
+    }
+    SDL_Surface* out = SDL_ConvertSurface(s->surface, target);
+    if (!out) return zym_newNull();
+    auto* h = new SurfaceHandle();
+    h->surface = out;
+    return makeSurfaceInstance(vm, h);
+}
+
+ZymValue sf_fill(ZymVM* vm, ZymValue ctx, ZymValue cv, ZymValue rv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.fill(color, rect?)", &s)) return ZYM_ERROR;
+    SDL_Color c;
+    if (!parseColor(vm, cv, "Surface.fill(color, rect?)", &c)) return ZYM_ERROR;
+    const SDL_PixelFormatDetails* det = SDL_GetPixelFormatDetails(s->surface->format);
+    Uint32 packed = det ? SDL_MapRGBA(det, nullptr, c.r, c.g, c.b, c.a) : 0;
+    if (zym_isNull(rv)) {
+        return zym_newBool(SDL_FillSurfaceRect(s->surface, nullptr, packed));
+    }
+    SDL_Rect r;
+    if (!parseRect(vm, rv, "Surface.fill(color, rect?)", &r)) return ZYM_ERROR;
+    return zym_newBool(SDL_FillSurfaceRect(s->surface, &r, packed));
+}
+
+ZymValue sf_clear(ZymVM* vm, ZymValue ctx, ZymValue cv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.clear(color?)", &s)) return ZYM_ERROR;
+    SDL_Color c = { 0, 0, 0, 0 };
+    if (!zym_isNull(cv)) {
+        if (!parseColor(vm, cv, "Surface.clear(color?)", &c)) return ZYM_ERROR;
+    }
+    const SDL_PixelFormatDetails* det = SDL_GetPixelFormatDetails(s->surface->format);
+    Uint32 packed = det ? SDL_MapRGBA(det, nullptr, c.r, c.g, c.b, c.a) : 0;
+    return zym_newBool(SDL_FillSurfaceRect(s->surface, nullptr, packed));
+}
+
+ZymValue sf_getPixel(ZymVM* vm, ZymValue ctx, ZymValue xv, ZymValue yv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.getPixel(x, y)", &s)) return ZYM_ERROR;
+    double dx, dy;
+    if (!reqNum(vm, xv, "Surface.getPixel(x, y)", &dx)) return ZYM_ERROR;
+    if (!reqNum(vm, yv, "Surface.getPixel(x, y)", &dy)) return ZYM_ERROR;
+    Uint8 r=0, g=0, b=0, a=255;
+    if (!SDL_ReadSurfacePixel(s->surface, (int)dx, (int)dy, &r, &g, &b, &a)) {
+        return zym_newNull();
+    }
+    return colorToZym(vm, r, g, b, a);
+}
+
+ZymValue sf_setPixel(ZymVM* vm, ZymValue ctx, ZymValue xv, ZymValue yv, ZymValue cv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.setPixel(x, y, color)", &s)) return ZYM_ERROR;
+    double dx, dy;
+    if (!reqNum(vm, xv, "Surface.setPixel(x, y, color)", &dx)) return ZYM_ERROR;
+    if (!reqNum(vm, yv, "Surface.setPixel(x, y, color)", &dy)) return ZYM_ERROR;
+    SDL_Color c;
+    if (!parseColor(vm, cv, "Surface.setPixel(x, y, color)", &c)) return ZYM_ERROR;
+    return zym_newBool(SDL_WriteSurfacePixel(s->surface, (int)dx, (int)dy, c.r, c.g, c.b, c.a));
+}
+
+ZymValue sf_blit(ZymVM* vm, ZymValue ctx, ZymValue srcV, ZymValue srcRectV, ZymValue dstRectV) {
+    SurfaceHandle* dst; if (!reqSurface(vm, ctx, "Surface.blit(src, srcRect?, dstRect?)", &dst)) return ZYM_ERROR;
+    SurfaceHandle* src = surfaceFromValue(vm, srcV);
+    if (!src || !src->surface) {
+        zym_runtimeError(vm, "Surface.blit: src must be a Surface");
+        return ZYM_ERROR;
+    }
+    SDL_Rect sR, dR;
+    const SDL_Rect* sP = nullptr;
+    const SDL_Rect* dP = nullptr;
+    if (!zym_isNull(srcRectV)) {
+        if (!parseRect(vm, srcRectV, "Surface.blit", &sR)) return ZYM_ERROR;
+        sP = &sR;
+    }
+    if (!zym_isNull(dstRectV)) {
+        if (!parseRect(vm, dstRectV, "Surface.blit", &dR)) return ZYM_ERROR;
+        dP = &dR;
+    }
+    // SDL_BlitSurface takes a non-const dstRect (it gets updated with
+    // clipped extent), but treats it as an in/out — passing a copy is
+    // fine.
+    SDL_Rect dRCopy;
+    SDL_Rect* dRWrite = nullptr;
+    if (dP) { dRCopy = *dP; dRWrite = &dRCopy; }
+    return zym_newBool(SDL_BlitSurface(src->surface, sP, dst->surface, dRWrite));
+}
+
+ZymValue sf_blitScaled(ZymVM* vm, ZymValue ctx, ZymValue srcV, ZymValue srcRectV, ZymValue dstRectV, ZymValue modeV) {
+    SurfaceHandle* dst; if (!reqSurface(vm, ctx, "Surface.blitScaled", &dst)) return ZYM_ERROR;
+    SurfaceHandle* src = surfaceFromValue(vm, srcV);
+    if (!src || !src->surface) {
+        zym_runtimeError(vm, "Surface.blitScaled: src must be a Surface");
+        return ZYM_ERROR;
+    }
+    SDL_Rect sR, dR;
+    const SDL_Rect* sP = nullptr;
+    const SDL_Rect* dP = nullptr;
+    if (!zym_isNull(srcRectV)) {
+        if (!parseRect(vm, srcRectV, "Surface.blitScaled", &sR)) return ZYM_ERROR;
+        sP = &sR;
+    }
+    if (!zym_isNull(dstRectV)) {
+        if (!parseRect(vm, dstRectV, "Surface.blitScaled", &dR)) return ZYM_ERROR;
+        dP = &dR;
+    }
+    SDL_ScaleMode mode = SDL_SCALEMODE_LINEAR;
+    if (!zym_isNull(modeV)) {
+        std::string m;
+        if (!reqStr(vm, modeV, "Surface.blitScaled", &m)) return ZYM_ERROR;
+        if (m == "nearest") mode = SDL_SCALEMODE_NEAREST;
+        else if (m == "linear") mode = SDL_SCALEMODE_LINEAR;
+    }
+    return zym_newBool(SDL_BlitSurfaceScaled(src->surface, sP, dst->surface, dP, mode));
+}
+
+ZymValue sf_setBlendMode(ZymVM* vm, ZymValue ctx, ZymValue mv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.setBlendMode(mode)", &s)) return ZYM_ERROR;
+    std::string m;
+    if (!reqStr(vm, mv, "Surface.setBlendMode(mode)", &m)) return ZYM_ERROR;
+    return zym_newBool(SDL_SetSurfaceBlendMode(s->surface, parseBlendMode(m)));
+}
+
+ZymValue sf_getBlendMode(ZymVM* vm, ZymValue ctx) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.getBlendMode()", &s)) return ZYM_ERROR;
+    SDL_BlendMode m = SDL_BLENDMODE_NONE;
+    SDL_GetSurfaceBlendMode(s->surface, &m);
+    return strToZym(vm, blendModeName(m));
+}
+
+ZymValue sf_setAlphaMod(ZymVM* vm, ZymValue ctx, ZymValue av) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.setAlphaMod(a)", &s)) return ZYM_ERROR;
+    double a;
+    if (!reqNum(vm, av, "Surface.setAlphaMod(a)", &a)) return ZYM_ERROR;
+    if (a < 0) a = 0; if (a > 255) a = 255;
+    return zym_newBool(SDL_SetSurfaceAlphaMod(s->surface, (Uint8)a));
+}
+
+ZymValue sf_setColorMod(ZymVM* vm, ZymValue ctx, ZymValue rv, ZymValue gv, ZymValue bv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.setColorMod(r,g,b)", &s)) return ZYM_ERROR;
+    double r, g, b;
+    if (!reqNum(vm, rv, "Surface.setColorMod(r,g,b)", &r)) return ZYM_ERROR;
+    if (!reqNum(vm, gv, "Surface.setColorMod(r,g,b)", &g)) return ZYM_ERROR;
+    if (!reqNum(vm, bv, "Surface.setColorMod(r,g,b)", &b)) return ZYM_ERROR;
+    auto cl = [](double v){ if (v<0) v=0; if (v>255) v=255; return (Uint8)v; };
+    return zym_newBool(SDL_SetSurfaceColorMod(s->surface, cl(r), cl(g), cl(b)));
+}
+
+ZymValue sf_setColorKey(ZymVM* vm, ZymValue ctx, ZymValue cv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.setColorKey(color|null)", &s)) return ZYM_ERROR;
+    if (zym_isNull(cv)) {
+        return zym_newBool(SDL_SetSurfaceColorKey(s->surface, false, 0));
+    }
+    SDL_Color c;
+    if (!parseColor(vm, cv, "Surface.setColorKey(color|null)", &c)) return ZYM_ERROR;
+    const SDL_PixelFormatDetails* det = SDL_GetPixelFormatDetails(s->surface->format);
+    Uint32 packed = det ? SDL_MapRGBA(det, nullptr, c.r, c.g, c.b, c.a) : 0;
+    return zym_newBool(SDL_SetSurfaceColorKey(s->surface, true, packed));
+}
+
+ZymValue sf_getClipRect(ZymVM* vm, ZymValue ctx) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.getClipRect()", &s)) return ZYM_ERROR;
+    SDL_Rect r{};
+    SDL_GetSurfaceClipRect(s->surface, &r);
+    return rectToZym(vm, r);
+}
+
+ZymValue sf_setClipRect(ZymVM* vm, ZymValue ctx, ZymValue rv) {
+    SurfaceHandle* s; if (!reqSurface(vm, ctx, "Surface.setClipRect(rect|null)", &s)) return ZYM_ERROR;
+    if (zym_isNull(rv)) {
+        return zym_newBool(SDL_SetSurfaceClipRect(s->surface, nullptr));
+    }
+    SDL_Rect r;
+    if (!parseRect(vm, rv, "Surface.setClipRect(rect|null)", &r)) return ZYM_ERROR;
+    return zym_newBool(SDL_SetSurfaceClipRect(s->surface, &r));
+}
+
+// applyMask: combine the alpha channel of `mask` into `dst` per `mode`.
+// Modes:
+//   "alpha"     : dst.a := dst.a * mask.a / 255          (default)
+//   "luminance" : dst.a := dst.a * luma(mask.rgb) / 255
+//   "key"       : dst.a := 0 where mask has its colorkey-equivalent (alpha 0 here)
+// Implementation walks both surfaces pixel-by-pixel via SDL_ReadSurfacePixel
+// / SDL_WriteSurfacePixel. Slow but correct on any surface format.
+ZymValue sf_applyMask(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue modeV) {
+    SurfaceHandle* dst; if (!reqSurface(vm, ctx, "Surface.applyMask(mask, mode?)", &dst)) return ZYM_ERROR;
+    SurfaceHandle* mask = surfaceFromValue(vm, maskV);
+    if (!mask || !mask->surface) {
+        zym_runtimeError(vm, "Surface.applyMask: mask must be a Surface");
+        return ZYM_ERROR;
+    }
+    std::string mode = "alpha";
+    if (!zym_isNull(modeV)) {
+        if (!reqStr(vm, modeV, "Surface.applyMask(mask, mode?)", &mode)) return ZYM_ERROR;
+    }
+    int w = std::min(dst->surface->w, mask->surface->w);
+    int h = std::min(dst->surface->h, mask->surface->h);
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            Uint8 dr=0, dg=0, db=0, da=255;
+            Uint8 mr=0, mg=0, mb=0, ma=255;
+            SDL_ReadSurfacePixel(dst->surface,  x, y, &dr, &dg, &db, &da);
+            SDL_ReadSurfacePixel(mask->surface, x, y, &mr, &mg, &mb, &ma);
+            Uint8 newA = da;
+            if (mode == "luminance") {
+                // BT.601 luma; cheap + perceptual enough for masks.
+                int luma = (77 * mr + 150 * mg + 29 * mb) >> 8;
+                newA = (Uint8)((da * luma) / 255);
+            } else if (mode == "key") {
+                newA = (ma == 0) ? 0 : da;
+            } else {
+                // "alpha" (default)
+                newA = (Uint8)((da * ma) / 255);
+            }
+            SDL_WriteSurfacePixel(dst->surface, x, y, dr, dg, db, newA);
+        }
+    }
+    return zym_newBool(true);
+}
+
+ZymValue sf_free(ZymVM* /*vm*/, ZymValue ctx) {
+    auto* s = unwrapSurface(ctx);
+    if (!s) return zym_newNull();
+    if (s->surface) {
+        SDL_DestroySurface(s->surface);
+        s->surface = nullptr;
+    }
+    return zym_newNull();
+}
+
+ZymValue makeSurfaceInstance(ZymVM* vm, SurfaceHandle* s) {
+    ZymValue ctx = zym_createNativeContext(vm, s, surfaceFinalizer);
+    zym_pushRoot(vm, ctx);
+
+    ZymValue obj = zym_newMap(vm);
+    zym_pushRoot(vm, obj);
+    zym_mapSet(vm, obj, "__surface__", ctx);
+
+#define M(name, sig, fn) do { \
+    ZymValue cl = zym_createNativeClosure(vm, sig, (void*)fn, ctx); \
+    zym_pushRoot(vm, cl); zym_mapSet(vm, obj, name, cl); zym_popRoot(vm); \
+} while (0)
+
+    M("size",         "size()",                       sf_size);
+    M("format",       "format()",                     sf_format);
+    M("pitch",        "pitch()",                      sf_pitch);
+    M("clone",        "clone()",                      sf_clone);
+    M("convert",      "convert(format)",              sf_convert);
+    M("fill",         "fill(color, rect)",            sf_fill);
+    M("clear",        "clear(color)",                 sf_clear);
+    M("getPixel",     "getPixel(x, y)",               sf_getPixel);
+    M("setPixel",     "setPixel(x, y, color)",        sf_setPixel);
+    M("blit",         "blit(src, srcRect, dstRect)",  sf_blit);
+    M("blitScaled",   "blitScaled(src, srcRect, dstRect, mode)", sf_blitScaled);
+    M("setBlendMode", "setBlendMode(mode)",           sf_setBlendMode);
+    M("getBlendMode", "getBlendMode()",               sf_getBlendMode);
+    M("setAlphaMod",  "setAlphaMod(a)",               sf_setAlphaMod);
+    M("setColorMod",  "setColorMod(r, g, b)",         sf_setColorMod);
+    M("setColorKey",  "setColorKey(color)",           sf_setColorKey);
+    M("getClipRect",  "getClipRect()",                sf_getClipRect);
+    M("setClipRect",  "setClipRect(rect)",            sf_setClipRect);
+    M("applyMask",    "applyMask(mask, mode)",        sf_applyMask);
+    M("free",         "free()",                       sf_free);
+
+#undef M
+
+    zym_popRoot(vm); // obj
+    zym_popRoot(vm); // ctx
+    return obj;
+}
+
+// ---- Surface module-level factories --------------------------------------
+
+ZymValue s_surfaceNew(ZymVM* vm, ZymValue /*self*/, ZymValue wv, ZymValue hv, ZymValue fv) {
+    double w, h;
+    if (!reqNum(vm, wv, "SDL.Surface.new(w, h, format?)", &w)) return ZYM_ERROR;
+    if (!reqNum(vm, hv, "SDL.Surface.new(w, h, format?)", &h)) return ZYM_ERROR;
+    SDL_PixelFormat fmt = SDL_PIXELFORMAT_RGBA32;
+    if (!zym_isNull(fv)) {
+        std::string f;
+        if (!reqStr(vm, fv, "SDL.Surface.new(w, h, format?)", &f)) return ZYM_ERROR;
+        fmt = parseFormatName(f, SDL_PIXELFORMAT_RGBA32);
+    }
+    SDL_Surface* surf = SDL_CreateSurface((int)w, (int)h, fmt);
+    if (!surf) return zym_newNull();
+    auto* sh = new SurfaceHandle();
+    sh->surface = surf;
+    return makeSurfaceInstance(vm, sh);
+}
+
+ZymValue s_surfaceFromBuffer(ZymVM* vm, ZymValue /*self*/, ZymValue bv, ZymValue wv, ZymValue hv, ZymValue pv, ZymValue fv) {
+    const char* data = nullptr;
+    size_t size = 0;
+    if (!readBufferBytes(vm, bv, &data, &size)) {
+        zym_runtimeError(vm, "SDL.Surface.fromBuffer: first arg must be a Buffer");
+        return ZYM_ERROR;
+    }
+    double w, h, pitch;
+    if (!reqNum(vm, wv, "SDL.Surface.fromBuffer", &w))     return ZYM_ERROR;
+    if (!reqNum(vm, hv, "SDL.Surface.fromBuffer", &h))     return ZYM_ERROR;
+    if (!reqNum(vm, pv, "SDL.Surface.fromBuffer", &pitch)) return ZYM_ERROR;
+    SDL_PixelFormat fmt = SDL_PIXELFORMAT_RGBA32;
+    if (!zym_isNull(fv)) {
+        std::string f;
+        if (!reqStr(vm, fv, "SDL.Surface.fromBuffer", &f)) return ZYM_ERROR;
+        fmt = parseFormatName(f, SDL_PIXELFORMAT_RGBA32);
+    }
+    // CreateSurfaceFrom doesn't copy — the caller's buffer must outlive
+    // the surface. Buffer values are GC-managed, so we copy into a
+    // freshly-owned SDL surface to keep lifetimes sane.
+    SDL_Surface* dst = SDL_CreateSurface((int)w, (int)h, fmt);
+    if (!dst) return zym_newNull();
+    int rowBytes = (int)pitch;
+    int copyRowBytes = std::min(rowBytes, dst->pitch);
+    for (int y = 0; y < (int)h; y++) {
+        if ((size_t)((y + 1) * rowBytes) > size) break;
+        std::memcpy(
+            (Uint8*)dst->pixels + y * dst->pitch,
+            data + y * rowBytes,
+            copyRowBytes);
+    }
+    auto* sh = new SurfaceHandle();
+    sh->surface = dst;
+    return makeSurfaceInstance(vm, sh);
+}
+
 } // namespace
 
 // ---- module assembly -----------------------------------------------------
@@ -557,8 +1285,22 @@ ZymValue nativeSdl_create(ZymVM* vm) {
     MOD(mousePos,    "mousePos()",                          s_mousePos)
     MOD(mouseButtons,"mouseButtons()",                      s_mouseButtons)
     MOD(modifiers,   "modifiers()",                         s_modifiers)
+    // Image I/O (PR 5).
+    MOD(loadImage,         "loadImage(path)",                 s_loadImage)
+    MOD(loadImageFromBuffer,"loadImageFromBuffer(buf, fmt)",  s_loadImageFromBuffer)
+    MOD(saveImage,         "saveImage(surf, path, fmt)",      s_saveImage)
+    MOD(saveImageToBuffer, "saveImageToBuffer(surf, fmt)",    s_saveImageToBuffer)
+    // Surface factories (live under the nested SDL.Surface namespace).
+    MOD(surfaceNew,        "new(w, h, fmt)",                  s_surfaceNew)
+    MOD(surfaceFromBuffer, "fromBuffer(buf, w, h, pitch, fmt)",s_surfaceFromBuffer)
 
 #undef MOD
+
+    // Nested namespace: SDL.Surface = { new, fromBuffer }.
+    ZymValue surfaceNs = zym_newMap(vm);
+    zym_pushRoot(vm, surfaceNs);
+    zym_mapSet(vm, surfaceNs, "new",        surfaceNew);
+    zym_mapSet(vm, surfaceNs, "fromBuffer", surfaceFromBuffer);
 
     ZymValue obj = zym_newMap(vm);
     zym_pushRoot(vm, obj);
@@ -575,9 +1317,14 @@ ZymValue nativeSdl_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "mousePos",     mousePos);
     zym_mapSet(vm, obj, "mouseButtons", mouseButtons);
     zym_mapSet(vm, obj, "modifiers",    modifiers);
+    zym_mapSet(vm, obj, "loadImage",          loadImage);
+    zym_mapSet(vm, obj, "loadImageFromBuffer", loadImageFromBuffer);
+    zym_mapSet(vm, obj, "saveImage",          saveImage);
+    zym_mapSet(vm, obj, "saveImageToBuffer",  saveImageToBuffer);
+    zym_mapSet(vm, obj, "Surface",      surfaceNs);
 
-    // context + 12 methods + obj = 14
-    for (int i = 0; i < 14; i++) zym_popRoot(vm);
+    // context + 18 closures + surfaceNs + obj = 21
+    for (int i = 0; i < 21; i++) zym_popRoot(vm);
 
     return obj;
 }

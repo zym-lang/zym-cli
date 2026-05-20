@@ -297,6 +297,109 @@ else()
     message(STATUS ">> ZYM_SDL: OFF — `sdl` native disabled")
 endif()
 
+# --- SDL_image (Slice 2 PR 5) -------------------------------------------
+# Vendored under third_party/sdl_image (git submodule, pinned to
+# release-3.4.4 — the SDL3-API-compatible major). Built as a small
+# static library `SDL3_image-static` and linked into zym when ZYM_SDL=ON.
+# This is the image-decoding satellite library; SDL3 core itself only
+# ships a built-in BMP loader (SDL_LoadBMP) — every other format
+# (PNG, JPG, ...) flows through SDL_image.
+#
+# Format trim per Slice 2 §2.0:
+#   * PNG: ON  (libpng-vendored, includes save support)
+#   * JPG: ON  (stb_image backend — header-only, no vendored libjpeg)
+#   * BMP: OFF (routed through SDL3 core's SDL_LoadBMP / SDL_SaveBMP)
+#   * Everything else (AVIF, GIF, JXL, LBM, PCX, PNM, QOI, SVG, TGA,
+#     TIF, WEBP, XCF, XPM, XV, ANI): OFF
+# This keeps the added size to libpng + zlib + the SDL_image dispatch
+# core (~250-400 KB target).
+#
+# No new CMake flag and no new catalog row: Surface / Texture /
+# UI.image* all ride on ZYM_SDL + ZYM_UI. A "SDL+UI but no image
+# support" configuration is a shape nobody asked for — see §2.0.
+if(ZYM_SDL)
+    # Build mode + install behaviour. Force a static build of
+    # SDL_image (matches SDL3-static); SDL_image's CMakeLists picks
+    # the shared vs static branch from the global BUILD_SHARED_LIBS,
+    # which CMake's cmake_dependent_option defaults to ON on
+    # Linux/macOS — wrong for us. Override it explicitly so
+    # SDL3_image-static is the target produced.
+    set(BUILD_SHARED_LIBS   OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_INSTALL    OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_SAMPLES    OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_TESTS      OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_VENDORED   ON  CACHE BOOL "" FORCE)
+    set(SDLIMAGE_DEPS_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_RELOCATABLE OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_WERROR     OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_STRICT     OFF CACHE BOOL "" FORCE)
+    # Backends. STB on for JPEG (header-only, no libjpeg-turbo
+    # vendored). WIC / ImageIO are gated by platform; explicit OFF
+    # so nothing platform-conditional sneaks in.
+    set(SDLIMAGE_BACKEND_STB     ON  CACHE BOOL "" FORCE)
+    set(SDLIMAGE_BACKEND_WIC     OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_BACKEND_IMAGEIO OFF CACHE BOOL "" FORCE)
+    # Format loaders: PNG + JPG only.
+    set(SDLIMAGE_PNG  ON  CACHE BOOL "" FORCE)
+    set(SDLIMAGE_JPG  ON  CACHE BOOL "" FORCE)
+    set(SDLIMAGE_BMP  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_ANI  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_AVIF OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_GIF  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_JXL  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_LBM  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_PCX  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_PNM  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_QOI  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_SVG  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_TGA  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_TIF  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_WEBP OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_XCF  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_XPM  OFF CACHE BOOL "" FORCE)
+    set(SDLIMAGE_XV   OFF CACHE BOOL "" FORCE)
+    # libpng for PNG (required for APNG too, but APNG is a free
+    # bonus since libpng handles it natively).
+    set(SDLIMAGE_PNG_LIBPNG ON CACHE BOOL "" FORCE)
+    # Save support: PNG + JPG (the two formats we load).
+    set(SDLIMAGE_PNG_SAVE ON CACHE BOOL "" FORCE)
+    set(SDLIMAGE_JPG_SAVE ON CACHE BOOL "" FORCE)
+    # Other *_SAVE knobs are dependent options gated on their
+    # loader being ON; with everything else OFF above they're
+    # already OFF and don't need explicit settings.
+    add_subdirectory(third_party/sdl_image EXCLUDE_FROM_ALL)
+    # SDL_image exports SDL3_image-static when BUILD_SHARED_LIBS=OFF
+    # (which we force above before add_subdirectory). Match the LTO
+    # / -fno-pie / -flto-mode propagation we do for SDL3-static so
+    # the final link is consistent.
+    if(TARGET SDL3_image-static)
+        set(ZYM_SDL_IMAGE_TARGET SDL3_image-static)
+    elseif(TARGET SDL3_image-shared)
+        set(ZYM_SDL_IMAGE_TARGET SDL3_image-shared)
+    else()
+        message(FATAL_ERROR ">> ZYM_SDL: SDL_image did not produce a SDL3_image-static or -shared target")
+    endif()
+    if(ZYM_LTO_OK)
+        set_property(TARGET ${ZYM_SDL_IMAGE_TARGET} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET ${ZYM_SDL_IMAGE_TARGET} PROPERTY INTERPROCEDURAL_OPTIMIZATION_TINY    TRUE)
+    endif()
+    target_compile_options(${ZYM_SDL_IMAGE_TARGET} PRIVATE
+            $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+    if(NOT WIN32)
+        target_compile_options(${ZYM_SDL_IMAGE_TARGET} PRIVATE -fno-pie)
+    endif()
+    # SDL_image's vendored libpng / zlib / stb TUs trip the same
+    # warnings as SDL3 itself; silence them so they don't drown out
+    # our own. Done as a private option on the static target.
+    target_compile_options(${ZYM_SDL_IMAGE_TARGET} PRIVATE -w)
+    target_link_libraries(zym PRIVATE ${ZYM_SDL_IMAGE_TARGET})
+    target_compile_definitions(zym PRIVATE ZYM_SDL_IMAGE_ENABLED=1)
+    message(STATUS ">> ZYM_SDL: SDL_image (release-3.4.4, PNG+JPG only) linked into zym via ${ZYM_SDL_IMAGE_TARGET}")
+    if(ZYM_LTO_OK)
+        message(STATUS ">> ZYM_SDL: LTO + Release flags propagated to ${ZYM_SDL_IMAGE_TARGET}")
+    endif()
+endif()
+
 # --- Dear ImGui (Slice 1 PR 2) ------------------------------------------
 # Vendored under third_party/imgui (git submodule, pinned to v1.92.8).
 # Built as a small static library `zym_imgui` so ImGui's compile flags

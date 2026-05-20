@@ -170,6 +170,18 @@ Returned by `SDL.createWindow`. Methods are invoked as
 | `win.setFullscreen(b)` | bool | Toggle fullscreen; returns the success flag from SDL. |
 | `win.setVSync(b)` | bool | Enable / disable VSync on the attached renderer. Returns `false` if no renderer is attached. |
 
+### Texture factories
+
+Textures are bound to the window's renderer; this is why these
+factories live on `Window` rather than on `SDL` itself. A texture
+created from one window cannot be drawn through another window's
+renderer.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `win.createTexture(w, h, opts)` | `Texture` \| `null` | Allocate a fresh `w`×`h` texture. `opts` is a map of `{ access, format, linkSurface }`. `access` ∈ `"static"` / `"streaming"` (default) / `"target"`; `format` is a pixel-format name like `"RGBA32"` (default); `linkSurface` is an optional `Surface` value to record as the texture's source so `tex.refresh()` works. Pass `null` for `opts` to take all defaults. |
+| `win.textureFromSurface(surface, opts)` | `Texture` \| `null` | Upload the pixels of `surface` to a new texture sized to match. `opts.link` (bool, default `false`) records `surface` as the texture's source so `tex.refresh()` and `tex.source()` work. Pass `null` for `opts` to default to "no link". |
+
 ### Lifetime
 
 | Method | Returns | Notes |
@@ -252,6 +264,82 @@ read/write API.
 `Surface` handles are also finalised automatically by the GC; an
 explicit `.free()` is the deterministic option, useful when working
 with large images.
+
+---
+
+## `Texture`
+
+Returned by `win.createTexture` / `win.textureFromSurface`. A
+`Texture` is a GPU-side image bound to a specific `Window`'s renderer
+— the "unit of display". Pixel composition happens upstream on a
+`Surface`; the texture is the thin "publish" wrapper that the
+renderer (and, in a later slice, ImGui via `UI.image`) samples.
+
+The texture handle is **stable for the lifetime of the texture** —
+`update` / `updateRect` / `refresh` mutate the GPU contents behind
+the handle, they never invalidate it. Any consumer that already has
+the handle will sample the updated pixels on its next draw without
+the script re-issuing the call. This is the property that makes the
+"hand a texture to UI once, then keep editing the source surface"
+pattern work in future slices.
+
+### Queries
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `tex.size()` | map | `{ w, h }` of the texture in pixels. |
+| `tex.source()` | `Surface` \| `null` | The linked source surface (only if the texture was created with `link: true` / `linkSurface: ...`); otherwise `null`. |
+
+### Publishing pixels
+
+`update` / `updateRect` are the explicit "publish" calls — they
+re-upload pixels from a `Surface` into the texture. The source
+surface does not need to be the one (if any) the texture was linked
+to; any surface will do, and the bridge converts pixel formats
+in-flight if they don't match.
+
+`refresh` is the ergonomic shorthand for the linked-surface workflow:
+"re-upload from my source surface, no need to pass it again". It
+requires the texture was created with `link: true` (or
+`linkSurface: ...`) and raises a runtime error otherwise.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `tex.update(surface, dstRect)` | bool | Full or partial re-upload. Pass `null` for `dstRect` to upload the whole surface. |
+| `tex.updateRect(surface, x, y, w, h)` | bool | Partial re-upload using an explicit dst rectangle. |
+| `tex.refresh(dirtyRect)` | bool | Re-upload from the linked source surface. Pass `null` for `dirtyRect` to refresh the whole texture. Errors if the texture was not created with `link`. |
+
+### Modes / mods
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `tex.setBlendMode(mode)` | bool | `mode` ∈ `"none"` / `"blend"` / `"add"` / `"mod"` / `"mul"`. |
+| `tex.setScaleMode(mode)` | bool | `mode` ∈ `"nearest"` / `"linear"` (default). |
+| `tex.setAlphaMod(a)` | bool | Per-draw alpha multiplier `0..255`. |
+| `tex.setColorMod(r, g, b)` | bool | Per-draw colour multiplier `0..255`. |
+
+### Lifetime
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `tex.free()` | null | Releases the GPU texture immediately. Safe to call more than once. |
+
+A `Texture` is also finalised automatically by the GC. When the
+owning `Window` (or its renderer) is destroyed before the texture's
+finaliser runs, the texture is considered "already torn down" and
+the finaliser is a no-op — using such a texture afterwards raises a
+clean Zym runtime error ("owning Window/renderer has been
+destroyed"), never UAF.
+
+### Note on `texture.window()`
+
+`texture.window()` is **not exposed in the current build.** The
+texture knows which renderer it was created against (and rejects
+draws after the owning window has been freed), but does not hand the
+script back the user-facing Window value. Scripts that need to
+correlate textures with windows should keep their own
+`{ window, texture }` records. This is the only Slice-2 §2.2 method
+intentionally omitted from the PR-6 surface.
 
 ---
 

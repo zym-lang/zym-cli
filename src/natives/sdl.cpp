@@ -251,6 +251,11 @@ ZymValue w_free(ZymVM* vm, ZymValue ctx) {
     return zym_newNull();
 }
 
+// Forward decls for Texture factories (defined later in this file,
+// after SurfaceHandle / parseRect / etc. are available).
+ZymValue w_createTexture(ZymVM* vm, ZymValue ctx, ZymValue wv, ZymValue hv, ZymValue ov);
+ZymValue w_textureFromSurface(ZymVM* vm, ZymValue ctx, ZymValue sv, ZymValue ov);
+
 ZymValue makeWindowInstance(ZymVM* vm, WindowHandle* w) {
     ZymValue ctx = zym_createNativeContext(vm, w, windowFinalizer);
     zym_pushRoot(vm, ctx);
@@ -278,6 +283,11 @@ ZymValue makeWindowInstance(ZymVM* vm, WindowHandle* w) {
     M("restore",       "restore()",       w_restore);
     M("setFullscreen", "setFullscreen(b)", w_setFullscreen);
     M("setVSync",      "setVSync(b)",     w_setVSync);
+    // Texture factories (Slice 2 PR 6). Renderer ownership is visible
+    // at the call site: textures are bound to the Window's renderer
+    // and can't be shared across windows.
+    M("createTexture",      "createTexture(w, h, opts)",       w_createTexture);
+    M("textureFromSurface", "textureFromSurface(surface, opts)", w_textureFromSurface);
     M("free",          "free()",          w_free);
 
 #undef M
@@ -1259,6 +1269,379 @@ ZymValue s_surfaceFromBuffer(ZymVM* vm, ZymValue /*self*/, ZymValue bv, ZymValue
     auto* sh = new SurfaceHandle();
     sh->surface = dst;
     return makeSurfaceInstance(vm, sh);
+}
+
+// ---- Texture (GPU-side, stable handle) -----------------------------------
+//
+// Textures are bound to a Window's renderer. Factories live on the
+// Window (win.createTexture / win.textureFromSurface) so renderer
+// ownership is visible at the call site. The handle is stable for the
+// lifetime of the Texture: update() / updateRect() / refresh() mutate
+// the GPU contents behind the handle, never invalidate it. This is
+// what makes the "user gives texture to UI once, then keeps editing the
+// upstream Surface" workflow work — see future/gui.md §2.0.
+//
+// linkSurface (opt-in via `link: true` on textureFromSurface, or the
+// `linkSurface` opt on createTexture) keeps the source Surface alive
+// via a back-reference Zym map slot so tex.refresh() is meaningful.
+// Without it, the texture is independent and texture.source() returns
+// null.
+
+struct TextureHandle {
+    SDL_Texture*  texture = nullptr;
+    // The owning Window's renderer. We capture the WindowHandle*
+    // rather than the SDL_Renderer* directly because we want to
+    // detect "renderer was destroyed under us" (use after free of
+    // the window) and raise a clean Zym runtime error.
+    WindowHandle* owner   = nullptr;
+    // Cached width/height so size() doesn't need a live renderer.
+    int w = 0;
+    int h = 0;
+    // Linked source surface (opt-in via `link: true` / `linkSurface`).
+    // Kept GC-rooted via the `__link__` slot on the Texture instance
+    // map so the Surface stays alive for the texture's lifetime; the
+    // pointer here is for tx_refresh / tx_source access without going
+    // back through the map.
+    SurfaceHandle* linkedSurface = nullptr;
+    // The Zym `Surface` value behind `linkedSurface`, returned as-is
+    // by tx_source() so scripts get the same map they passed in.
+    // ZymValue is a plain handle/word; storing it in a C struct does
+    // not root it for GC — we additionally stash it in the texture
+    // map's `__link__` slot for rooting (see makeTextureInstance).
+    ZymValue       linkedValue;
+};
+
+void textureFinalizer(ZymVM*, void* data) {
+    auto* t = static_cast<TextureHandle*>(data);
+    if (!t) return;
+    // Only destroy if the owning renderer is still alive — otherwise
+    // the SDL_Renderer already tore the texture down with it.
+    if (t->texture && t->owner && t->owner->renderer) {
+        SDL_DestroyTexture(t->texture);
+    }
+    delete t;
+}
+
+TextureHandle* unwrapTexture(ZymValue ctx) {
+    return static_cast<TextureHandle*>(zym_getNativeData(ctx));
+}
+
+bool reqTexture(ZymVM* vm, ZymValue ctx, const char* where, TextureHandle** out) {
+    auto* t = unwrapTexture(ctx);
+    if (!t || !t->texture) {
+        zym_runtimeError(vm, "%s: invalid Texture handle", where);
+        return false;
+    }
+    if (!t->owner || !t->owner->renderer) {
+        zym_runtimeError(vm, "%s: owning Window/renderer has been destroyed", where);
+        return false;
+    }
+    *out = t;
+    return true;
+}
+
+SDL_ScaleMode parseScaleMode(const std::string& s) {
+    if (s == "nearest") return SDL_SCALEMODE_NEAREST;
+    return SDL_SCALEMODE_LINEAR;
+}
+
+const char* scaleModeName(SDL_ScaleMode m) {
+    switch (m) {
+        case SDL_SCALEMODE_NEAREST: return "nearest";
+        case SDL_SCALEMODE_LINEAR:  return "linear";
+        default:                    return "linear";
+    }
+}
+
+// Forward: build a Texture instance map wrapping a TextureHandle*. The
+// optional `linkSurface` value (a Surface map) is stored in a hidden
+// `__link__` slot so it stays GC-reachable for the texture's lifetime.
+ZymValue makeTextureInstance(ZymVM* vm, TextureHandle* t, ZymValue linkSurface);
+
+ZymValue tx_size(ZymVM* vm, ZymValue ctx) {
+    TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.size()", &t)) return ZYM_ERROR;
+    ZymValue m = zym_newMap(vm); zym_pushRoot(vm, m);
+    zym_mapSet(vm, m, "w", zym_newNumber(t->w));
+    zym_mapSet(vm, m, "h", zym_newNumber(t->h));
+    zym_popRoot(vm);
+    return m;
+}
+
+ZymValue tx_source(ZymVM* /*vm*/, ZymValue ctx) {
+    auto* t = unwrapTexture(ctx);
+    if (!t || !t->linkedSurface) return zym_newNull();
+    return t->linkedValue;
+}
+
+// Internal helper: do a full or partial update from a Surface.
+bool textureUpdateFromSurface(SDL_Texture* tex, SDL_Surface* surf, const SDL_Rect* dstRect) {
+    if (!tex || !surf) return false;
+    // SDL_UpdateTexture needs the source pixels to match the texture's
+    // pixel format. If the surface format differs, convert in-flight.
+    SDL_PixelFormat texFmt;
+    {
+        // Query the texture's format via its properties.
+        SDL_PropertiesID props = SDL_GetTextureProperties(tex);
+        texFmt = (SDL_PixelFormat)SDL_GetNumberProperty(
+            props, SDL_PROP_TEXTURE_FORMAT_NUMBER, SDL_PIXELFORMAT_RGBA32);
+    }
+    SDL_Surface* src = surf;
+    SDL_Surface* tmp = nullptr;
+    if (src->format != texFmt) {
+        tmp = SDL_ConvertSurface(src, texFmt);
+        if (!tmp) return false;
+        src = tmp;
+    }
+    bool ok = false;
+    if (dstRect) {
+        // SDL_UpdateTexture's rect describes the region of the texture
+        // to write; pixels start at the top-left of `src` and step by
+        // src->pitch. We rely on the caller having sized the surface
+        // (or sub-rect) appropriately.
+        ok = SDL_UpdateTexture(tex, dstRect, src->pixels, src->pitch);
+    } else {
+        ok = SDL_UpdateTexture(tex, nullptr, src->pixels, src->pitch);
+    }
+    if (tmp) SDL_DestroySurface(tmp);
+    return ok;
+}
+
+ZymValue tx_update(ZymVM* vm, ZymValue ctx, ZymValue sv, ZymValue rv) {
+    TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.update(surface, dstRect?)", &t)) return ZYM_ERROR;
+    auto* sh = surfaceFromValue(vm, sv);
+    if (!sh || !sh->surface) {
+        zym_runtimeError(vm, "Texture.update: first arg must be a Surface");
+        return ZYM_ERROR;
+    }
+    if (zym_isNull(rv)) {
+        return zym_newBool(textureUpdateFromSurface(t->texture, sh->surface, nullptr));
+    }
+    SDL_Rect r;
+    if (!parseRect(vm, rv, "Texture.update(surface, dstRect?)", &r)) return ZYM_ERROR;
+    return zym_newBool(textureUpdateFromSurface(t->texture, sh->surface, &r));
+}
+
+ZymValue tx_updateRect(ZymVM* vm, ZymValue ctx, ZymValue sv, ZymValue xv, ZymValue yv, ZymValue wv, ZymValue hv) {
+    TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.updateRect(surface, x, y, w, h)", &t)) return ZYM_ERROR;
+    auto* sh = surfaceFromValue(vm, sv);
+    if (!sh || !sh->surface) {
+        zym_runtimeError(vm, "Texture.updateRect: first arg must be a Surface");
+        return ZYM_ERROR;
+    }
+    double x, y, w, h;
+    if (!reqNum(vm, xv, "Texture.updateRect", &x)) return ZYM_ERROR;
+    if (!reqNum(vm, yv, "Texture.updateRect", &y)) return ZYM_ERROR;
+    if (!reqNum(vm, wv, "Texture.updateRect", &w)) return ZYM_ERROR;
+    if (!reqNum(vm, hv, "Texture.updateRect", &h)) return ZYM_ERROR;
+    SDL_Rect r{ (int)x, (int)y, (int)w, (int)h };
+    return zym_newBool(textureUpdateFromSurface(t->texture, sh->surface, &r));
+}
+
+// refresh() re-uploads from the linked source surface. Requires that
+// the texture was created with `link: true` / `linkSurface: ...`. The
+// linked surface is held both as a SurfaceHandle* (for direct access)
+// and as a Zym Surface value stashed in the texture map's `__link__`
+// slot so the GC keeps it alive — see makeTextureInstance.
+ZymValue tx_refresh(ZymVM* vm, ZymValue ctx, ZymValue rv) {
+    TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.refresh(dirtyRect?)", &t)) return ZYM_ERROR;
+    if (!t->linkedSurface || !t->linkedSurface->surface) {
+        zym_runtimeError(vm, "Texture.refresh: texture has no linked Surface (create with { link: true })");
+        return ZYM_ERROR;
+    }
+    if (zym_isNull(rv)) {
+        return zym_newBool(textureUpdateFromSurface(t->texture, t->linkedSurface->surface, nullptr));
+    }
+    SDL_Rect r;
+    if (!parseRect(vm, rv, "Texture.refresh(dirtyRect?)", &r)) return ZYM_ERROR;
+    return zym_newBool(textureUpdateFromSurface(t->texture, t->linkedSurface->surface, &r));
+}
+
+ZymValue tx_setBlendMode(ZymVM* vm, ZymValue ctx, ZymValue mv) {
+    TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.setBlendMode(mode)", &t)) return ZYM_ERROR;
+    std::string m;
+    if (!reqStr(vm, mv, "Texture.setBlendMode(mode)", &m)) return ZYM_ERROR;
+    return zym_newBool(SDL_SetTextureBlendMode(t->texture, parseBlendMode(m)));
+}
+
+ZymValue tx_setScaleMode(ZymVM* vm, ZymValue ctx, ZymValue mv) {
+    TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.setScaleMode(mode)", &t)) return ZYM_ERROR;
+    std::string m;
+    if (!reqStr(vm, mv, "Texture.setScaleMode(mode)", &m)) return ZYM_ERROR;
+    return zym_newBool(SDL_SetTextureScaleMode(t->texture, parseScaleMode(m)));
+}
+
+ZymValue tx_setAlphaMod(ZymVM* vm, ZymValue ctx, ZymValue av) {
+    TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.setAlphaMod(a)", &t)) return ZYM_ERROR;
+    double a;
+    if (!reqNum(vm, av, "Texture.setAlphaMod(a)", &a)) return ZYM_ERROR;
+    int clamped = (int)a; if (clamped < 0) clamped = 0; if (clamped > 255) clamped = 255;
+    return zym_newBool(SDL_SetTextureAlphaMod(t->texture, (Uint8)clamped));
+}
+
+ZymValue tx_setColorMod(ZymVM* vm, ZymValue ctx, ZymValue rv, ZymValue gv, ZymValue bv) {
+    TextureHandle* t; if (!reqTexture(vm, ctx, "Texture.setColorMod(r, g, b)", &t)) return ZYM_ERROR;
+    double r, g, b;
+    if (!reqNum(vm, rv, "Texture.setColorMod", &r)) return ZYM_ERROR;
+    if (!reqNum(vm, gv, "Texture.setColorMod", &g)) return ZYM_ERROR;
+    if (!reqNum(vm, bv, "Texture.setColorMod", &b)) return ZYM_ERROR;
+    auto clamp = [](double d){ int i=(int)d; return (Uint8)(i<0?0:(i>255?255:i)); };
+    return zym_newBool(SDL_SetTextureColorMod(t->texture, clamp(r), clamp(g), clamp(b)));
+}
+
+ZymValue tx_free(ZymVM* /*vm*/, ZymValue ctx) {
+    auto* t = unwrapTexture(ctx);
+    if (!t) return zym_newNull();
+    if (t->texture && t->owner && t->owner->renderer) {
+        SDL_DestroyTexture(t->texture);
+    }
+    t->texture = nullptr;
+    return zym_newNull();
+}
+
+ZymValue makeTextureInstance(ZymVM* vm, TextureHandle* t, ZymValue linkSurface) {
+    ZymValue ctx = zym_createNativeContext(vm, t, textureFinalizer);
+    zym_pushRoot(vm, ctx);
+
+    ZymValue obj = zym_newMap(vm);
+    zym_pushRoot(vm, obj);
+    zym_mapSet(vm, obj, "__tex__", ctx);
+    // Stash the linked Surface (if any) so it stays GC-reachable for
+    // the texture's lifetime. tx_source / tx_refresh look here.
+    zym_mapSet(vm, obj, "__link__", linkSurface);
+
+#define M(name, sig, fn) do { \
+    ZymValue cl = zym_createNativeClosure(vm, sig, (void*)fn, ctx); \
+    zym_pushRoot(vm, cl); zym_mapSet(vm, obj, name, cl); zym_popRoot(vm); \
+} while (0)
+
+    M("size",         "size()",                          tx_size);
+    M("update",       "update(surface, dstRect)",        tx_update);
+    M("updateRect",   "updateRect(surface, x, y, w, h)", tx_updateRect);
+    M("refresh",      "refresh(dirtyRect)",              tx_refresh);
+    M("source",       "source()",                        tx_source);
+    M("setBlendMode", "setBlendMode(mode)",              tx_setBlendMode);
+    M("setScaleMode", "setScaleMode(mode)",              tx_setScaleMode);
+    M("setAlphaMod",  "setAlphaMod(a)",                  tx_setAlphaMod);
+    M("setColorMod",  "setColorMod(r, g, b)",            tx_setColorMod);
+    M("free",         "free()",                          tx_free);
+
+#undef M
+
+    zym_popRoot(vm); // obj
+    zym_popRoot(vm); // ctx
+    return obj;
+}
+
+// Parse the `opts` map for createTexture. Returns the SDL_TextureAccess
+// + format (defaults: STREAMING + RGBA32), and reads `linkSurface` /
+// `link` flags. The actual Surface back-reference is plumbed via the
+// `outLink` out-param (left as null when no link is requested).
+bool parseTextureOpts(ZymVM* vm, ZymValue ov, SDL_TextureAccess* outAccess,
+                      SDL_PixelFormat* outFormat, ZymValue* outLink,
+                      const char* where) {
+    *outAccess = SDL_TEXTUREACCESS_STREAMING;
+    *outFormat = SDL_PIXELFORMAT_RGBA32;
+    *outLink   = zym_newNull();
+    if (!zym_isMap(ov)) return true;
+    if (zym_mapHas(ov, "access")) {
+        ZymValue av = zym_mapGet(vm, ov, "access");
+        std::string a;
+        if (!reqStr(vm, av, where, &a)) return false;
+        if      (a == "static")    *outAccess = SDL_TEXTUREACCESS_STATIC;
+        else if (a == "streaming") *outAccess = SDL_TEXTUREACCESS_STREAMING;
+        else if (a == "target")    *outAccess = SDL_TEXTUREACCESS_TARGET;
+        else {
+            zym_runtimeError(vm, "%s: unknown access mode '%s' (use static/streaming/target)", where, a.c_str());
+            return false;
+        }
+    }
+    if (zym_mapHas(ov, "format")) {
+        ZymValue fv = zym_mapGet(vm, ov, "format");
+        if (!zym_isNull(fv)) {
+            std::string f;
+            if (!reqStr(vm, fv, where, &f)) return false;
+            *outFormat = parseFormatName(f, SDL_PIXELFORMAT_RGBA32);
+        }
+    }
+    if (zym_mapHas(ov, "linkSurface")) {
+        ZymValue lv = zym_mapGet(vm, ov, "linkSurface");
+        if (!zym_isNull(lv)) {
+            // Validate it's actually a Surface — refuse silently-bad input.
+            if (!surfaceFromValue(vm, lv)) {
+                zym_runtimeError(vm, "%s: linkSurface is not a Surface value", where);
+                return false;
+            }
+            *outLink = lv;
+        }
+    }
+    return true;
+}
+
+// Window.createTexture(w, h, opts?) — bound on the Window instance.
+ZymValue w_createTexture(ZymVM* vm, ZymValue ctx, ZymValue wv, ZymValue hv, ZymValue ov) {
+    WindowHandle* wh;
+    if (!reqWindow(vm, ctx, "win.createTexture(w, h, opts?)", &wh)) return ZYM_ERROR;
+    if (!wh->renderer) {
+        zym_runtimeError(vm, "win.createTexture: window has no renderer");
+        return ZYM_ERROR;
+    }
+    double w, h;
+    if (!reqNum(vm, wv, "win.createTexture(w, h, opts?)", &w)) return ZYM_ERROR;
+    if (!reqNum(vm, hv, "win.createTexture(w, h, opts?)", &h)) return ZYM_ERROR;
+    SDL_TextureAccess access;
+    SDL_PixelFormat   format;
+    ZymValue          link;
+    if (!parseTextureOpts(vm, ov, &access, &format, &link, "win.createTexture")) return ZYM_ERROR;
+
+    SDL_Texture* tex = SDL_CreateTexture(wh->renderer, format, access, (int)w, (int)h);
+    if (!tex) return zym_newNull();
+    auto* th = new TextureHandle();
+    th->texture = tex;
+    th->owner   = wh;
+    th->w       = (int)w;
+    th->h       = (int)h;
+    if (!zym_isNull(link)) {
+        th->linkedSurface = surfaceFromValue(vm, link);
+        th->linkedValue   = link;
+    } else {
+        th->linkedValue = zym_newNull();
+    }
+    return makeTextureInstance(vm, th, link);
+}
+
+// Window.textureFromSurface(surface, opts?) — bound on the Window
+// instance. `opts.link = true` keeps the source Surface as a GC-rooted
+// back-reference so tex.refresh() / tex.source() work.
+ZymValue w_textureFromSurface(ZymVM* vm, ZymValue ctx, ZymValue sv, ZymValue ov) {
+    WindowHandle* wh;
+    if (!reqWindow(vm, ctx, "win.textureFromSurface(surface, opts?)", &wh)) return ZYM_ERROR;
+    if (!wh->renderer) {
+        zym_runtimeError(vm, "win.textureFromSurface: window has no renderer");
+        return ZYM_ERROR;
+    }
+    auto* sh = surfaceFromValue(vm, sv);
+    if (!sh || !sh->surface) {
+        zym_runtimeError(vm, "win.textureFromSurface: first arg must be a Surface");
+        return ZYM_ERROR;
+    }
+    bool link = false;
+    if (zym_isMap(ov)) {
+        link = mapBool(vm, ov, "link", false);
+    }
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(wh->renderer, sh->surface);
+    if (!tex) return zym_newNull();
+    auto* th = new TextureHandle();
+    th->texture = tex;
+    th->owner   = wh;
+    th->w       = sh->surface->w;
+    th->h       = sh->surface->h;
+    if (link) {
+        th->linkedSurface = sh;
+        th->linkedValue   = sv;
+    } else {
+        th->linkedValue = zym_newNull();
+    }
+    return makeTextureInstance(vm, th, link ? sv : zym_newNull());
 }
 
 } // namespace

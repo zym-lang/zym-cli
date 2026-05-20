@@ -702,8 +702,8 @@ the lifetime of the window that owns the context.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.loadFont(path, sizePx)` | Font \| null | Load a TTF/OTF at the given pixel size into the active context's atlas. Returns `null` and stamps `UI.lastError()` on failure (missing file, bad font, no active context). |
-| `UI.loadFont(path, sizePx, opts)` | Font \| null | Same, with an options map. `opts` keys are **currently ignored** — the map slot is reserved for future glyph-range / merge / oversampling options. Passing `{}` or `null` is the same as the 2-arg form. |
+| `UI.loadFont(src, sizePx)` | Font \| null | Load a TTF/OTF at the given pixel size into the active context's atlas. `src` is either a filesystem path (string) **or** a `Buffer` holding the raw font bytes — see "Loading from a Buffer" below. Returns `null` and stamps `UI.lastError()` on failure (missing file, bad font, empty buffer, no active context). Passing anything other than a string or Buffer raises a Zym runtime error. |
+| `UI.loadFont(src, sizePx, opts)` | Font \| null | Same, with an options map. `opts` keys are **currently ignored** — the map slot is reserved for future glyph-range / merge / oversampling options. Passing `{}` or `null` is the same as the 2-arg form. |
 | `UI.defaultFont()` | Font | Handle to the context's default font (ProggyClean unless something else was loaded earlier). |
 | `UI.withFont(font, body)` | null | Push `font` for the duration of `body`. Uses the size the font was loaded at. |
 
@@ -726,6 +726,41 @@ UI.frame(win, func() {
     UI.text("Body text in the surrounding font.")
 })
 ```
+
+#### Loading from a Buffer
+
+The string-path form forwards to `AddFontFromFileTTF` and is hardcoded
+to the filesystem. To load fonts that don't live on disk — bytes
+unpacked from a `.zpk`, downloaded over the network, or embedded as a
+decoded base64 blob — pass a `Buffer` of TTF/OTF bytes instead. The
+bridge forwards to `AddFontFromMemoryTTF` and copies the bytes into
+an ImGui-owned allocation, so:
+
+- The atlas owns its own copy of the font data and frees it on
+  context shutdown.
+- The script's `Buffer` is independent — it can be mutated, freed, or
+  go out of scope after `UI.loadFont` returns without affecting the
+  loaded font.
+
+```zym
+var titleFont = null
+
+UI.frame(win, func() {
+    if (titleFont == null) {
+        // e.g. read TTF bytes out of a zpk into a Buffer:
+        var bytes = Pack.read("fonts/Inter.ttf")   // returns a Buffer
+        titleFont = UI.loadFont(bytes, 28)
+        if (titleFont == null) { titleFont = UI.defaultFont() }
+    }
+    UI.withFont(titleFont, func() { UI.text("Headline") })
+})
+```
+
+An empty or zero-byte Buffer returns `null` and stamps
+`UI.lastError()` with `"ui.loadFont: empty font Buffer"`. A non-string,
+non-Buffer first argument raises a Zym runtime error rather than a
+quiet `null`, because that's a script-side type bug — there's no
+fallback the native could reasonably try.
 
 ---
 

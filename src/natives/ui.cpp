@@ -2003,20 +2003,32 @@ ZymValue makeFontInstance(ZymVM* vm, ImFont* font) {
     return obj;
 }
 
-// `UI.loadFont(path, sizePx, opts?) -> Font | null`
+// `readBufferBytes` (declared in natives.hpp) is the Buffer<->bytes
+// bridge — it lets `UI.loadFont` accept either a filesystem path
+// (string) or an in-memory font Buffer (TTF/OTF bytes loaded from a
+// zpk, the network, an embedded asset, etc.) without pulling in the
+// Godot `PackedByteArray` header.
+
+// `UI.loadFont(pathOrBuffer, sizePx, opts?) -> Font | null`
 //
 // Loads a TTF/OTF font into the current ImGui context's atlas at the
-// requested size. Requires an active ImGui context — call from inside
-// `UI.frame(...)` so a window has lazily created one, or after any
-// other `UI.*` call has done so. On failure returns null and stamps
-// `UI.lastError()`. `opts` is currently ignored (reserved for future
-// glyph-range / merge options).
-ZymValue u_loadFont3(ZymVM* vm, ZymValue, ZymValue pathV, ZymValue sizeV,
+// requested size. The first argument is either:
+//   - a filesystem path (string): forwarded to AddFontFromFileTTF.
+//   - a Buffer of font bytes: forwarded to AddFontFromMemoryTTF after
+//     copying the bytes into an ImGui-owned allocation (the atlas
+//     takes ownership and frees on shutdown). This lets scripts load
+//     fonts that don't live on disk — e.g. unpacked from a `.zpk`,
+//     downloaded over the network, or embedded as a string-literal
+//     base64 blob decoded to a Buffer.
+// Requires an active ImGui context — call from inside `UI.frame(...)`
+// so a window has lazily created one, or after any other `UI.*` call
+// has done so. On failure returns null and stamps `UI.lastError()`.
+// `opts` is currently ignored (reserved for future glyph-range /
+// merge / oversampling options).
+ZymValue u_loadFont3(ZymVM* vm, ZymValue, ZymValue srcV, ZymValue sizeV,
                     ZymValue /*optsV*/) {
-    std::string path;
-    if (!reqStr(vm, pathV, "ui.loadFont(path, sizePx)", &path)) return ZYM_ERROR;
     double size;
-    if (!reqNum(vm, sizeV, "ui.loadFont(path, sizePx)", &size)) return ZYM_ERROR;
+    if (!reqNum(vm, sizeV, "ui.loadFont(src, sizePx)", &size)) return ZYM_ERROR;
     if (!ImGui::GetCurrentContext()) {
         setError("ui.loadFont: no active ImGui context (call inside ui.frame)");
         return zym_newNull();
@@ -2026,16 +2038,46 @@ ZymValue u_loadFont3(ZymVM* vm, ZymValue, ZymValue pathV, ZymValue sizeV,
         setError("ui.loadFont: no font atlas on this context");
         return zym_newNull();
     }
-    ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), (float)size);
-    if (!font) {
-        setError("ui.loadFont: AddFontFromFileTTF failed");
-        return zym_newNull();
+
+    ImFont* font = nullptr;
+    if (zym_isString(srcV)) {
+        const char* path = zym_asCString(srcV);
+        font = io.Fonts->AddFontFromFileTTF(path, (float)size);
+        if (!font) {
+            setError("ui.loadFont: AddFontFromFileTTF failed");
+            return zym_newNull();
+        }
+    } else {
+        const char* bytes = nullptr;
+        size_t nbytes = 0;
+        if (!readBufferBytes(vm, srcV, &bytes, &nbytes)) {
+            zym_runtimeError(vm,
+                "ui.loadFont(src, sizePx): src must be a string path or a Buffer");
+            return ZYM_ERROR;
+        }
+        if (!bytes || nbytes == 0) {
+            setError("ui.loadFont: empty font Buffer");
+            return zym_newNull();
+        }
+        // ImGui's AddFontFromMemoryTTF takes ownership of `font_data`
+        // by default (frees via IM_FREE on atlas destruction). Copy
+        // into an ImGui-owned allocation so the caller's Buffer stays
+        // independently mutable / collectable.
+        void* copy = IM_ALLOC(nbytes);
+        memcpy(copy, bytes, nbytes);
+        font = io.Fonts->AddFontFromMemoryTTF(copy, (int)nbytes, (float)size);
+        if (!font) {
+            // Atlas didn't accept it — free our copy and report.
+            IM_FREE(copy);
+            setError("ui.loadFont: AddFontFromMemoryTTF failed");
+            return zym_newNull();
+        }
     }
     return makeFontInstance(vm, font);
 }
 
-ZymValue u_loadFont2(ZymVM* vm, ZymValue self, ZymValue pathV, ZymValue sizeV) {
-    return u_loadFont3(vm, self, pathV, sizeV, zym_newNull());
+ZymValue u_loadFont2(ZymVM* vm, ZymValue self, ZymValue srcV, ZymValue sizeV) {
+    return u_loadFont3(vm, self, srcV, sizeV, zym_newNull());
 }
 
 // `UI.defaultFont() -> Font` — wraps the ImGui context's first/default
@@ -4019,10 +4061,11 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(withStyleVar,   "withStyleVar(map, body)",   u_withStyleVar)
     MOD(withFont,       "withFont(font, body)",      u_withFont)
 
-    // loadFont: 2-arg (path, sizePx) or 3-arg (path, sizePx, opts)
-    ZymValue loadFont2v = zym_createNativeClosure(vm, "loadFont(path, sizePx)",       (void*)u_loadFont2, context);
+    // loadFont: 2-arg (src, sizePx) or 3-arg (src, sizePx, opts). `src`
+    // is either a filesystem path (string) or a Buffer of TTF/OTF bytes.
+    ZymValue loadFont2v = zym_createNativeClosure(vm, "loadFont(src, sizePx)",       (void*)u_loadFont2, context);
     zym_pushRoot(vm, loadFont2v);
-    ZymValue loadFont3v = zym_createNativeClosure(vm, "loadFont(path, sizePx, opts)", (void*)u_loadFont3, context);
+    ZymValue loadFont3v = zym_createNativeClosure(vm, "loadFont(src, sizePx, opts)", (void*)u_loadFont3, context);
     zym_pushRoot(vm, loadFont3v);
     ZymValue loadFont   = zym_createDispatcher(vm);
     zym_pushRoot(vm, loadFont);

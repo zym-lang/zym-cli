@@ -93,7 +93,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(zym_core)
 
-set(ZYM_FRAMES_MAX 1024 CACHE STRING "Max VM call frames (overrides FRAMES_MAX in zym_core/src/vm.h)")
+set(ZYM_FRAMES_MAX 4096 CACHE STRING "Max VM call frames (overrides FRAMES_MAX in zym_core/src/vm.h)")
 target_compile_definitions(zym_core PUBLIC FRAMES_MAX=${ZYM_FRAMES_MAX})
 
 set(ZYM_STACK_MAX 262144 CACHE STRING "Max VM value stack size (overrides STACK_MAX in zym_core/src/vm.h)")

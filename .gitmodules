@@ -14,3 +14,6 @@
 	path = third_party/sdl_image
 	url = https://github.com/libsdl-org/SDL_image.git
 	branch = release-3.4.4
+[submodule "third_party/implot"]
+	path = third_party/implot
+	url = https://github.com/epezent/implot

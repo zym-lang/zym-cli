@@ -36,7 +36,7 @@ elseif(PGO_MODE STREQUAL "USE")
 endif()
 
 set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION ON)
+set(USE_COMPRESSION OFF)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
 set(RUNTIME_ONLY OFF)
@@ -455,6 +455,49 @@ if(ZYM_UI)
     endif()
 else()
     message(STATUS ">> ZYM_UI: OFF — `ui` native disabled")
+endif()
+
+# --- ImPlot (Slice 1 PR 2d) ---------------------------------------------
+# Vendored under third_party/implot (git submodule, pinned to v1.0).
+# Built as a small static library `zym_implot` that links PUBLICLY
+# against `zym_imgui` (ImPlot is a pure ImGui addon — it draws via
+# ImDrawList and inherits the SDL3 include path / backend the rest of
+# the UI stack already uses).
+#
+# Sources: ImPlot core (implot.cpp) + items (implot_items.cpp).
+# implot_demo.cpp is intentionally omitted — Slice 1 PR 2d ships only
+# the plotting surface, no demo gallery (matches how we handle
+# imgui_demo.cpp's exclusion would-be-but-isn't, see note above:
+# we currently DO ship imgui_demo.cpp for parity with widgets; the
+# ImPlot demo is much larger (~200 KB) and not wired through `ui.*`).
+if(ZYM_UI)
+    set(ZYM_IMPLOT_DIR "${CMAKE_SOURCE_DIR}/third_party/implot")
+    add_library(zym_implot STATIC
+            "${ZYM_IMPLOT_DIR}/implot.cpp"
+            "${ZYM_IMPLOT_DIR}/implot_items.cpp"
+    )
+    target_include_directories(zym_implot PUBLIC "${ZYM_IMPLOT_DIR}")
+    # PUBLIC link to zym_imgui propagates ImGui + SDL3 includes to any
+    # TU that pulls in <implot.h>.
+    target_link_libraries(zym_implot PUBLIC zym_imgui)
+    # Same LTO / -fno-pie / -flto-mode propagation as zym_imgui.
+    if(ZYM_LTO_OK)
+        set_property(TARGET zym_implot PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET zym_implot PROPERTY INTERPROCEDURAL_OPTIMIZATION_TINY TRUE)
+    endif()
+    target_compile_options(zym_implot PRIVATE
+            $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+    if(NOT WIN32)
+        target_compile_options(zym_implot PRIVATE -fno-pie)
+    endif()
+    # Silence ImPlot's own warnings the same way we do for ImGui.
+    target_compile_options(zym_implot PRIVATE -w)
+    target_link_libraries(zym PRIVATE zym_implot)
+    target_compile_definitions(zym PRIVATE ZYM_IMPLOT_ENABLED=1)
+    message(STATUS ">> ZYM_UI: ON — vendored ImPlot (v1.0) linked into zym via zym_implot")
+    if(ZYM_LTO_OK)
+        message(STATUS ">> ZYM_UI: LTO + Release flags propagated to zym_implot")
+    endif()
 endif()
 
 if(RUNTIME_ONLY)

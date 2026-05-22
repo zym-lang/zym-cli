@@ -1305,8 +1305,401 @@ var pageAbout = func() {
 }
 
 // ---------------------------------------------------------------------------
-// Main loop
+// Page: Images  (Surface + Texture pipeline, all procedural)
 // ---------------------------------------------------------------------------
+
+// --- State ---
+
+// We lazily create all textures on first frame inside UI.frame
+var imgInited    = false
+
+// 1. Procedural textures
+var procSurfs    = []   // list of Surface
+var procTexs     = []   // list of Texture
+var procNames    = ["Checkerboard", "Radial gradient", "Plasma", "Noise", "Rings"]
+var procIdx      = [0]
+
+// 2. Live paint canvas
+var paintSurf    = null
+var paintTex     = null
+var paintColor   = [0.38, 0.72, 0.98, 1.0]
+var paintSize    = 128
+var paintRadius  = [4.0]
+
+// 3. Blend mode showcase
+var blendSurf    = null
+var blendTexs    = []   // one texture per mode
+var blendModes   = ["none", "blend", "add", "mod", "mul"]
+
+// 4. Rounded image
+var roundSurf    = null
+var roundTex     = null
+var roundRadius  = [20.0]
+
+// 5. UV crop
+var uvSurf       = null
+var uvTex        = null
+var uvU0         = [0.0]; var uvV0 = [0.0]
+var uvU1         = [1.0]; var uvV1 = [1.0]
+
+// 6. Tint demo
+var tintSurf     = null
+var tintTex      = null
+var tintColors   = [
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 0.4, 0.4, 1.0],
+    [0.4, 1.0, 0.4, 1.0],
+    [0.4, 0.4, 1.0, 1.0],
+    [1.0, 1.0, 0.4, 1.0],
+    [1.0, 0.4, 1.0, 1.0],
+]
+
+// 7. Animated texture
+var animSurf     = null
+var animTex      = null
+var animT        = 0.0
+
+// Helper: build a packed RGBA color from floats 0..1
+var packSurfColor = func(r, g, b, a) {
+    return [r, g, b, a]
+}
+
+// Generate a procedural surface by index
+var genProc = func(surf, idx, t) {
+    var w = surf.size().w; var h = surf.size().h
+    var x = 0
+    while (x < w) {
+        var y = 0
+        while (y < h) {
+            var fx = x / w; var fy = y / h
+            var col = [0, 0, 0, 1.0]
+            switch (idx) {
+                case 0: {
+                    // Checkerboard
+                    var cx2 = floor(fx * 8); var cy2 = floor(fy * 8)
+                    var v = (cx2 + cy2) % 2 == 0 ? 0.85 : 0.15
+                    col = [v, v, v, 1.0]
+                    break
+                }
+                case 1: {
+                    // Radial gradient
+                    var dx = fx - 0.5; var dy = fy - 0.5
+                    var d = sqrt(dx*dx + dy*dy) * 2.0
+                    if (d > 1.0) { d = 1.0 }
+                    var v = 1.0 - d
+                    col = [v * 0.38, v * 0.72, v * 0.98, 1.0]
+                    break
+                }
+                case 2: {
+                    // Plasma
+                    var v1 = sin(fx * 10 + t)
+                    var v2 = sin(fy * 10 + t)
+                    var v3 = sin((fx + fy) * 10 + t)
+                    var v4 = sin(sqrt(fx*fx + fy*fy) * 10 + t)
+                    var plasma = (v1 + v2 + v3 + v4) / 4.0
+                    col = [(sin(plasma * 3.14) + 1) * 0.5,
+                           (sin(plasma * 3.14 + 2.09) + 1) * 0.5,
+                           (sin(plasma * 3.14 + 4.19) + 1) * 0.5,
+                           1.0]
+                    break
+                }
+                case 3: {
+                    // Noise-ish (deterministic)
+                    var nx = floor(fx * 32); var ny = floor(fy * 32)
+                    var h2 = (nx * 1619 + ny * 31337 + 1013904223) % 256
+                    var v = h2 / 255.0
+                    col = [v, v, v, 1.0]
+                    break
+                }
+                default: {
+                    // Rings
+                    var dx = fx - 0.5; var dy = fy - 0.5
+                    var d = sqrt(dx*dx + dy*dy)
+                    var v = (sin(d * 40 - t * 2) + 1) * 0.5
+                    col = [v * 0.9, v * 0.5, v * 0.2, 1.0]
+                    break
+                }
+            }
+            surf.setPixel(x, y, col)
+            y++
+        }
+        x++
+    }
+}
+
+var pageImages = func() {
+    var ws = win.getSize()
+
+    // Lazy init — must be inside UI.frame
+    if (!imgInited) {
+        imgInited = true
+
+        // Proc textures
+        var pi = 0
+        while (pi < length(procNames)) {
+            var s = SDL.Surface.new(128, 128, null)
+            genProc(s, pi, 0.0)
+            var tx = win.textureFromSurface(s, { link: true })
+            push(procSurfs, s); push(procTexs, tx)
+            pi++
+        }
+
+        // Paint canvas
+        paintSurf = SDL.Surface.new(paintSize, paintSize, null)
+        paintSurf.fill([0.08, 0.09, 0.12, 1.0], null)
+        paintTex = win.textureFromSurface(paintSurf, { link: true })
+
+        // Blend surfaces — a simple gradient
+        blendSurf = SDL.Surface.new(128, 128, null)
+        var bx = 0
+        while (bx < 128) {
+            var by = 0
+            while (by < 128) {
+                blendSurf.setPixel(bx, by, [bx/127.0, by/127.0, 0.5, 0.8])
+                by++
+            }
+            bx++
+        }
+        var bmi = 0
+        while (bmi < length(blendModes)) {
+            var btx = win.textureFromSurface(blendSurf, null)
+            btx.setBlendMode(blendModes[bmi])
+            push(blendTexs, btx)
+            bmi++
+        }
+
+        // Rounded surface — colorful circle pattern
+        roundSurf = SDL.Surface.new(128, 128, null)
+        var rx2 = 0
+        while (rx2 < 128) {
+            var ry2 = 0
+            while (ry2 < 128) {
+                var fx = rx2/127.0; var fy = ry2/127.0
+                roundSurf.setPixel(rx2, ry2, [fx, 1.0-fy, (fx+fy)*0.5, 1.0])
+                ry2++
+            }
+            rx2++
+        }
+        roundTex = win.textureFromSurface(roundSurf, null)
+
+        // UV surface — 4x4 colorful grid
+        uvSurf = SDL.Surface.new(256, 256, null)
+        var ux = 0
+        while (ux < 256) {
+            var uy = 0
+            while (uy < 256) {
+                var fx = ux/255.0; var fy = uy/255.0
+                var cx2 = floor(fx*4)/4.0; var cy2 = floor(fy*4)/4.0
+                uvSurf.setPixel(ux, uy, [cx2, cy2, 1.0-cx2, 1.0])
+                uy++
+            }
+            ux++
+        }
+        uvTex = win.textureFromSurface(uvSurf, null)
+
+        // Tint surface — simple white-ish pattern
+        tintSurf = SDL.Surface.new(64, 64, null)
+        var tx2 = 0
+        while (tx2 < 64) {
+            var ty2 = 0
+            while (ty2 < 64) {
+                var fx = tx2/63.0; var fy = ty2/63.0
+                var v = (sin(fx*6.28)*0.5+0.5) * (sin(fy*6.28)*0.5+0.5)
+                tintSurf.setPixel(tx2, ty2, [v, v, v, 1.0])
+                ty2++
+            }
+            tx2++
+        }
+        tintTex = win.textureFromSurface(tintSurf, null)
+
+        // Anim surface
+        animSurf = SDL.Surface.new(128, 128, null)
+        animTex  = win.textureFromSurface(animSurf, { link: true })
+    }
+
+    // Update animated texture every frame
+    animT = animT + 0.04
+    var ax = 0
+    while (ax < 128) {
+        var ay = 0
+        while (ay < 128) {
+            var fx = ax/127.0; var fy = ay/127.0
+            var v1 = sin(fx*8 + animT) * 0.5 + 0.5
+            var v2 = cos(fy*8 + animT*0.7) * 0.5 + 0.5
+            var v3 = sin((fx+fy)*6 + animT*1.3) * 0.5 + 0.5
+            animSurf.setPixel(ax, ay, [v1, v2*0.5, v3, 1.0])
+            ay++
+        }
+        ax++
+    }
+    animTex.refresh(null)
+
+    // Update selected proc texture if plasma or rings (animated)
+    var pi2 = procIdx[0]
+    if (pi2 == 2 or pi2 == 4) {
+        genProc(procSurfs[pi2], pi2, drawTime)
+        procTexs[pi2].refresh(null)
+    }
+
+    var hw = (ws.w - 80) / 2
+
+    // Left column
+    UI.child("img-left", { w: hw, h: 0, border: false }, func() {
+
+        secHeader("Procedural textures", "generated on CPU · plasma + rings animate")
+        UI.combo("Pattern", procIdx, procNames)
+        UI.dummy(0, 6)
+        if (procTexs[procIdx[0]] != null) {
+            UI.image(procTexs[procIdx[0]], 256, 256, null, null, null, null)
+        }
+        UI.dummy(0, 4)
+        UI.textDisabled("128×128 surface  ·  " + procNames[procIdx[0]])
+
+        UI.dummy(0, 12)
+        secHeader("UV crop", "pan and zoom a 256×256 procedural texture")
+        UI.sliderFloat("u0", uvU0, 0.0, 1.0, "%.2f"); UI.sameLine()
+        UI.sliderFloat("v0", uvV0, 0.0, 1.0, "%.2f")
+        UI.sliderFloat("u1", uvU1, 0.0, 1.0, "%.2f"); UI.sameLine()
+        UI.sliderFloat("v1", uvV1, 0.0, 1.0, "%.2f")
+        UI.dummy(0, 4)
+        if (uvTex != null) {
+            UI.image(uvTex, 256, 128, [uvU0[0], uvV0[0]], [uvU1[0], uvV1[0]], null, null)
+        }
+
+        UI.dummy(0, 12)
+        secHeader("Tint", "same texture · six tint colors · imageButton")
+        UI.dummy(0, 4)
+        var ti = 0
+        while (ti < length(tintColors)) {
+            UI.id("tint-"+str(ti), func() {
+                if (tintTex != null) {
+                    var packed = UI.color(
+                        floor(tintColors[ti][0]*255),
+                        floor(tintColors[ti][1]*255),
+                        floor(tintColors[ti][2]*255),
+                        floor(tintColors[ti][3]*255)
+                    )
+                    UI.imageButton("tb-"+str(ti), tintTex, 64, 64, null, null, null, packed)
+                }
+            })
+            if (ti % 3 != 2) { UI.sameLine() }
+            ti++
+        }
+    })
+
+    UI.sameLine()
+
+    // Right column
+    UI.child("img-right", { w: 0, h: 0, border: false }, func() {
+
+        secHeader("Live paint canvas", "click to paint · color picker below")
+        UI.dummy(0, 4)
+
+        // Render canvas via image, then check for mouse paint
+        if (paintTex != null) {
+            UI.image(paintTex, paintSize*2, paintSize*2, null, null, null, null)
+            if (UI.isItemHovered() and UI.isMouseDown(0)) {
+                var mp   = UI.getMousePos()
+                var ip   = UI.getItemRectMin()
+                var lx   = (mp.x - ip.x) / 2
+                var ly   = (mp.y - ip.y) / 2
+                var pr   = floor(paintRadius[0])
+                var px2  = floor(lx); var py2 = floor(ly)
+                var bx2  = px2 - pr
+                while (bx2 <= px2 + pr) {
+                    var by2 = py2 - pr
+                    while (by2 <= py2 + pr) {
+                        var dx = bx2 - px2; var dy = by2 - py2
+                        if (dx*dx + dy*dy <= pr*pr) {
+                            if (bx2 >= 0 and bx2 < paintSize and by2 >= 0 and by2 < paintSize) {
+                                paintSurf.setPixel(bx2, by2, paintColor)
+                            }
+                        }
+                        by2++
+                    }
+                    bx2++
+                }
+                paintTex.refresh(null)
+            }
+        }
+        UI.dummy(0, 4)
+        UI.colorEdit("Paint color", paintColor)
+        UI.sliderFloat("Brush size", paintRadius, 1.0, 20.0, "%.0f px")
+        UI.sameLine()
+        if (UI.button("Clear")) {
+            paintSurf.fill([0.08, 0.09, 0.12, 1.0], null)
+            paintTex.refresh(null)
+        }
+
+        UI.dummy(0, 12)
+        secHeader("Animated texture", "plasma written to surface every frame")
+        if (animTex != null) {
+            UI.image(animTex, 256, 128, null, null, null, null)
+        }
+
+        UI.dummy(0, 12)
+        secHeader("Rounded image", "dl.addImageRounded")
+        UI.sliderFloat("Radius", roundRadius, 0.0, 64.0, "%.0f px")
+        UI.dummy(0, 4)
+        if (roundTex != null) {
+            var dl  = UI.drawList()
+            var p   = UI.getCursorPos()
+            dl.addImageRounded(roundTex, p.x, p.y, 180, 180,
+                UI.color(255,255,255,255), roundRadius[0], UI.DRAW_ROUND_CORNERS_ALL,
+                null, null)
+            UI.dummy(180, 180)
+        }
+
+        UI.dummy(0, 12)
+        secHeader("Blend modes", "source  +  background  →  mode  →  result")
+        UI.dummy(0, 4)
+
+        var blendBgColors = [
+            UI.color(200, 80,  80,  255),
+            UI.color(80,  200, 80,  255),
+            UI.color(80,  80,  200, 255),
+            UI.color(200, 200, 80,  255),
+            UI.color(200, 80,  200, 255),
+        ]
+        var blendBgNames = ["red","green","blue","yellow","purple"]
+
+        var bmi2 = 0
+        while (bmi2 < length(blendModes)) {
+            UI.id("bm-"+str(bmi2), func() {
+                if (blendTexs[bmi2] != null) {
+                    var dl2 = UI.drawList()
+
+                    // Source
+                    UI.image(blendTexs[0], 64, 64, null, null, null, null)
+                    UI.sameLine(0, 4)
+                    UI.textDisabled("+")
+                    UI.sameLine(0, 4)
+
+                    // Background swatch
+                    var sp = UI.getCursorPos()
+                    dl2.addRectFilled(sp.x, sp.y, 64, 64, blendBgColors[bmi2], 4.0, UI.DRAW_ROUND_CORNERS_ALL)
+                    dl2.addText(sp.x+4, sp.y+24, UI.color(255,255,255,200), blendBgNames[bmi2])
+                    UI.dummy(64, 64)
+                    UI.sameLine(0, 8)
+
+                    // Mode label
+                    UI.textColored(accent[0], "→ "+blendModes[bmi2])
+                    UI.sameLine(0, 8)
+
+                    // Result
+                    var rp = UI.getCursorPos()
+                    dl2.addRectFilled(rp.x, rp.y, 64, 64, blendBgColors[bmi2], 4.0, UI.DRAW_ROUND_CORNERS_ALL)
+                    UI.image(blendTexs[bmi2], 64, 64, null, null, null, null)
+
+                    UI.dummy(0, 4)
+                }
+            })
+            bmi2++
+        }
+    })
+}
+
+
 
 var done = false
 
@@ -1361,6 +1754,7 @@ while (!win.shouldClose() and !done) {
                         UI.tabItem("Data",     func() { pageData()     })
                         UI.tabItem("Drawing",  func() { pageDrawing()  })
                         UI.tabItem("Custom",   func() { pageCustom()   })
+                        UI.tabItem("Images",   func() { pageImages()   })
                         UI.tabItem("Theme",    func() { pageTheme()    })
                         UI.tabItem("About",    func() { pageAbout()    })
                     })

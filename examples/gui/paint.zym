@@ -1,0 +1,840 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Anatole DP
+//
+// ZYM PAINT — classic fixed-canvas paint app
+
+var win = SDL.createWindow("ZYM Paint", 1024, 768, { resizable: true })
+if (win == null) { print("failed: %v", SDL.lastError()); return }
+
+// ---------------------------------------------------------------------------
+// Packed color helpers
+// ---------------------------------------------------------------------------
+
+var COL_GRAY    = UI.color(195, 195, 195, 255)
+var COL_DGRAY   = UI.color(128, 128, 128, 255)
+var COL_BLACK   = UI.color(0,   0,   0,   255)
+var COL_WHITE   = UI.color(255, 255, 255, 255)
+var COL_NAVY    = UI.color(0,   0,   128, 255)
+
+
+// BitByte Master Palette (32 colors) [r, g, b] 0-255
+var PALETTE = [
+    // Neutral
+    [20,20,21],    [83,84,90],    [120,121,129], [169,169,177], [255,255,255],
+    // Reds
+    [42,7,7],      [104,23,23],   [224,58,58],   [209,99,99],
+    // Browns
+    [106,59,25],   [163,79,18],   [215,134,74],  [235,188,154],
+    // Yellows
+    [140,99,21],   [198,153,51],  [219,188,74],  [238,218,140],
+    // Greens
+    [5,45,24],     [17,89,36],    [61,179,53],   [133,221,101],
+    // Teals
+    [15,87,61],    [36,132,110],  [65,175,168],  [124,223,217],
+    // Blues
+    [10,22,59],    [23,38,107],   [46,52,154],   [77,74,199],
+    // Purples
+    [71,23,107],   [96,46,154],   [142,139,234],
+]
+
+var palFloat = func(c) { return [c[0]/255.0, c[1]/255.0, c[2]/255.0, 1.0] }
+var palPack  = func(c) { return UI.color(c[0], c[1], c[2], 255) }
+var floatPack = func(c) { return UI.color(floor(c[0]*255), floor(c[1]*255), floor(c[2]*255), 255) }
+
+// ---------------------------------------------------------------------------
+// Canvas
+// ---------------------------------------------------------------------------
+
+var CANVAS_W = 800
+var CANVAS_H = 600
+
+var canvas    = SDL.Surface.new(CANVAS_W, CANVAS_H, null)
+canvas.fill([1.0, 1.0, 1.0, 1.0], null)
+var canvasTex = win.textureFromSurface(canvas, { link: true })
+
+// Preview surface for shape tools
+var previewSurf = null
+var previewTex  = null
+var pageInited  = false
+
+// Undo/redo
+var undoStack = []
+var redoStack = []
+var MAX_UNDO  = 20
+
+var saveUndo = func() {
+    push(undoStack, canvas.clone())
+    if (length(undoStack) > MAX_UNDO) { remove(undoStack, 0) }
+    redoStack = []
+}
+
+var doUndo = func() {
+    if (length(undoStack) == 0) { return }
+    push(redoStack, canvas.clone())
+    canvas.blit(undoStack[length(undoStack)-1], null, null)
+    remove(undoStack, length(undoStack)-1)
+    canvasTex.refresh(null)
+}
+
+var doRedo = func() {
+    if (length(redoStack) == 0) { return }
+    push(undoStack, canvas.clone())
+    canvas.blit(redoStack[length(redoStack)-1], null, null)
+    remove(redoStack, length(redoStack)-1)
+    canvasTex.refresh(null)
+}
+
+// ---------------------------------------------------------------------------
+// Tools
+// ---------------------------------------------------------------------------
+
+var TOOL_PENCIL  = 0
+var TOOL_ERASER  = 1
+var TOOL_FILL    = 2
+var TOOL_PICKER  = 3
+
+var toolNames  = ["Pencil","Eraser","Fill","Picker"]
+var toolKeys   = ["P","E","F","K"]
+var tool       = [TOOL_PENCIL]
+var brushSize  = [3.0]
+
+var fgColor = [0.0, 0.0, 0.0, 1.0]
+var bgColor = [1.0, 1.0, 1.0, 1.0]
+
+// ---------------------------------------------------------------------------
+// Drawing primitives
+// ---------------------------------------------------------------------------
+
+// Stamp a circle brush at one point — separate function to keep slot depth low
+var stampAt = func(cx2, cy2, col, ir) {
+    var bx = -ir
+    while (bx <= ir) {
+        var by = -ir
+        while (by <= ir) {
+            if (bx*bx + by*by <= ir*ir) {
+                var px = floor(cx2)+bx; var py = floor(cy2)+by
+                if (px>=0 and px<CANVAS_W and py>=0 and py<CANVAS_H) {
+                    canvas.setPixel(px, py, col)
+                }
+            }
+            by++
+        }
+        bx++
+    }
+}
+
+// Bresenham line — calls stampAt for each point
+var paintLine = func(x0, y0, x1, y1, col, sz) {
+    x0=floor(x0); y0=floor(y0); x1=floor(x1); y1=floor(y1)
+    var dx=abs(x1-x0); var dy=abs(y1-y0)
+    var sx=x0<x1?1:-1; var sy=y0<y1?1:-1
+    var err=dx-dy
+    var ir=floor(sz/2)
+    while (true) {
+        stampAt(x0, y0, col, ir)
+        if (x0==x1 and y0==y1) { break }
+        var e2=err*2
+        if (e2>-dy){err=err-dy;x0=x0+sx}
+        if (e2<dx) {err=err+dx;y0=y0+sy}
+    }
+}
+
+var stampBrush = func(cx2, cy2, col, sz) {
+    stampAt(cx2, cy2, col, floor(sz/2))
+}
+
+var floodFill = func(startX, startY, fillCol) {
+    startX=floor(startX); startY=floor(startY)
+    if (startX<0 or startX>=CANVAS_W or startY<0 or startY>=CANVAS_H) { return }
+    var tc = canvas.getPixel(startX, startY)
+    if (tc==null) { return }
+    if (abs(tc[0]-fillCol[0])<0.01 and abs(tc[1]-fillCol[1])<0.01 and abs(tc[2]-fillCol[2])<0.01) { return }
+
+    var match = func(x, y) {
+        if (x<0 or x>=CANVAS_W or y<0 or y>=CANVAS_H) { return false }
+        var p = canvas.getPixel(x,y)
+        if (p==null) { return false }
+        return abs(p[0]-tc[0])<0.01 and abs(p[1]-tc[1])<0.01 and abs(p[2]-tc[2])<0.01
+    }
+
+    // Scanline flood fill — O(n) stack depth instead of O(n) pixel depth
+    var stk = [[startX, startY]]
+    while (length(stk) > 0) {
+        var seg = stk[length(stk)-1]; remove(stk, length(stk)-1)
+        var x = seg[0]; var y = seg[1]
+        if (!match(x, y)) { continue }
+
+        // Walk left and right to find span
+        var lx = x; var rx = x
+        while (lx > 0 and match(lx-1, y)) { lx-- }
+        while (rx < CANVAS_W-1 and match(rx+1, y)) { rx++ }
+
+        // Fill the span
+        var fx = lx
+        while (fx <= rx) {
+            canvas.setPixel(fx, y, fillCol)
+            fx++
+        }
+
+        // Check row above and below for new spans
+        var sy = y-1
+        while (sy <= y+1) {
+            if (sy != y and sy >= 0 and sy < CANVAS_H) {
+                var ix = lx
+                while (ix <= rx) {
+                    if (match(ix, sy)) {
+                        push(stk, [ix, sy])
+                        // Skip to end of this matching span
+                        while (ix <= rx and match(ix, sy)) { ix++ }
+                    } else {
+                        ix++
+                    }
+                }
+            }
+            sy = sy + 2
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+var isDrawing    = false
+var lastCX       = 0.0
+var lastCY       = 0.0
+var startCX      = 0.0
+var startCY      = 0.0
+var statusMsg    = "Ready  |  Left click = FG  ·  Right click = BG  ·  Ctrl+Z = Undo"
+var savePath     = Buffer.new(256)
+var showSave     = false
+var showLoad     = false
+var showAbout    = false
+var showNewDlg   = false
+var newW         = [800]
+var newH         = [600]
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+
+var done = false
+
+while (!win.shouldClose() and !done) {
+    var e = SDL.pollEvent()
+    while (e != null) {
+        if (e.type == "quit") { done = true }
+        // Keyboard shortcuts
+        if (e.type == "key.down") {
+            var mod = SDL.modifiers()
+            if (mod.ctrl) {
+                if (e.key == 122) { doUndo() }   // Ctrl+Z
+                if (e.key == 121) { doRedo() }   // Ctrl+Y
+                if (e.key == 115) { showSave = true }  // Ctrl+S
+                if (e.key == 111) { showLoad = true }  // Ctrl+O
+                if (e.key == 110) { showNewDlg = true } // Ctrl+N
+            }
+        }
+        e = SDL.pollEvent()
+    }
+
+    UI.frame(win, func() {
+
+        if (!pageInited) {
+            pageInited = true
+            previewSurf = SDL.Surface.new(CANVAS_W, CANVAS_H, null)
+            previewSurf.fill([0,0,0,0], null)
+            previewTex = win.textureFromSurface(previewSurf, { link: true })
+        }
+
+        var size = win.getSize()
+
+        UI.withStyleColor({
+            WindowBg:      [0.765, 0.765, 0.765, 1.0],
+            ChildBg:       [0.765, 0.765, 0.765, 1.0],
+            MenuBarBg:     [0.765, 0.765, 0.765, 1.0],
+            Button:        [0.765, 0.765, 0.765, 1.0],
+            ButtonHovered: [0.50,  0.50,  1.0,   1.0],
+            ButtonActive:  [0.0,   0.0,   0.50,  1.0],
+            Header:        [0.0,   0.0,   0.50,  1.0],
+            HeaderHovered: [0.0,   0.0,   0.65,  1.0],
+            Text:          [0.0,   0.0,   0.0,   1.0],
+            TextDisabled:  [0.4,   0.4,   0.4,   1.0],
+            FrameBg:       [1.0,   1.0,   1.0,   1.0],
+            FrameBgHovered:[0.9,   0.9,   1.0,   1.0],
+            PopupBg:       [0.765, 0.765, 0.765, 1.0],
+            Border:        [0.5,   0.5,   0.5,   1.0],
+            TitleBg:       [0.0,   0.0,   0.50,  1.0],
+            TitleBgActive: [0.0,   0.0,   0.80,  1.0],
+            ScrollbarBg:   [0.765, 0.765, 0.765, 1.0],
+            ScrollbarGrab: [0.5,   0.5,   0.5,   1.0],
+            SliderGrab:    [0.0,   0.0,   0.5,   1.0],
+            CheckMark:     [0.0,   0.0,   0.8,   1.0],
+            Separator:     [0.5,   0.5,   0.5,   1.0],
+        }, func() {
+        UI.withStyleVar({
+            WindowRounding:   0.0, ChildRounding:  0.0,
+            FrameRounding:    0.0, PopupRounding:  0.0,
+            ScrollbarRounding:0.0, GrabRounding:   0.0,
+            TabRounding:      0.0,
+            WindowBorderSize: 1.0, FrameBorderSize:1.0,
+            ChildBorderSize:  1.0,
+            WindowPadding: [4.0,4.0], FramePadding: [4.0,3.0],
+            ItemSpacing:   [4.0,4.0],
+        }, func() {
+
+        // ----------------------------------------------------------------
+        // Menu bar
+        // ----------------------------------------------------------------
+        UI.mainMenuBar(func() {
+            UI.withStyleColor({ Text:[1.0,1.0,0.2,1.0] }, func() { UI.text("✏ ZYM Paint") })
+            UI.sameLine(0,16)
+            UI.menu("File", func() {
+                if (UI.menuItem("New...",    "Ctrl+N")) { showNewDlg = true }
+                UI.separator()
+                if (UI.menuItem("Open PNG",  "Ctrl+O")) { showLoad = true }
+                if (UI.menuItem("Save PNG",  "Ctrl+S")) { showSave = true }
+                UI.separator()
+                if (UI.menuItem("Exit")) { done = true }
+            })
+            UI.menu("Edit", func() {
+                if (UI.menuItem("Undo", "Ctrl+Z")) { doUndo() }
+                if (UI.menuItem("Redo", "Ctrl+Y")) { doRedo() }
+                UI.separator()
+                if (UI.menuItem("Clear to white")) {
+                    saveUndo(); canvas.fill([1,1,1,1],null); canvasTex.refresh(null)
+                }
+                if (UI.menuItem("Clear to black")) {
+                    saveUndo(); canvas.fill([0,0,0,1],null); canvasTex.refresh(null)
+                }
+                if (UI.menuItem("Clear to BG color")) {
+                    saveUndo(); canvas.fill(bgColor,null); canvasTex.refresh(null)
+                }
+            })
+            UI.menu("Image", func() {
+                UI.labelText("Size", str(CANVAS_W)+" × "+str(CANVAS_H))
+                UI.separator()
+                if (UI.menuItem("Flip horizontal")) {
+                    saveUndo()
+                    var x = 0
+                    while (x < CANVAS_W/2) {
+                        var y = 0
+                        while (y < CANVAS_H) {
+                            var a = canvas.getPixel(x, y)
+                            var b = canvas.getPixel(CANVAS_W-1-x, y)
+                            canvas.setPixel(x, y, b)
+                            canvas.setPixel(CANVAS_W-1-x, y, a)
+                            y++
+                        }
+                        x++
+                    }
+                    canvasTex.refresh(null)
+                }
+                if (UI.menuItem("Flip vertical")) {
+                    saveUndo()
+                    var x = 0
+                    while (x < CANVAS_W) {
+                        var y = 0
+                        while (y < CANVAS_H/2) {
+                            var a = canvas.getPixel(x, y)
+                            var b = canvas.getPixel(x, CANVAS_H-1-y)
+                            canvas.setPixel(x, y, b)
+                            canvas.setPixel(x, CANVAS_H-1-y, a)
+                            y++
+                        }
+                        x++
+                    }
+                    canvasTex.refresh(null)
+                }
+                if (UI.menuItem("Invert colors")) {
+                    saveUndo()
+                    var x = 0
+                    while (x < CANVAS_W) {
+                        var y = 0
+                        while (y < CANVAS_H) {
+                            var p = canvas.getPixel(x,y)
+                            if (p != null) { canvas.setPixel(x,y,[1-p[0],1-p[1],1-p[2],p[3]]) }
+                            y++
+                        }
+                        x++
+                    }
+                    canvasTex.refresh(null)
+                }
+            })
+            UI.menu("Help", func() {
+                if (UI.menuItem("About")) { showAbout = true }
+            })
+            UI.sameLine(size.w - 220)
+            UI.textDisabled(str(CANVAS_W)+"×"+str(CANVAS_H)+"  |  undo:"+str(length(undoStack)))
+        })
+
+        UI.setNextWindowPos(0, 22)
+        UI.setNextWindowSize(size.w, size.h - 22)
+        var wf = UI.WINDOW_NO_TITLE_BAR + UI.WINDOW_NO_RESIZE + UI.WINDOW_NO_MOVE
+               + UI.WINDOW_NO_COLLAPSE  + UI.WINDOW_NO_SAVED_SETTINGS
+
+        UI.window("root", wf, func() {
+
+            // ----------------------------------------------------------------
+            // Toolbar
+            // ----------------------------------------------------------------
+            UI.child("toolbar", { w:0, h:32, border:true }, func() {
+                UI.dummy(2,0); UI.sameLine()
+
+                // Tool buttons
+                var ti = 0
+                while (ti < length(toolNames)) {
+                    UI.id("t"+str(ti), func() {
+                        UI.withStyleColor({
+                            Button:        tool[0]==ti ? [0.0,0.0,0.5,1.0] : [0.765,0.765,0.765,1.0],
+                            ButtonHovered: [0.5,0.5,1.0,1.0],
+                            Text:          tool[0]==ti ? [1.0,1.0,1.0,1.0] : [0.0,0.0,0.0,1.0],
+                        }, func() {
+                            if (UI.button(toolNames[ti], 58, 22)) { tool[0] = ti }
+                        })
+                    })
+                    UI.sameLine(0,2)
+                    ti++
+                }
+
+                UI.sameLine(0,10)
+                UI.textDisabled("|")
+                UI.sameLine(0,8)
+                UI.text("Size:")
+                UI.sameLine(0,4)
+                UI.setNextItemWidth(70)
+                UI.sliderFloat("##sz", brushSize, 1.0, 30.0, "%.0f")
+
+                UI.sameLine(0,10)
+                UI.textDisabled("|")
+                UI.sameLine(0,8)
+                UI.withStyleColor({ Button: length(undoStack)>0?[0.765,0.765,0.765,1.0]:[0.6,0.6,0.6,1.0] }, func() {
+                    if (UI.button("Undo", 46, 22)) { doUndo() }
+                })
+                UI.sameLine(0,2)
+                UI.withStyleColor({ Button: length(redoStack)>0?[0.765,0.765,0.765,1.0]:[0.6,0.6,0.6,1.0] }, func() {
+                    if (UI.button("Redo", 46, 22)) { doRedo() }
+                })
+
+                UI.sameLine(0,10)
+                UI.textDisabled("|")
+                UI.sameLine(0,8)
+
+                // FG/BG swatches
+                var dl2 = UI.drawList()
+                var cp2 = UI.getCursorPos()
+                // BG behind
+                dl2.addRectFilled(cp2.x+10, cp2.y+3, 18, 18, floatPack(bgColor), 0.0, UI.DRAW_NONE)
+                dl2.addRect(cp2.x+10, cp2.y+3, 18, 18, COL_BLACK, 0.0, 1.0, UI.DRAW_NONE)
+                // FG front
+                dl2.addRectFilled(cp2.x+1, cp2.y+1, 18, 18, floatPack(fgColor), 0.0, UI.DRAW_NONE)
+                dl2.addRect(cp2.x+1, cp2.y+1, 18, 18, COL_BLACK, 0.0, 1.0, UI.DRAW_NONE)
+                UI.dummy(30, 22)
+
+                UI.sameLine(0,10)
+                UI.textDisabled("|")
+                UI.sameLine(0,6)
+                UI.textDisabled(statusMsg)
+            })
+
+            // ----------------------------------------------------------------
+            // Main area
+            // ----------------------------------------------------------------
+            var paletteH = 58
+            var toolboxW = 68
+            var mainH    = size.h - 22 - 32 - paletteH - 16
+
+            // Toolbox sidebar
+            UI.child("toolbox", { w:toolboxW, h:mainH, border:true }, func() {
+                var idl = UI.drawList()
+                UI.dummy(0,4)
+
+                var drawToolIcon = func(idx, bx2, by2, isActive) {
+                    var bg  = isActive ? UI.color(0,0,128,255) : UI.color(195,195,195,255)
+                    var fg  = isActive ? UI.color(255,255,255,255) : UI.color(0,0,0,255)
+                    var hi  = UI.color(255,255,255,255)
+                    var sh  = UI.color(128,128,128,255)
+                    var w2  = 28.0; var h2 = 28.0
+
+                    // Button bg
+                    idl.addRectFilled(bx2, by2, w2, h2, bg, 0.0, UI.DRAW_NONE)
+                    // 3D border — highlight top/left, shadow bottom/right
+                    idl.addLine(bx2,      by2,      bx2+w2-1, by2,      isActive?sh:hi, 1.0)
+                    idl.addLine(bx2,      by2,      bx2,      by2+h2-1, isActive?sh:hi, 1.0)
+                    idl.addLine(bx2+w2-1, by2,      bx2+w2-1, by2+h2-1, isActive?hi:sh, 1.0)
+                    idl.addLine(bx2,      by2+h2-1, bx2+w2-1, by2+h2-1, isActive?hi:sh, 1.0)
+
+                    var cx3 = bx2 + 14; var cy3 = by2 + 14
+
+                    switch (idx) {
+                        case TOOL_PENCIL: {
+                            // Diagonal pencil line with tip
+                            idl.addLine(cx3-6, cy3+6, cx3+4, cy3-4, fg, 2.0)
+                            idl.addLine(cx3+4, cy3-4, cx3+6, cy3-6, fg, 1.0)
+                            idl.addTriangleFilled(cx3-8, cy3+6, cx3-6, cy3+8, cx3-5, cy3+5, fg)
+                            break
+                        }
+                        case TOOL_ERASER: {
+                            // Rectangle eraser
+                            idl.addRectFilled(cx3-7, cy3-4, 14, 8, UI.color(255,180,180,255), 0.0, UI.DRAW_NONE)
+                            idl.addRect(cx3-7, cy3-4, 14, 8, fg, 0.0, 1.0, UI.DRAW_NONE)
+                            idl.addLine(cx3-7, cy3, cx3+7, cy3, fg, 1.0)
+                            break
+                        }
+                        case TOOL_FILL: {
+                            // Paint bucket — bucket shape + drip
+                            idl.addRectFilled(cx3-5, cy3-2, 10, 8, fg, 0.0, UI.DRAW_NONE)
+                            idl.addRect(cx3-6, cy3-3, 12, 9, fg, 0.0, 1.0, UI.DRAW_NONE)
+                            idl.addLine(cx3-1, cy3-3, cx3+3, cy3-7, fg, 1.5)
+                            idl.addCircleFilled(cx3+5, cy3+6, 2, fg, 0)
+                            idl.addLine(cx3+5, cy3+4, cx3+5, cy3+7, fg, 1.0)
+                            break
+                        }
+                        case TOOL_PICKER: {
+                            // Eyedropper — tube + tip
+                            idl.addLine(cx3+4, cy3-6, cx3-2, cy3,   fg, 2.5)
+                            idl.addLine(cx3-2, cy3,   cx3-6, cy3+4, fg, 1.5)
+                            idl.addCircleFilled(cx3+5, cy3-7, 2, UI.color(255,100,100,255), 0)
+                            idl.addCircleFilled(cx3-6, cy3+5, 2, fg, 0)
+                            break
+                        }
+                        default: { break }
+                    }
+                }
+
+                // Draw 2-column icon grid
+                var ti2 = 0
+                while (ti2 < length(toolNames)) {
+                    UI.id("tb"+str(ti2), func() {
+                        var bp2 = UI.getCursorPos()
+                        drawToolIcon(ti2, bp2.x, bp2.y, tool[0]==ti2)
+                        UI.invisibleButton("tbi"+str(ti2), 28, 28)
+                        if (UI.isItemClicked()) { tool[0] = ti2 }
+                        if (UI.isItemHovered()) { UI.tooltip(toolNames[ti2]) }
+                    })
+                    if (ti2 % 2 == 0) { UI.sameLine(0,4) }
+                    ti2++
+                }
+
+                UI.dummy(0,8)
+                UI.separator()
+                UI.dummy(0,4)
+
+                // Brush preview dot
+                var bp3 = UI.getCursorPos()
+                var bdl = UI.drawList()
+                var r3  = floor(brushSize[0]/2)+1
+                bdl.addCircleFilled(bp3.x+32, bp3.y+32, r3, COL_BLACK, 0)
+                UI.dummy(64, 64)
+
+                UI.separator()
+                UI.dummy(0,6)
+
+                // FG/BG mini swatches
+                var sp = UI.getCursorPos()
+                var sdl = UI.drawList()
+                sdl.addRectFilled(sp.x+16, sp.y+14, 24, 20, floatPack(bgColor), 0.0, UI.DRAW_NONE)
+                sdl.addRect(sp.x+16, sp.y+14, 24, 20, COL_BLACK, 0.0, 1.0, UI.DRAW_NONE)
+                sdl.addRectFilled(sp.x+4,  sp.y+4,  24, 20, floatPack(fgColor), 0.0, UI.DRAW_NONE)
+                sdl.addRect(sp.x+4,  sp.y+4,  24, 20, COL_BLACK, 0.0, 1.0, UI.DRAW_NONE)
+                UI.dummy(44, 38)
+
+                // Swap button
+                UI.dummy(8, 0); UI.sameLine()
+                if (UI.smallButton("swap")) {
+                    var tmp = fgColor
+                    fgColor = bgColor
+                    bgColor = tmp
+                }
+            })
+
+            UI.sameLine(0,0)
+
+            // Canvas area — fills remaining space
+            UI.child("canvas-area", { w:0, h:mainH, border:true }, func() {
+                var cdl  = UI.drawList()
+                var cp4  = UI.getCursorPos()
+                var caw  = UI.getWindowWidth()
+                var cah  = UI.getWindowHeight()
+
+                // Gray surround
+                cdl.addRectFilled(cp4.x, cp4.y, caw, cah, COL_DGRAY, 0.0, UI.DRAW_NONE)
+
+                // Fit canvas centered with aspect ratio
+                var scaleX = (caw - 8) / CANVAS_W
+                var scaleY = (cah - 8) / CANVAS_H
+                var scale  = min(scaleX, scaleY)
+                var dw     = floor(CANVAS_W * scale)
+                var dh     = floor(CANVAS_H * scale)
+                var ox     = cp4.x + floor((caw - dw) / 2)
+                var oy     = cp4.y + floor((cah - dh) / 2)
+
+                // Shadow
+                cdl.addRectFilled(ox+4, oy+4, dw, dh, UI.color(0,0,0,100), 0.0, UI.DRAW_NONE)
+
+                // Canvas image
+                cdl.addImage(canvasTex, ox, oy, dw, dh, [0,0], [1,1], COL_WHITE)
+
+                // Canvas border
+                cdl.addRect(ox, oy, dw, dh, COL_BLACK, 0.0, 1.0, UI.DRAW_NONE)
+
+                // Interaction overlay
+                UI.setCursorPos(0, 0)
+                UI.invisibleButton("ci", caw, cah)
+
+                var hov  = UI.isItemHovered()
+                var mp   = UI.getMousePos()
+                var btnL = UI.isMouseDown(0)
+                var btnR = UI.isMouseDown(1)
+                var clkL = UI.isMouseClicked(0)
+                var clkR = UI.isMouseClicked(1)
+
+                // Convert screen → canvas coords
+                var cx5 = (mp.x - ox) / scale
+                var cy5 = (mp.y - oy) / scale
+                var inC = cx5>=0 and cx5<CANVAS_W and cy5>=0 and cy5<CANVAS_H
+
+                if (hov and inC) {
+                    statusMsg = "(" + str(floor(cx5)) + ", " + str(floor(cy5)) + ")"
+                }
+
+                var drawCol = fgColor
+                if (btnR) { drawCol = bgColor }
+
+                if (hov) {
+                    switch (tool[0]) {
+                        case TOOL_PENCIL: {
+                            if ((btnL or btnR) and inC) {
+                                if (!isDrawing) { saveUndo(); isDrawing=true; stampBrush(cx5,cy5,drawCol,brushSize[0]) }
+                                else { paintLine(lastCX,lastCY,cx5,cy5,drawCol,brushSize[0]) }
+                                canvasTex.refresh(null)
+                            } else { isDrawing=false }
+                            break
+                        }
+                        case TOOL_ERASER: {
+                            if ((btnL or btnR) and inC) {
+                                if (!isDrawing) { saveUndo(); isDrawing=true; stampBrush(cx5,cy5,bgColor,brushSize[0]*2) }
+                                else { paintLine(lastCX,lastCY,cx5,cy5,bgColor,brushSize[0]*2) }
+                                canvasTex.refresh(null)
+                            } else { isDrawing=false }
+                            break
+                        }
+                        case TOOL_FILL: {
+                            if ((clkL or clkR) and inC) {
+                                saveUndo()
+                                floodFill(cx5,cy5,drawCol)
+                                canvasTex.refresh(null)
+                                statusMsg="Filled!"
+                            }
+                            break
+                        }
+                        case TOOL_PICKER: {
+                            if ((clkL or clkR) and inC) {
+                                var picked=canvas.getPixel(floor(cx5),floor(cy5))
+                                if (picked!=null) {
+                                    if (clkL){fgColor=[picked[0],picked[1],picked[2],1.0]}
+                                    else     {bgColor=[picked[0],picked[1],picked[2],1.0]}
+                                    statusMsg="Color picked"
+                                }
+                            }
+                            break
+                        }
+                        default: { break }
+                    }
+                } else { isDrawing=false }
+
+                lastCX = cx5; lastCY = cy5
+            })
+
+            // ----------------------------------------------------------------
+            // Color palette strip
+            // ----------------------------------------------------------------
+            UI.child("palette", { w:0, h:paletteH, border:true }, func() {
+                var pdl = UI.drawList()
+                var pp  = UI.getCursorPos()
+                pdl.addRectFilled(pp.x-4, pp.y-4, size.w, paletteH+8, COL_GRAY, 0.0, UI.DRAW_NONE)
+
+                // FG/BG swatches
+                var fgp = UI.getCursorPos()
+                pdl.addRectFilled(fgp.x+14, fgp.y+24, 22, 22, floatPack(bgColor), 0.0, UI.DRAW_NONE)
+                pdl.addRect(fgp.x+14, fgp.y+24, 22, 22, COL_BLACK, 0.0, 1.0, UI.DRAW_NONE)
+                pdl.addRectFilled(fgp.x+2, fgp.y+4, 22, 22, floatPack(fgColor), 0.0, UI.DRAW_NONE)
+                pdl.addRect(fgp.x+2, fgp.y+4, 22, 22, COL_BLACK, 0.0, 1.0, UI.DRAW_NONE)
+                UI.dummy(38, 48)
+                UI.sameLine(0,4)
+
+                // Two rows of palette swatches
+                UI.group(func() {
+                    // Row 1
+                    var pi2 = 0
+                    while (pi2 < 16) {
+                        UI.id("p"+str(pi2), func() {
+                            var c   = PALETTE[pi2]
+                            var pcp = UI.getCursorPos()
+                            var ppd = UI.drawList()
+                            ppd.addRectFilled(pcp.x, pcp.y, 20, 20, palPack(c), 0.0, UI.DRAW_NONE)
+                            ppd.addRect(pcp.x, pcp.y, 20, 20, COL_DGRAY, 0.0, 1.0, UI.DRAW_NONE)
+                            UI.invisibleButton("pc"+str(pi2), 20, 20)
+                            if (UI.isItemClicked()) { fgColor = palFloat(c) }
+                            if (UI.isMouseDown(1) and UI.isItemHovered()) { bgColor = palFloat(c) }
+                            if (UI.isItemHovered()) { UI.tooltip("RGB: "+str(c[0])+", "+str(c[1])+", "+str(c[2])) }
+                        })
+                        UI.sameLine(0,1)
+                        pi2++
+                    }
+                    UI.newLine()
+                    // Row 2
+                    var pi3 = 16
+                    while (pi3 < length(PALETTE)) {
+                        UI.id("p"+str(pi3), func() {
+                            var c   = PALETTE[pi3]
+                            var pcp = UI.getCursorPos()
+                            var ppd = UI.drawList()
+                            ppd.addRectFilled(pcp.x, pcp.y, 20, 20, palPack(c), 0.0, UI.DRAW_NONE)
+                            ppd.addRect(pcp.x, pcp.y, 20, 20, COL_DGRAY, 0.0, 1.0, UI.DRAW_NONE)
+                            UI.invisibleButton("pc"+str(pi3), 20, 20)
+                            if (UI.isItemClicked()) { fgColor = palFloat(c) }
+                            if (UI.isMouseDown(1) and UI.isItemHovered()) { bgColor = palFloat(c) }
+                            if (UI.isItemHovered()) { UI.tooltip("RGB: "+str(c[0])+", "+str(c[1])+", "+str(c[2])) }
+                        })
+                        UI.sameLine(0,1)
+                        pi3++
+                    }
+                })
+                UI.sameLine(0,6)
+                UI.textDisabled("|")
+                UI.sameLine(0,4)
+                if (UI.smallButton("More...")) { UI.openPopup("custcol") }
+                UI.popup("custcol", func() {
+                    UI.text("Custom FG color")
+                    UI.separator()
+                    UI.colorPicker("##cp2", fgColor)
+                    UI.separator()
+                    UI.text("BG color")
+                    UI.colorEdit("##bg2", bgColor)
+                    UI.separator()
+                    if (UI.button("Close", 80, 0)) { UI.closeCurrentPopup() }
+                })
+            })
+
+        }) // window
+        }) // withStyleVar
+        }) // withStyleColor
+
+        // ----------------------------------------------------------------
+        // Dialogs
+        // ----------------------------------------------------------------
+
+        // New canvas
+        if (showNewDlg) { UI.openPopup("new-dlg"); showNewDlg = false }
+        UI.popupModal("new-dlg", func() {
+            UI.text("New Canvas")
+            UI.separator()
+            UI.inputInt("Width",  newW)
+            UI.inputInt("Height", newH)
+            UI.dummy(0,8)
+            UI.withStyleColor({ Button:[0.0,0.0,0.5,1.0], Text:[1.0,1.0,1.0,1.0] }, func() {
+                if (UI.button("Create", 80, 0)) {
+                    CANVAS_W = max(newW[0], 1)
+                    CANVAS_H = max(newH[0], 1)
+                    canvas = SDL.Surface.new(CANVAS_W, CANVAS_H, null)
+                    canvas.fill([1,1,1,1], null)
+                    canvasTex = win.textureFromSurface(canvas, { link: true })
+                    previewSurf = SDL.Surface.new(CANVAS_W, CANVAS_H, null)
+                    previewSurf.fill([0,0,0,0], null)
+                    previewTex = win.textureFromSurface(previewSurf, { link: true })
+                    undoStack = []; redoStack = []
+                    statusMsg = "New "+str(CANVAS_W)+"×"+str(CANVAS_H)+" canvas"
+                    UI.closeCurrentPopup()
+                }
+            })
+            UI.sameLine()
+            if (UI.button("Cancel", 80, 0)) { UI.closeCurrentPopup() }
+        })
+
+        // Save
+        if (showSave) { UI.openPopup("save-dlg"); showSave = false }
+        UI.popupModal("save-dlg", func() {
+            UI.text("Save PNG")
+            UI.separator()
+            UI.inputText("Path", savePath)
+            UI.dummy(0,8)
+            UI.withStyleColor({ Button:[0.0,0.0,0.5,1.0], Text:[1.0,1.0,1.0,1.0] }, func() {
+                if (UI.button("Save", 80, 0)) {
+                    var path = savePath.toUtf8()
+                    if (length(path) > 0) {
+                        SDL.saveImage(canvas, path, null)
+                        statusMsg = "Saved: " + path
+                    }
+                    UI.closeCurrentPopup()
+                }
+            })
+            UI.sameLine()
+            if (UI.button("Cancel", 80, 0)) { UI.closeCurrentPopup() }
+        })
+
+        // Load
+        if (showLoad) { UI.openPopup("load-dlg"); showLoad = false }
+        UI.popupModal("load-dlg", func() {
+            UI.text("Open PNG / JPG")
+            UI.separator()
+            UI.inputText("Path", savePath)
+            UI.dummy(0,8)
+            UI.withStyleColor({ Button:[0.0,0.0,0.5,1.0], Text:[1.0,1.0,1.0,1.0] }, func() {
+                if (UI.button("Open", 80, 0)) {
+                    var path = savePath.toUtf8()
+                    if (length(path) > 0) {
+                        var loaded = SDL.loadImage(path)
+                        if (loaded != null) {
+                            var ls = loaded.size()
+                            CANVAS_W = ls.w; CANVAS_H = ls.h
+                            canvas = loaded
+                            canvasTex = win.textureFromSurface(canvas, { link: true })
+                            previewSurf = SDL.Surface.new(CANVAS_W, CANVAS_H, null)
+                            previewSurf.fill([0,0,0,0], null)
+                            previewTex = win.textureFromSurface(previewSurf, { link: true })
+                            undoStack = []; redoStack = []
+                            statusMsg = "Opened: " + path
+                        } else {
+                            statusMsg = "Failed to open: " + path
+                        }
+                    }
+                    UI.closeCurrentPopup()
+                }
+            })
+            UI.sameLine()
+            if (UI.button("Cancel", 80, 0)) { UI.closeCurrentPopup() }
+        })
+
+        // About
+        if (showAbout) { UI.openPopup("about-dlg"); showAbout = false }
+        UI.popupModal("about-dlg", func() {
+            UI.withStyleColor({ Text:[0.0,0.0,0.8,1.0] }, func() { UI.text("ZYM Paint  v1.0") })
+            UI.separator()
+            UI.text("A classic bitmap paint app built entirely in ZYM scripting language.")
+            UI.dummy(0,6)
+            UI.separatorText("Controls")
+            UI.labelText("Left click",   "draw with FG color")
+            UI.labelText("Right click",  "draw with BG color")
+            UI.labelText("Ctrl+Z / Y",   "undo / redo")
+            UI.labelText("Ctrl+S",       "save PNG")
+            UI.labelText("Ctrl+O",       "open PNG")
+            UI.labelText("Ctrl+N",       "new canvas")
+            UI.dummy(0,6)
+            UI.separatorText("Tools")
+            UI.labelText("Pencil",  "freehand drawing")
+            UI.labelText("Eraser",  "erase to BG color")
+            UI.labelText("Fill",    "flood fill region")
+            UI.labelText("Picker",  "pick color from canvas")
+            UI.dummy(0,6)
+            UI.withStyleColor({ Text:[0.5,0.5,0.5,1.0] }, func() {
+                UI.text("Built with ZYM 0.3.0  ·  SDL3  ·  Dear ImGui")
+            })
+            UI.dummy(0,8)
+            if (UI.button("OK", 80, 0)) { UI.closeCurrentPopup() }
+        })
+
+    }) // UI.frame
+}
+
+win.free()

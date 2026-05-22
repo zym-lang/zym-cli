@@ -1,382 +1,32 @@
-// Dear ImGui native — Slice 1 PR 2a (minimum viable end-to-end).
+// imgui.cpp — every `u_*` ImGui widget wrapper.
 //
-// Scope per future/gui.md §1.3 split:
-//   * ui.frame(win, body)           — per-frame begin/render/swap
-//   * ui.window(name, body)         — Begin/End scoped via callback
-//   * ui.button(label)              — returns clicked bool
-//   * ui.text(s)                    — Text
-//   * ui.lastError()                — string of last error stamped here
+// Phase B carve-out (see ui.cpp's header comment): the ImGui widget
+// surface used to live alongside the per-window context lifecycle in
+// `ui.cpp`. It was split off so:
+//   * the per-window context lifecycle (ensureWindowContext / u_frame /
+//     destroyUiContext / forwardEvent) and the FFI binder
+//     (`nativeUi_create`) stay terse in `ui.cpp`;
+//   * the ImGui widget surface lives here in a single dedicated TU;
+//   * the upcoming ImPlot surface lives in `implot.cpp`.
 //
-// Slice 1 PR 2b will add the rest of the widget surface (inputs,
-// sliders, combos, tables, popups, menus, layout, ref convention,
-// tree). PR 2c adds style stacks + themes + fonts + drawList.
+// Every `u_*` function in this file is a thin closure-callable
+// wrapper around an `ImGui::*` call, returning a `ZymValue`. All
+// arg-validation helpers (`reqStr`, `optNum`, `requireFrame`, ref
+// helpers, ...) are shared via `ui_internal.hpp`.
 //
-// Compiled only when ZYM_UI_ENABLED is defined (see CMakeLists.txt).
-// When disabled this TU is excluded and `cli_catalog.cpp` omits the
-// `ui` row.
+// The final `registerImGuiBindings` function is what `ui.cpp`'s
+// `nativeUi_create` calls to actually wire every closure into the
+// `ui` module map.
+//
+// Compiled only when ZYM_UI_ENABLED is defined.
 
-#include "natives.hpp"
-#include "sdl_internal.hpp"  // WindowHandle + hooks
-
-#include <SDL3/SDL.h>
-
-#include "imgui.h"
+#include "ui_internal.hpp"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
-#include <cfloat>
-#include <cstring>
-#include <string>
-#include <vector>
+#include <SDL3/SDL.h>
 
 namespace {
-
-// ---- module-level state -------------------------------------------------
-//
-// ImGui's per-window context is created lazily on the first
-// `ui.frame(win, ...)` targeting that window. The context owns the
-// SDL3 + SDLRenderer3 backend state — both need init when the context
-// is created and shutdown before SDL_DestroyRenderer / DestroyWindow.
-
-std::string g_ui_lastError;
-
-void setError(const char* msg) {
-    g_ui_lastError = msg ? msg : "";
-}
-
-// Destroy the ImGui context attached to a WindowHandle, if any.
-// Called from sdl.cpp's window finalizer / Window.free() via the
-// `g_sdl_uiContextDestructor` hook so teardown happens BEFORE the
-// SDL renderer/window go away.
-void destroyUiContext(WindowHandle* w) {
-    if (!w || !w->imguiContext) return;
-    auto* ctx = static_cast<ImGuiContext*>(w->imguiContext);
-    ImGuiContext* prev = ImGui::GetCurrentContext();
-    ImGui::SetCurrentContext(ctx);
-    ImGui_ImplSDLRenderer3_Shutdown();
-    ImGui_ImplSDL3_Shutdown();
-    ImGui::DestroyContext(ctx);
-    // Restore the previous context (may be null), but never reinstate
-    // the freed one.
-    if (prev != ctx) ImGui::SetCurrentContext(prev);
-    else             ImGui::SetCurrentContext(nullptr);
-    w->imguiContext = nullptr;
-}
-
-// Forward every SDL event we see through to ImGui's SDL3 backend.
-// The backend internally routes the event into the current ImGui
-// context based on the event's windowID; if multiple windows have
-// ImGui contexts we have to switch the current context per event.
-void forwardEvent(const SDL_Event* e) {
-    if (!e) return;
-    // Locate the window the event is for (if any) so we can pick the
-    // right ImGui context. Most events with a windowID expose it on
-    // `e->window.windowID`, but key/mouse events have their own
-    // windowID fields. SDL_GetWindowFromEvent handles all the cases.
-    SDL_Window* w = nullptr;
-    switch (e->type) {
-        case SDL_EVENT_WINDOW_SHOWN:
-        case SDL_EVENT_WINDOW_HIDDEN:
-        case SDL_EVENT_WINDOW_EXPOSED:
-        case SDL_EVENT_WINDOW_MOVED:
-        case SDL_EVENT_WINDOW_RESIZED:
-        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-        case SDL_EVENT_WINDOW_MINIMIZED:
-        case SDL_EVENT_WINDOW_MAXIMIZED:
-        case SDL_EVENT_WINDOW_RESTORED:
-        case SDL_EVENT_WINDOW_MOUSE_ENTER:
-        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
-        case SDL_EVENT_WINDOW_FOCUS_GAINED:
-        case SDL_EVENT_WINDOW_FOCUS_LOST:
-        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            w = SDL_GetWindowFromID(e->window.windowID);
-            break;
-        case SDL_EVENT_KEY_DOWN:
-        case SDL_EVENT_KEY_UP:
-        case SDL_EVENT_TEXT_INPUT:
-        case SDL_EVENT_TEXT_EDITING:
-            w = SDL_GetWindowFromID(e->key.windowID);
-            break;
-        case SDL_EVENT_MOUSE_MOTION:
-            w = SDL_GetWindowFromID(e->motion.windowID);
-            break;
-        case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        case SDL_EVENT_MOUSE_BUTTON_UP:
-            w = SDL_GetWindowFromID(e->button.windowID);
-            break;
-        case SDL_EVENT_MOUSE_WHEEL:
-            w = SDL_GetWindowFromID(e->wheel.windowID);
-            break;
-        default:
-            break;
-    }
-
-    // ONLY forward when we can resolve the event's target window to a
-    // WindowHandle that has a fully-initialised ImGui context+backend.
-    //
-    // The previous "broadcast to current context as a fallback" path
-    // was unsafe in two ways:
-    //   1. ImGui_ImplSDL3_ProcessEvent dereferences the SDL3 backend
-    //      data (`bd`) without a runtime guard in Release (the
-    //      IM_ASSERT is compiled out by -DNDEBUG), so calling it
-    //      against a context whose backend isn't initialised for THIS
-    //      event's window segfaults.
-    //   2. Events for SDL-internal windows (display/system) or events
-    //      whose windowID has already been destroyed have no business
-    //      reaching ImGui regardless.
-    //
-    // The "global" events ImGui actually cares about (gamepad add/
-    // remove, etc.) are all reachable through the per-window forward
-    // path once ImGui_ImplSDL3 has registered them — we don't need a
-    // broadcast.
-    if (!w) return;
-    auto props = SDL_GetWindowProperties(w);
-    if (!props) return;
-    void* p = SDL_GetPointerProperty(props, "zym.handle", nullptr);
-    auto* wh = static_cast<WindowHandle*>(p);
-    if (!wh || !wh->imguiContext) return;
-
-    ImGuiContext* prev = ImGui::GetCurrentContext();
-    ImGui::SetCurrentContext(static_cast<ImGuiContext*>(wh->imguiContext));
-    ImGui_ImplSDL3_ProcessEvent(e);
-    ImGui::SetCurrentContext(prev);
-}
-
-// ---- arg helpers ---------------------------------------------------------
-
-bool reqStr(ZymVM* vm, ZymValue v, const char* where, std::string* out) {
-    if (!zym_isString(v)) {
-        zym_runtimeError(vm, "%s expects a string", where);
-        return false;
-    }
-    *out = zym_asCString(v);
-    return true;
-}
-
-bool reqCallable(ZymVM* vm, ZymValue v, const char* where) {
-    if (zym_isClosure(v) || zym_isFunction(v)) return true;
-    zym_runtimeError(vm, "%s expects a callback function", where);
-    return false;
-}
-
-bool reqNum(ZymVM* vm, ZymValue v, const char* where, double* out) {
-    if (!zym_isNumber(v)) { zym_runtimeError(vm, "%s expects a number", where); return false; }
-    *out = zym_asNumber(v); return true;
-}
-bool reqInt(ZymVM* vm, ZymValue v, const char* where, int* out) {
-    double d; if (!reqNum(vm, v, where, &d)) return false;
-    *out = (int)d; return true;
-}
-bool reqBool(ZymVM* vm, ZymValue v, const char* where, bool* out) {
-    if (!zym_isBool(v)) { zym_runtimeError(vm, "%s expects a bool", where); return false; }
-    *out = zym_asBool(v); return true;
-}
-
-// Optional arg helpers — used by widgets with default values.
-double optNum(ZymValue v, double fallback) {
-    if (zym_isNumber(v)) return zym_asNumber(v);
-    return fallback;
-}
-int optInt(ZymValue v, int fallback) {
-    if (zym_isNumber(v)) return (int)zym_asNumber(v);
-    return fallback;
-}
-// Unsigned-32 variant — used for packed colors (IM_COL32) which routinely
-// exceed INT_MAX. Casting a double > INT_MAX directly to `int` is UB and
-// in practice produces 0/INT_MIN on GCC, which makes drawList colors look
-// frozen regardless of what the script passes. Round through uint32_t.
-uint32_t optU32(ZymValue v, uint32_t fallback) {
-    if (zym_isNumber(v)) {
-        double d = zym_asNumber(v);
-        if (d < 0.0) d = 0.0;
-        if (d > 4294967295.0) d = 4294967295.0;
-        return (uint32_t)d;
-    }
-    return fallback;
-}
-bool optBool(ZymValue v, bool fallback) {
-    if (zym_isBool(v)) return zym_asBool(v);
-    return fallback;
-}
-const char* optStr(ZymValue v, const char* fallback) {
-    if (zym_isString(v)) return zym_asCString(v);
-    return fallback;
-}
-
-// Single-element list "ref" helpers — script passes `[0]` / `[false]` /
-// `[0.0]` / `["text"]` and the bridge reads/writes index 0 in place.
-bool refReadInt(ZymVM* vm, ZymValue ref, const char* where, int* out) {
-    if (!zym_isList(ref) || zym_listLength(ref) < 1) {
-        zym_runtimeError(vm, "%s expects a single-element list ref like [0]", where);
-        return false;
-    }
-    ZymValue v = zym_listGet(vm, ref, 0);
-    if (!zym_isNumber(v)) {
-        zym_runtimeError(vm, "%s ref must contain a number", where);
-        return false;
-    }
-    *out = (int)zym_asNumber(v);
-    return true;
-}
-bool refReadFloat(ZymVM* vm, ZymValue ref, const char* where, float* out) {
-    if (!zym_isList(ref) || zym_listLength(ref) < 1) {
-        zym_runtimeError(vm, "%s expects a single-element list ref like [0.0]", where);
-        return false;
-    }
-    ZymValue v = zym_listGet(vm, ref, 0);
-    if (!zym_isNumber(v)) {
-        zym_runtimeError(vm, "%s ref must contain a number", where);
-        return false;
-    }
-    *out = (float)zym_asNumber(v);
-    return true;
-}
-bool refReadBool(ZymVM* vm, ZymValue ref, const char* where, bool* out) {
-    if (!zym_isList(ref) || zym_listLength(ref) < 1) {
-        zym_runtimeError(vm, "%s expects a single-element list ref like [false]", where);
-        return false;
-    }
-    ZymValue v = zym_listGet(vm, ref, 0);
-    if (!zym_isBool(v)) {
-        zym_runtimeError(vm, "%s ref must contain a bool", where);
-        return false;
-    }
-    *out = zym_asBool(v);
-    return true;
-}
-bool refWriteInt(ZymVM* vm, ZymValue ref, int val) {
-    return zym_listSet(vm, ref, 0, zym_newNumber((double)val));
-}
-bool refWriteFloat(ZymVM* vm, ZymValue ref, float val) {
-    return zym_listSet(vm, ref, 0, zym_newNumber((double)val));
-}
-bool refWriteBool(ZymVM* vm, ZymValue ref, bool val) {
-    return zym_listSet(vm, ref, 0, zym_newBool(val));
-}
-
-// Color ref — list of 3 or 4 floats in [r, g, b] / [r, g, b, a] form.
-// Returns the count actually read (3 or 4).
-int refReadColor(ZymVM* vm, ZymValue ref, const char* where, float out[4]) {
-    if (!zym_isList(ref)) {
-        zym_runtimeError(vm, "%s expects a color list ref [r,g,b] or [r,g,b,a]", where);
-        return 0;
-    }
-    int n = zym_listLength(ref);
-    if (n != 3 && n != 4) {
-        zym_runtimeError(vm, "%s color ref must have 3 or 4 elements", where);
-        return 0;
-    }
-    for (int i = 0; i < n; i++) {
-        ZymValue v = zym_listGet(vm, ref, i);
-        if (!zym_isNumber(v)) {
-            zym_runtimeError(vm, "%s color ref element %d must be a number", where, i);
-            return 0;
-        }
-        out[i] = (float)zym_asNumber(v);
-    }
-    if (n == 3) out[3] = 1.0f;
-    return n;
-}
-void refWriteColor(ZymVM* vm, ZymValue ref, const float c[4], int count) {
-    for (int i = 0; i < count; i++) {
-        zym_listSet(vm, ref, i, zym_newNumber((double)c[i]));
-    }
-}
-
-// Frame-context guard used by every widget — they all need an active
-// ImGui frame, which `ui.frame(win, body)` is responsible for opening.
-bool requireFrame(ZymVM* vm, const char* where) {
-    if (!ImGui::GetCurrentContext()) {
-        zym_runtimeError(vm, "%s: called outside ui.frame(...)", where);
-        return false;
-    }
-    return true;
-}
-
-// ---- frame ---------------------------------------------------------------
-
-// Lazily attach an ImGui context (with SDL3 + SDLRenderer3 backends)
-// to a window. Returns the context or nullptr on failure (with
-// g_ui_lastError set).
-ImGuiContext* ensureWindowContext(WindowHandle* w) {
-    if (w->imguiContext) return static_cast<ImGuiContext*>(w->imguiContext);
-    if (!w->window || !w->renderer) {
-        setError("ui: window has no renderer");
-        return nullptr;
-    }
-
-    IMGUI_CHECKVERSION();
-    ImGuiContext* ctx = ImGui::CreateContext();
-    if (!ctx) { setError("ui: ImGui::CreateContext failed"); return nullptr; }
-
-    ImGui::SetCurrentContext(ctx);
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    // Disable INI persistence by default — scripts that want it can
-    // opt back in later via `ui.setIniFilename(...)` (post-Slice-1).
-    io.IniFilename = nullptr;
-
-    if (!ImGui_ImplSDL3_InitForSDLRenderer(w->window, w->renderer)) {
-        setError("ui: ImGui_ImplSDL3_InitForSDLRenderer failed");
-        ImGui::DestroyContext(ctx);
-        return nullptr;
-    }
-    if (!ImGui_ImplSDLRenderer3_Init(w->renderer)) {
-        setError("ui: ImGui_ImplSDLRenderer3_Init failed");
-        ImGui_ImplSDL3_Shutdown();
-        ImGui::DestroyContext(ctx);
-        return nullptr;
-    }
-
-    w->imguiContext = ctx;
-    return ctx;
-}
-
-// `ui.frame(win, body)` — begin a frame for `win`, invoke `body`, then
-// render + present. The bridge owns the begin/end so scripts can never
-// desync the pair (locked decision §1.0).
-ZymValue u_frame(ZymVM* vm, ZymValue /*self*/, ZymValue winV, ZymValue bodyV) {
-    WindowHandle* w = sdlGetWindowHandle(vm, winV);
-    if (!w || !w->window || !w->renderer) {
-        zym_runtimeError(vm, "ui.frame(win, body): invalid window handle");
-        return ZYM_ERROR;
-    }
-    if (!reqCallable(vm, bodyV, "ui.frame(win, body)")) return ZYM_ERROR;
-
-    ImGuiContext* ctx = ensureWindowContext(w);
-    if (!ctx) {
-        zym_runtimeError(vm, "ui.frame: %s", g_ui_lastError.c_str());
-        return ZYM_ERROR;
-    }
-    ImGui::SetCurrentContext(ctx);
-
-    ImGui_ImplSDLRenderer3_NewFrame();
-    ImGui_ImplSDL3_NewFrame();
-    ImGui::NewFrame();
-
-    // Root the body closure across the re-entrant call: it lives in the
-    // caller's argument slot, but re-entry into the VM can shuffle the
-    // stack window in ways that leave the slot below the live GC root
-    // set. An explicit temp root is the safe pattern (matches
-    // `zym_native.cpp`'s callback paths).
-    zym_pushRoot(vm, bodyV);
-    ZymStatus st = zym_callClosurev(vm, bodyV, 0, nullptr);
-    zym_popRoot(vm);
-
-    ImGui::Render();
-    ImGuiIO& io = ImGui::GetIO();
-    SDL_SetRenderScale(w->renderer, io.DisplayFramebufferScale.x,
-                       io.DisplayFramebufferScale.y);
-    // Clear to a neutral dark gray; scripts can call any `sdl.*`
-    // drawing they want later (future slice) before we paint ImGui.
-    SDL_SetRenderDrawColor(w->renderer, 30, 30, 35, 255);
-    SDL_RenderClear(w->renderer);
-    ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), w->renderer);
-    SDL_RenderPresent(w->renderer);
-
-    if (st != ZYM_STATUS_OK) return ZYM_ERROR;
-    return zym_newNull();
-}
 
 // ---- window scope --------------------------------------------------------
 
@@ -3860,24 +3510,18 @@ ZymValue dl_addImageRounded(ZymVM* vm, ZymValue self, ZymValue* vargv, int vargc
     return zym_newNull();
 }
 
+
 } // namespace
 
-// ---- module assembly -----------------------------------------------------
+// ---- registration --------------------------------------------------------
 
-ZymValue nativeUi_create(ZymVM* vm) {
-    // Wire up the sdl <-> ui hooks. Safe to do at every `nativeUi_create`
-    // call (idempotent — they're just function-pointer assignments).
-    g_sdl_uiContextDestructor = destroyUiContext;
-    g_sdl_uiEventForwarder    = forwardEvent;
-
-    ZymValue context = zym_createNativeContext(vm, nullptr, nullptr);
-    zym_pushRoot(vm, context);
-
+void registerImGuiBindings(ZymVM* vm, ZymValue obj, ZymValue context, RootScope& roots) {
 #define MOD(name, sig, fn) \
-    ZymValue name = zym_createNativeClosure(vm, sig, (void*)fn, context); \
-    zym_pushRoot(vm, name);
+    ZymValue name = roots.push(zym_createNativeClosure(vm, sig, (void*)fn, context));
 
-    MOD(frame,     "frame(win, body)",  u_frame)
+    // `frame` is registered by `ui.cpp`'s `nativeUi_create` because
+    // `u_frame` lives in that TU (it owns the per-window ImGui+ImPlot
+    // context lifecycle).
     MOD(lastError, "lastError()",       u_lastError)
     MOD(silent,           "silent(on)",           u_silent)
     MOD(setErrorLogging,  "setErrorLogging(on)",  u_setErrorLogging)
@@ -3885,11 +3529,11 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // window: 2-arg (name, body) or 3-arg (name, flags, body) via dispatcher
     ZymValue window2 = zym_createNativeClosure(vm, "window(name, body)",        (void*)u_window,      context);
-    zym_pushRoot(vm, window2);
+    roots.push(window2);
     ZymValue window3 = zym_createNativeClosure(vm, "window(name, flags, body)", (void*)u_windowFlags, context);
-    zym_pushRoot(vm, window3);
+    roots.push(window3);
     ZymValue window = zym_createDispatcher(vm);
-    zym_pushRoot(vm, window);
+    roots.push(window);
     zym_addOverload(vm, window, window2);
     zym_addOverload(vm, window, window3);
 
@@ -3907,11 +3551,11 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // buttons (with dispatcher for button arity overload)
     ZymValue button1 = zym_createNativeClosure(vm, "button(label)", (void*)u_button, context);
-    zym_pushRoot(vm, button1);
+    roots.push(button1);
     ZymValue button3 = zym_createNativeClosure(vm, "button(label, w, h)", (void*)u_buttonSized, context);
-    zym_pushRoot(vm, button3);
+    roots.push(button3);
     ZymValue button = zym_createDispatcher(vm);
-    zym_pushRoot(vm, button);
+    roots.push(button);
     zym_addOverload(vm, button, button1);
     zym_addOverload(vm, button, button3);
 
@@ -3923,23 +3567,23 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(checkbox,      "checkbox(label, ref)",                u_checkbox)
     MOD(radioButton,   "radioButton(label, active)",          u_radioButton)
     ZymValue selectable2 = zym_createNativeClosure(vm, "selectable(label, sel)", (void*)u_selectable, context);
-    zym_pushRoot(vm, selectable2);
+    roots.push(selectable2);
     ZymValue selectable3 = zym_createNativeClosure(vm, "selectable(label, sel, flags)", (void*)u_selectable, context);
-    zym_pushRoot(vm, selectable3);
+    roots.push(selectable3);
     ZymValue selectable = zym_createDispatcher(vm);
-    zym_pushRoot(vm, selectable);
+    roots.push(selectable);
     zym_addOverload(vm, selectable, selectable2);
     zym_addOverload(vm, selectable, selectable3);
 
     // layout
     ZymValue sameLine0 = zym_createNativeClosure(vm, "sameLine()", (void*)u_sameLine, context);
-    zym_pushRoot(vm, sameLine0);
+    roots.push(sameLine0);
     ZymValue sameLine1 = zym_createNativeClosure(vm, "sameLine(offset)", (void*)u_sameLine, context);
-    zym_pushRoot(vm, sameLine1);
+    roots.push(sameLine1);
     ZymValue sameLine2 = zym_createNativeClosure(vm, "sameLine(offset, spacing)", (void*)u_sameLine, context);
-    zym_pushRoot(vm, sameLine2);
+    roots.push(sameLine2);
     ZymValue sameLine = zym_createDispatcher(vm);
-    zym_pushRoot(vm, sameLine);
+    roots.push(sameLine);
     zym_addOverload(vm, sameLine, sameLine0);
     zym_addOverload(vm, sameLine, sameLine1);
     zym_addOverload(vm, sameLine, sameLine2);
@@ -3950,20 +3594,20 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(dummy,     "dummy(w, h)", u_dummy)
 
     ZymValue indent0 = zym_createNativeClosure(vm, "indent()", (void*)u_indent, context);
-    zym_pushRoot(vm, indent0);
+    roots.push(indent0);
     ZymValue indent1 = zym_createNativeClosure(vm, "indent(px)", (void*)u_indent, context);
-    zym_pushRoot(vm, indent1);
+    roots.push(indent1);
     ZymValue indent = zym_createDispatcher(vm);
-    zym_pushRoot(vm, indent);
+    roots.push(indent);
     zym_addOverload(vm, indent, indent0);
     zym_addOverload(vm, indent, indent1);
 
     ZymValue unindent0 = zym_createNativeClosure(vm, "unindent()", (void*)u_unindent, context);
-    zym_pushRoot(vm, unindent0);
+    roots.push(unindent0);
     ZymValue unindent1 = zym_createNativeClosure(vm, "unindent(px)", (void*)u_unindent, context);
-    zym_pushRoot(vm, unindent1);
+    roots.push(unindent1);
     ZymValue unindent = zym_createDispatcher(vm);
-    zym_pushRoot(vm, unindent);
+    roots.push(unindent);
     zym_addOverload(vm, unindent, unindent0);
     zym_addOverload(vm, unindent, unindent1);
 
@@ -3981,23 +3625,23 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(tooltip, "tooltip(s)", u_tooltip)
 
     ZymValue progressBar1 = zym_createNativeClosure(vm, "progressBar(frac)",                       (void*)u_progressBar, context);
-    zym_pushRoot(vm, progressBar1);
+    roots.push(progressBar1);
     ZymValue progressBar3 = zym_createNativeClosure(vm, "progressBar(frac, w, h)",                 (void*)u_progressBar, context);
-    zym_pushRoot(vm, progressBar3);
+    roots.push(progressBar3);
     ZymValue progressBar4 = zym_createNativeClosure(vm, "progressBar(frac, w, h, overlay)",        (void*)u_progressBar, context);
-    zym_pushRoot(vm, progressBar4);
+    roots.push(progressBar4);
     ZymValue progressBar = zym_createDispatcher(vm);
-    zym_pushRoot(vm, progressBar);
+    roots.push(progressBar);
     zym_addOverload(vm, progressBar, progressBar1);
     zym_addOverload(vm, progressBar, progressBar3);
     zym_addOverload(vm, progressBar, progressBar4);
 
     ZymValue collapsingHeader1 = zym_createNativeClosure(vm, "collapsingHeader(label)",        (void*)u_collapsingHeader, context);
-    zym_pushRoot(vm, collapsingHeader1);
+    roots.push(collapsingHeader1);
     ZymValue collapsingHeader2 = zym_createNativeClosure(vm, "collapsingHeader(label, flags)", (void*)u_collapsingHeader, context);
-    zym_pushRoot(vm, collapsingHeader2);
+    roots.push(collapsingHeader2);
     ZymValue collapsingHeader = zym_createDispatcher(vm);
-    zym_pushRoot(vm, collapsingHeader);
+    roots.push(collapsingHeader);
     zym_addOverload(vm, collapsingHeader, collapsingHeader1);
     zym_addOverload(vm, collapsingHeader, collapsingHeader2);
 
@@ -4005,90 +3649,90 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // inputInt(label, ref) / inputInt(label, ref, step)
     ZymValue inputInt2 = zym_createNativeClosure(vm, "inputInt(label, ref)",        (void*)u_inputInt, context);
-    zym_pushRoot(vm, inputInt2);
+    roots.push(inputInt2);
     ZymValue inputInt3 = zym_createNativeClosure(vm, "inputInt(label, ref, step)",  (void*)u_inputInt, context);
-    zym_pushRoot(vm, inputInt3);
+    roots.push(inputInt3);
     ZymValue inputInt  = zym_createDispatcher(vm);
-    zym_pushRoot(vm, inputInt);
+    roots.push(inputInt);
     zym_addOverload(vm, inputInt, inputInt2);
     zym_addOverload(vm, inputInt, inputInt3);
 
     // inputFloat(label, ref) / (label, ref, step) / (label, ref, step, fmt)
     ZymValue inputFloat2 = zym_createNativeClosure(vm, "inputFloat(label, ref)",            (void*)u_inputFloat, context);
-    zym_pushRoot(vm, inputFloat2);
+    roots.push(inputFloat2);
     ZymValue inputFloat3 = zym_createNativeClosure(vm, "inputFloat(label, ref, step)",      (void*)u_inputFloat, context);
-    zym_pushRoot(vm, inputFloat3);
+    roots.push(inputFloat3);
     ZymValue inputFloat4 = zym_createNativeClosure(vm, "inputFloat(label, ref, step, fmt)", (void*)u_inputFloat, context);
-    zym_pushRoot(vm, inputFloat4);
+    roots.push(inputFloat4);
     ZymValue inputFloat  = zym_createDispatcher(vm);
-    zym_pushRoot(vm, inputFloat);
+    roots.push(inputFloat);
     zym_addOverload(vm, inputFloat, inputFloat2);
     zym_addOverload(vm, inputFloat, inputFloat3);
     zym_addOverload(vm, inputFloat, inputFloat4);
 
     // sliderInt(label, ref, min, max) / + fmt
     ZymValue sliderInt4 = zym_createNativeClosure(vm, "sliderInt(label, ref, min, max)",      (void*)u_sliderInt, context);
-    zym_pushRoot(vm, sliderInt4);
+    roots.push(sliderInt4);
     ZymValue sliderInt5 = zym_createNativeClosure(vm, "sliderInt(label, ref, min, max, fmt)", (void*)u_sliderInt, context);
-    zym_pushRoot(vm, sliderInt5);
+    roots.push(sliderInt5);
     ZymValue sliderInt  = zym_createDispatcher(vm);
-    zym_pushRoot(vm, sliderInt);
+    roots.push(sliderInt);
     zym_addOverload(vm, sliderInt, sliderInt4);
     zym_addOverload(vm, sliderInt, sliderInt5);
 
     // sliderFloat(label, ref, min, max) / + fmt
     ZymValue sliderFloat4 = zym_createNativeClosure(vm, "sliderFloat(label, ref, min, max)",      (void*)u_sliderFloat, context);
-    zym_pushRoot(vm, sliderFloat4);
+    roots.push(sliderFloat4);
     ZymValue sliderFloat5 = zym_createNativeClosure(vm, "sliderFloat(label, ref, min, max, fmt)", (void*)u_sliderFloat, context);
-    zym_pushRoot(vm, sliderFloat5);
+    roots.push(sliderFloat5);
     ZymValue sliderFloat  = zym_createDispatcher(vm);
-    zym_pushRoot(vm, sliderFloat);
+    roots.push(sliderFloat);
     zym_addOverload(vm, sliderFloat, sliderFloat4);
     zym_addOverload(vm, sliderFloat, sliderFloat5);
 
     // dragInt(label, ref) / (label, ref, speed) / (label, ref, speed, min, max)
     ZymValue dragInt2 = zym_createNativeClosure(vm, "dragInt(label, ref)",                  (void*)u_dragInt, context);
-    zym_pushRoot(vm, dragInt2);
+    roots.push(dragInt2);
     ZymValue dragInt3 = zym_createNativeClosure(vm, "dragInt(label, ref, speed)",           (void*)u_dragInt, context);
-    zym_pushRoot(vm, dragInt3);
+    roots.push(dragInt3);
     ZymValue dragInt5 = zym_createNativeClosure(vm, "dragInt(label, ref, speed, min, max)", (void*)u_dragInt, context);
-    zym_pushRoot(vm, dragInt5);
+    roots.push(dragInt5);
     ZymValue dragInt  = zym_createDispatcher(vm);
-    zym_pushRoot(vm, dragInt);
+    roots.push(dragInt);
     zym_addOverload(vm, dragInt, dragInt2);
     zym_addOverload(vm, dragInt, dragInt3);
     zym_addOverload(vm, dragInt, dragInt5);
 
     // dragFloat(label, ref) / (label, ref, speed) / (label, ref, speed, min, max)
     ZymValue dragFloat2 = zym_createNativeClosure(vm, "dragFloat(label, ref)",                  (void*)u_dragFloat, context);
-    zym_pushRoot(vm, dragFloat2);
+    roots.push(dragFloat2);
     ZymValue dragFloat3 = zym_createNativeClosure(vm, "dragFloat(label, ref, speed)",           (void*)u_dragFloat, context);
-    zym_pushRoot(vm, dragFloat3);
+    roots.push(dragFloat3);
     ZymValue dragFloat5 = zym_createNativeClosure(vm, "dragFloat(label, ref, speed, min, max)", (void*)u_dragFloat, context);
-    zym_pushRoot(vm, dragFloat5);
+    roots.push(dragFloat5);
     ZymValue dragFloat  = zym_createDispatcher(vm);
-    zym_pushRoot(vm, dragFloat);
+    roots.push(dragFloat);
     zym_addOverload(vm, dragFloat, dragFloat2);
     zym_addOverload(vm, dragFloat, dragFloat3);
     zym_addOverload(vm, dragFloat, dragFloat5);
 
     // inputText(label, buf) / (label, buf, flags)
     ZymValue inputText2 = zym_createNativeClosure(vm, "inputText(label, buf)",        (void*)u_inputText, context);
-    zym_pushRoot(vm, inputText2);
+    roots.push(inputText2);
     ZymValue inputText3 = zym_createNativeClosure(vm, "inputText(label, buf, flags)", (void*)u_inputText, context);
-    zym_pushRoot(vm, inputText3);
+    roots.push(inputText3);
     ZymValue inputText  = zym_createDispatcher(vm);
-    zym_pushRoot(vm, inputText);
+    roots.push(inputText);
     zym_addOverload(vm, inputText, inputText2);
     zym_addOverload(vm, inputText, inputText3);
 
     // inputTextMultiline(label, buf, w, h) / (label, buf, w, h, flags)
     ZymValue inputTextMultiline4 = zym_createNativeClosure(vm, "inputTextMultiline(label, buf, w, h)",        (void*)u_inputTextMultiline, context);
-    zym_pushRoot(vm, inputTextMultiline4);
+    roots.push(inputTextMultiline4);
     ZymValue inputTextMultiline5 = zym_createNativeClosure(vm, "inputTextMultiline(label, buf, w, h, flags)", (void*)u_inputTextMultiline, context);
-    zym_pushRoot(vm, inputTextMultiline5);
+    roots.push(inputTextMultiline5);
     ZymValue inputTextMultiline  = zym_createDispatcher(vm);
-    zym_pushRoot(vm, inputTextMultiline);
+    roots.push(inputTextMultiline);
     zym_addOverload(vm, inputTextMultiline, inputTextMultiline4);
     zym_addOverload(vm, inputTextMultiline, inputTextMultiline5);
 
@@ -4099,13 +3743,13 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // child(id, body) / child(id, opts, body) / child(id, w, h, border, body)
     ZymValue child2v = zym_createNativeClosure(vm, "child(id, body)",                 (void*)u_child2, context);
-    zym_pushRoot(vm, child2v);
+    roots.push(child2v);
     ZymValue child3v = zym_createNativeClosure(vm, "child(id, opts, body)",           (void*)u_child3, context);
-    zym_pushRoot(vm, child3v);
+    roots.push(child3v);
     ZymValue child5v = zym_createNativeClosure(vm, "child(id, w, h, border, body)",   (void*)u_child5, context);
-    zym_pushRoot(vm, child5v);
+    roots.push(child5v);
     ZymValue child   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, child);
+    roots.push(child);
     zym_addOverload(vm, child, child2v);
     zym_addOverload(vm, child, child3v);
     zym_addOverload(vm, child, child5v);
@@ -4121,21 +3765,21 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // table(id, columns, body) / table(id, columns, flags, body)
     ZymValue table3v = zym_createNativeClosure(vm, "table(id, columns, body)",        (void*)u_table3, context);
-    zym_pushRoot(vm, table3v);
+    roots.push(table3v);
     ZymValue table4v = zym_createNativeClosure(vm, "table(id, columns, flags, body)", (void*)u_table4, context);
-    zym_pushRoot(vm, table4v);
+    roots.push(table4v);
     ZymValue table   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, table);
+    roots.push(table);
     zym_addOverload(vm, table, table3v);
     zym_addOverload(vm, table, table4v);
 
     // tableNextRow() / tableNextRow(minHeight)
     ZymValue tableNextRow0v = zym_createNativeClosure(vm, "tableNextRow()",          (void*)u_tableNextRow0, context);
-    zym_pushRoot(vm, tableNextRow0v);
+    roots.push(tableNextRow0v);
     ZymValue tableNextRow1v = zym_createNativeClosure(vm, "tableNextRow(minHeight)", (void*)u_tableNextRow1, context);
-    zym_pushRoot(vm, tableNextRow1v);
+    roots.push(tableNextRow1v);
     ZymValue tableNextRow   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, tableNextRow);
+    roots.push(tableNextRow);
     zym_addOverload(vm, tableNextRow, tableNextRow0v);
     zym_addOverload(vm, tableNextRow, tableNextRow1v);
 
@@ -4144,13 +3788,13 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // tableSetupColumn(label) / (label, flags) / (label, flags, width)
     ZymValue tableSetupColumn1v = zym_createNativeClosure(vm, "tableSetupColumn(label)",               (void*)u_tableSetupColumn1, context);
-    zym_pushRoot(vm, tableSetupColumn1v);
+    roots.push(tableSetupColumn1v);
     ZymValue tableSetupColumn2v = zym_createNativeClosure(vm, "tableSetupColumn(label, flags)",        (void*)u_tableSetupColumn2, context);
-    zym_pushRoot(vm, tableSetupColumn2v);
+    roots.push(tableSetupColumn2v);
     ZymValue tableSetupColumn3v = zym_createNativeClosure(vm, "tableSetupColumn(label, flags, width)", (void*)u_tableSetupColumn3, context);
-    zym_pushRoot(vm, tableSetupColumn3v);
+    roots.push(tableSetupColumn3v);
     ZymValue tableSetupColumn   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, tableSetupColumn);
+    roots.push(tableSetupColumn);
     zym_addOverload(vm, tableSetupColumn, tableSetupColumn1v);
     zym_addOverload(vm, tableSetupColumn, tableSetupColumn2v);
     zym_addOverload(vm, tableSetupColumn, tableSetupColumn3v);
@@ -4164,13 +3808,13 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // columns(count) / (count, id) / (count, id, border)
     ZymValue columns1v = zym_createNativeClosure(vm, "columns(count)",               (void*)u_columns1, context);
-    zym_pushRoot(vm, columns1v);
+    roots.push(columns1v);
     ZymValue columns2v = zym_createNativeClosure(vm, "columns(count, id)",           (void*)u_columns2, context);
-    zym_pushRoot(vm, columns2v);
+    roots.push(columns2v);
     ZymValue columns3v = zym_createNativeClosure(vm, "columns(count, id, border)",   (void*)u_columns3, context);
-    zym_pushRoot(vm, columns3v);
+    roots.push(columns3v);
     ZymValue columns   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, columns);
+    roots.push(columns);
     zym_addOverload(vm, columns, columns1v);
     zym_addOverload(vm, columns, columns2v);
     zym_addOverload(vm, columns, columns3v);
@@ -4181,31 +3825,31 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // popup(id, body) / popup(id, flags, body)
     ZymValue popup2v = zym_createNativeClosure(vm, "popup(id, body)",        (void*)u_popup2, context);
-    zym_pushRoot(vm, popup2v);
+    roots.push(popup2v);
     ZymValue popup3v = zym_createNativeClosure(vm, "popup(id, flags, body)", (void*)u_popup3, context);
-    zym_pushRoot(vm, popup3v);
+    roots.push(popup3v);
     ZymValue popup   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, popup);
+    roots.push(popup);
     zym_addOverload(vm, popup, popup2v);
     zym_addOverload(vm, popup, popup3v);
 
     // popupModal(name, body) / popupModal(name, flags, body)
     ZymValue popupModal2v = zym_createNativeClosure(vm, "popupModal(name, body)",        (void*)u_popupModal2, context);
-    zym_pushRoot(vm, popupModal2v);
+    roots.push(popupModal2v);
     ZymValue popupModal3v = zym_createNativeClosure(vm, "popupModal(name, flags, body)", (void*)u_popupModal3, context);
-    zym_pushRoot(vm, popupModal3v);
+    roots.push(popupModal3v);
     ZymValue popupModal   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, popupModal);
+    roots.push(popupModal);
     zym_addOverload(vm, popupModal, popupModal2v);
     zym_addOverload(vm, popupModal, popupModal3v);
 
     // openPopup(id) / openPopup(id, flags)
     ZymValue openPopup1v = zym_createNativeClosure(vm, "openPopup(id)",        (void*)u_openPopup1, context);
-    zym_pushRoot(vm, openPopup1v);
+    roots.push(openPopup1v);
     ZymValue openPopup2v = zym_createNativeClosure(vm, "openPopup(id, flags)", (void*)u_openPopup2, context);
-    zym_pushRoot(vm, openPopup2v);
+    roots.push(openPopup2v);
     ZymValue openPopup   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, openPopup);
+    roots.push(openPopup);
     zym_addOverload(vm, openPopup, openPopup1v);
     zym_addOverload(vm, openPopup, openPopup2v);
 
@@ -4215,26 +3859,26 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // menu(label, body) / menu(label, enabled, body)
     ZymValue menu2v = zym_createNativeClosure(vm, "menu(label, body)",          (void*)u_menu2, context);
-    zym_pushRoot(vm, menu2v);
+    roots.push(menu2v);
     ZymValue menu3v = zym_createNativeClosure(vm, "menu(label, enabled, body)", (void*)u_menu3, context);
-    zym_pushRoot(vm, menu3v);
+    roots.push(menu3v);
     ZymValue menu   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, menu);
+    roots.push(menu);
     zym_addOverload(vm, menu, menu2v);
     zym_addOverload(vm, menu, menu3v);
 
     // menuItem(label) / (label, shortcut) / (label, shortcut, selected)
     //   / (label, shortcut, selected, enabled)
     ZymValue menuItem1v = zym_createNativeClosure(vm, "menuItem(label)",                              (void*)u_menuItem1, context);
-    zym_pushRoot(vm, menuItem1v);
+    roots.push(menuItem1v);
     ZymValue menuItem2v = zym_createNativeClosure(vm, "menuItem(label, shortcut)",                    (void*)u_menuItem2, context);
-    zym_pushRoot(vm, menuItem2v);
+    roots.push(menuItem2v);
     ZymValue menuItem3v = zym_createNativeClosure(vm, "menuItem(label, shortcut, selected)",          (void*)u_menuItem3, context);
-    zym_pushRoot(vm, menuItem3v);
+    roots.push(menuItem3v);
     ZymValue menuItem4v = zym_createNativeClosure(vm, "menuItem(label, shortcut, selected, enabled)", (void*)u_menuItem4, context);
-    zym_pushRoot(vm, menuItem4v);
+    roots.push(menuItem4v);
     ZymValue menuItem   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, menuItem);
+    roots.push(menuItem);
     zym_addOverload(vm, menuItem, menuItem1v);
     zym_addOverload(vm, menuItem, menuItem2v);
     zym_addOverload(vm, menuItem, menuItem3v);
@@ -4244,25 +3888,25 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // plotLines / plotHistogram dispatchers (2/3/5-arg)
     ZymValue plotLines2v = zym_createNativeClosure(vm, "plotLines(label, values)",                       (void*)u_plotLines2, context);
-    zym_pushRoot(vm, plotLines2v);
+    roots.push(plotLines2v);
     ZymValue plotLines3v = zym_createNativeClosure(vm, "plotLines(label, values, overlay)",              (void*)u_plotLines3, context);
-    zym_pushRoot(vm, plotLines3v);
+    roots.push(plotLines3v);
     ZymValue plotLines5v = zym_createNativeClosure(vm, "plotLines(label, values, overlay, min, max)",    (void*)u_plotLines5, context);
-    zym_pushRoot(vm, plotLines5v);
+    roots.push(plotLines5v);
     ZymValue plotLines   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, plotLines);
+    roots.push(plotLines);
     zym_addOverload(vm, plotLines, plotLines2v);
     zym_addOverload(vm, plotLines, plotLines3v);
     zym_addOverload(vm, plotLines, plotLines5v);
 
     ZymValue plotHist2v = zym_createNativeClosure(vm, "plotHistogram(label, values)",                    (void*)u_plotHist2, context);
-    zym_pushRoot(vm, plotHist2v);
+    roots.push(plotHist2v);
     ZymValue plotHist3v = zym_createNativeClosure(vm, "plotHistogram(label, values, overlay)",           (void*)u_plotHist3, context);
-    zym_pushRoot(vm, plotHist3v);
+    roots.push(plotHist3v);
     ZymValue plotHist5v = zym_createNativeClosure(vm, "plotHistogram(label, values, overlay, min, max)", (void*)u_plotHist5, context);
-    zym_pushRoot(vm, plotHist5v);
+    roots.push(plotHist5v);
     ZymValue plotHistogram = zym_createDispatcher(vm);
-    zym_pushRoot(vm, plotHistogram);
+    roots.push(plotHistogram);
     zym_addOverload(vm, plotHistogram, plotHist2v);
     zym_addOverload(vm, plotHistogram, plotHist3v);
     zym_addOverload(vm, plotHistogram, plotHist5v);
@@ -4308,11 +3952,11 @@ ZymValue nativeUi_create(ZymVM* vm) {
     // loadFont: 2-arg (src, sizePx) or 3-arg (src, sizePx, opts). `src`
     // is either a filesystem path (string) or a Buffer of TTF/OTF bytes.
     ZymValue loadFont2v = zym_createNativeClosure(vm, "loadFont(src, sizePx)",       (void*)u_loadFont2, context);
-    zym_pushRoot(vm, loadFont2v);
+    roots.push(loadFont2v);
     ZymValue loadFont3v = zym_createNativeClosure(vm, "loadFont(src, sizePx, opts)", (void*)u_loadFont3, context);
-    zym_pushRoot(vm, loadFont3v);
+    roots.push(loadFont3v);
     ZymValue loadFont   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, loadFont);
+    roots.push(loadFont);
     zym_addOverload(vm, loadFont, loadFont2v);
     zym_addOverload(vm, loadFont, loadFont3v);
 
@@ -4325,11 +3969,11 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // listBox: scoped (label, body) and flat (label, idxRef, items)
     ZymValue listBox2v = zym_createNativeClosure(vm, "listBox(label, body)",          (void*)u_listBox,     context);
-    zym_pushRoot(vm, listBox2v);
+    roots.push(listBox2v);
     ZymValue listBox3v = zym_createNativeClosure(vm, "listBox(label, idxRef, items)", (void*)u_listBoxFlat, context);
-    zym_pushRoot(vm, listBox3v);
+    roots.push(listBox3v);
     ZymValue listBox   = zym_createDispatcher(vm);
-    zym_pushRoot(vm, listBox);
+    roots.push(listBox);
     zym_addOverload(vm, listBox, listBox2v);
     zym_addOverload(vm, listBox, listBox3v);
 
@@ -4451,11 +4095,11 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
     // PR 2e — drag-and-drop
     ZymValue beginDragDropSource0 = zym_createNativeClosure(vm, "beginDragDropSource()", (void*)u_beginDragDropSource, context);
-    zym_pushRoot(vm, beginDragDropSource0);
+    roots.push(beginDragDropSource0);
     ZymValue beginDragDropSource1 = zym_createNativeClosure(vm, "beginDragDropSource(flags)", (void*)u_beginDragDropSource, context);
-    zym_pushRoot(vm, beginDragDropSource1);
+    roots.push(beginDragDropSource1);
     ZymValue beginDragDropSource = zym_createDispatcher(vm);
-    zym_pushRoot(vm, beginDragDropSource);
+    roots.push(beginDragDropSource);
     zym_addOverload(vm, beginDragDropSource, beginDragDropSource0);
     zym_addOverload(vm, beginDragDropSource, beginDragDropSource1);
 
@@ -4465,11 +4109,11 @@ ZymValue nativeUi_create(ZymVM* vm) {
     MOD(endDragDropTarget,    "endDragDropTarget()",                 u_endDragDropTarget)
 
     ZymValue acceptDragDropPayload1 = zym_createNativeClosure(vm, "acceptDragDropPayload(type)",         (void*)u_acceptDragDropPayload, context);
-    zym_pushRoot(vm, acceptDragDropPayload1);
+    roots.push(acceptDragDropPayload1);
     ZymValue acceptDragDropPayload2 = zym_createNativeClosure(vm, "acceptDragDropPayload(type, flags)",  (void*)u_acceptDragDropPayload, context);
-    zym_pushRoot(vm, acceptDragDropPayload2);
+    roots.push(acceptDragDropPayload2);
     ZymValue acceptDragDropPayload = zym_createDispatcher(vm);
-    zym_pushRoot(vm, acceptDragDropPayload);
+    roots.push(acceptDragDropPayload);
     zym_addOverload(vm, acceptDragDropPayload, acceptDragDropPayload1);
     zym_addOverload(vm, acceptDragDropPayload, acceptDragDropPayload2);
 
@@ -4489,10 +4133,8 @@ ZymValue nativeUi_create(ZymVM* vm) {
 
 #undef MOD
 
-    ZymValue obj = zym_newMap(vm);
-    zym_pushRoot(vm, obj);
-
-    zym_mapSet(vm, obj, "frame",             frame);
+    // `obj` and `frame` are owned by `ui.cpp`'s `nativeUi_create`; we
+    // just write into `obj` here.
     zym_mapSet(vm, obj, "window",            window);
     zym_mapSet(vm, obj, "setNextWindowPos",  setNextWindowPos);
     zym_mapSet(vm, obj, "setNextWindowSize", setNextWindowSize);
@@ -4816,238 +4458,10 @@ ZymValue nativeUi_create(ZymVM* vm) {
     zym_mapSet(vm, obj, "TABLE_SORT_MULTI",       zym_newNumber(1 << 26));
     zym_mapSet(vm, obj, "TABLE_SORT_TRISTATE",    zym_newNumber(1 << 27));
 
-    // Roots are popped in reverse-push order; everything we've pushed
-    // is reachable from `obj`, which is itself rooted. Pop in groups
-    // matching pushes (newest first).
-    zym_popRoot(vm); // obj
-
-    // PR 2e (popped newest-first, exact reverse of push order)
-    zym_popRoot(vm); // getFontAt
-    zym_popRoot(vm); // getFontCount
-    zym_popRoot(vm); // setFontAtlasFlags
-    zym_popRoot(vm); // getFontAtlasFlags
-    zym_popRoot(vm); // getFontTexSize
-    zym_popRoot(vm); // clearFonts
-    zym_popRoot(vm); // addFontDefault
-    zym_popRoot(vm); // tableGetSortSpecs
-    zym_popRoot(vm); // getDragDropPayload
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // acceptDragDropPayload{disp,2,1}
-    zym_popRoot(vm); // endDragDropTarget
-    zym_popRoot(vm); // beginDragDropTarget
-    zym_popRoot(vm); // setDragDropPayload
-    zym_popRoot(vm); // endDragDropSource
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // beginDragDropSource{disp,1,0}
-
-    // PR 2d: widget parity batch (popped newest-first, exact reverse of push order)
-    zym_popRoot(vm); // setCursorScreenPos
-    zym_popRoot(vm); // setCursorPos
-    zym_popRoot(vm); // getContentRegionAvail
-    zym_popRoot(vm); // getFrameHeightWithSpacing
-    zym_popRoot(vm); // getFrameHeight
-    zym_popRoot(vm); // getTextLineHeightWithSpacing
-    zym_popRoot(vm); // getTextLineHeight
-    zym_popRoot(vm); // getFontSize
-    zym_popRoot(vm); // getStyleColorVec4
-    zym_popRoot(vm); // calcTextSize
-    zym_popRoot(vm); // setItemDefaultFocus
-    zym_popRoot(vm); // setKeyboardFocusHere
-    zym_popRoot(vm); // popItemWidth
-    zym_popRoot(vm); // pushItemWidth
-    zym_popRoot(vm); // setNextItemAllowOverlap
-    zym_popRoot(vm); // setNextItemOpen
-    zym_popRoot(vm); // setNextItemWidth
-    zym_popRoot(vm); // popupContextWindow
-    zym_popRoot(vm); // popupContextItem
-    zym_popRoot(vm); // setClipboardText
-    zym_popRoot(vm); // getClipboardText
-    zym_popRoot(vm); // setNextFrameWantCaptureMouse
-    zym_popRoot(vm); // setNextFrameWantCaptureKeyboard
-    zym_popRoot(vm); // getKeyPressedAmount
-    zym_popRoot(vm); // isKeyReleased
-    zym_popRoot(vm); // isKeyPressed
-    zym_popRoot(vm); // isKeyDown
-    zym_popRoot(vm); // getMouseClickedCount
-    zym_popRoot(vm); // resetMouseDragDelta
-    zym_popRoot(vm); // getMouseDragDelta
-    zym_popRoot(vm); // isMouseDragging
-    zym_popRoot(vm); // isMouseReleased
-    zym_popRoot(vm); // isMouseDoubleClicked
-    zym_popRoot(vm); // isMouseClicked
-    zym_popRoot(vm); // isMouseDown
-    zym_popRoot(vm); // getItemRectSize
-    zym_popRoot(vm); // getItemRectMax
-    zym_popRoot(vm); // getItemRectMin
-    zym_popRoot(vm); // isAnyItemFocused
-    zym_popRoot(vm); // isAnyItemActive
-    zym_popRoot(vm); // isAnyItemHovered
-    zym_popRoot(vm); // isItemToggledOpen
-    zym_popRoot(vm); // isItemDeactivatedAfterEdit
-    zym_popRoot(vm); // isItemDeactivated
-    zym_popRoot(vm); // isItemActivated
-    zym_popRoot(vm); // isItemEdited
-    zym_popRoot(vm); // isItemVisible
-    zym_popRoot(vm); // setNextWindowScroll
-    zym_popRoot(vm); // setNextWindowCollapsed
-    zym_popRoot(vm); // setNextWindowContentSize
-    zym_popRoot(vm); // setNextWindowBgAlpha
-    zym_popRoot(vm); // setNextWindowFocus
-    zym_popRoot(vm); // getWindowHeight
-    zym_popRoot(vm); // getWindowWidth
-    zym_popRoot(vm); // getWindowSize
-    zym_popRoot(vm); // getWindowPos
-    zym_popRoot(vm); // isWindowCollapsed
-    zym_popRoot(vm); // isWindowAppearing
-    zym_popRoot(vm); // setScrollFromPosY
-    zym_popRoot(vm); // setScrollFromPosX
-    zym_popRoot(vm); // setScrollHereY
-    zym_popRoot(vm); // setScrollHereX
-    zym_popRoot(vm); // setScrollY
-    zym_popRoot(vm); // setScrollX
-    zym_popRoot(vm); // getScrollMaxY
-    zym_popRoot(vm); // getScrollMaxX
-    zym_popRoot(vm); // getScrollY
-    zym_popRoot(vm); // getScrollX
-    zym_popRoot(vm); // vSliderInt
-    zym_popRoot(vm); // vSliderFloat
-    zym_popRoot(vm); // sliderAngle
-    zym_popRoot(vm); // inputInt4
-    zym_popRoot(vm); // inputInt3
-    zym_popRoot(vm); // inputInt2
-    zym_popRoot(vm); // inputFloat4
-    zym_popRoot(vm); // inputFloat3
-    zym_popRoot(vm); // inputFloat2
-    zym_popRoot(vm); // dragInt4
-    zym_popRoot(vm); // dragInt3
-    zym_popRoot(vm); // dragInt2
-    zym_popRoot(vm); // dragFloat4
-    zym_popRoot(vm); // dragFloat3
-    zym_popRoot(vm); // dragFloat2
-    zym_popRoot(vm); // sliderInt4
-    zym_popRoot(vm); // sliderInt3
-    zym_popRoot(vm); // sliderInt2
-    zym_popRoot(vm); // sliderFloat4
-    zym_popRoot(vm); // sliderFloat3
-    zym_popRoot(vm); // sliderFloat2
-    zym_popRoot(vm); // checkboxFlags
-    zym_popRoot(vm); // textLinkOpenURL
-    zym_popRoot(vm); // textLink
-    zym_popRoot(vm); // separatorText
-    zym_popRoot(vm); // comboScope
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // listBox{,2v,3v}
-    zym_popRoot(vm); // tabItemButton
-    zym_popRoot(vm); // tabItem
-    zym_popRoot(vm); // tabBar
-
-    // PR 2c (popped newest-first)
-    zym_popRoot(vm); // defaultFont
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // loadFont{,2v,3v}
-    zym_popRoot(vm); // withFont
-    zym_popRoot(vm); // withStyleVar
-    zym_popRoot(vm); // withStyleColor
-
-    // batch 6 (popped newest-first)
-    zym_popRoot(vm); // framerate
-    zym_popRoot(vm); // getMousePos
-    zym_popRoot(vm); // getCursorPos
-    // PR 3 DrawList factories (pushed between drawTriangleFilled and getCursorPos)
-    zym_popRoot(vm); // imageButton
-    zym_popRoot(vm); // image
-    zym_popRoot(vm); // foregroundDrawList
-    zym_popRoot(vm); // backgroundDrawList
-    zym_popRoot(vm); // drawList
-    zym_popRoot(vm); // drawTriangleFilled
-    zym_popRoot(vm); // drawTriangle
-    zym_popRoot(vm); // drawText
-    zym_popRoot(vm); // drawCircleFilled
-    zym_popRoot(vm); // drawCircle
-    zym_popRoot(vm); // drawRectFilled
-    zym_popRoot(vm); // drawRect
-    zym_popRoot(vm); // drawLine
-    zym_popRoot(vm); // color
-    zym_popRoot(vm); // colorButton
-    zym_popRoot(vm); // colorPicker
-    zym_popRoot(vm); // colorEdit
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // plotHistogram{,2v,3v,5v}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // plotLines{,2v,3v,5v}
-
-    // batch 5 (popped newest-first)
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // menuItem{,1v,2v,3v,4v}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // menu{,2v,3v}
-    zym_popRoot(vm); // mainMenuBar
-    zym_popRoot(vm); // menuBar
-    zym_popRoot(vm); // closeCurrentPopup
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // openPopup{,1v,2v}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // popupModal{,2v,3v}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // popup{,2v,3v}
-
-    // batch 4 (popped newest-first)
-    zym_popRoot(vm); // nextColumn
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // columns{,1v,2v,3v}
-    zym_popRoot(vm); // tableGetColumnCount
-    zym_popRoot(vm); // tableGetColumnIndex
-    zym_popRoot(vm); // tableGetRowIndex
-    zym_popRoot(vm); // tableHeader
-    zym_popRoot(vm); // tableHeadersRow
-    zym_popRoot(vm); // tableSetupScrollFreeze
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // tableSetupColumn{,1v,2v,3v}
-    zym_popRoot(vm); // tableSetColumnIndex
-    zym_popRoot(vm); // tableNextColumn
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // tableNextRow{,0v,1v}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // table{,3v,4v}
-
-    // batch 3 (popped newest-first)
-    zym_popRoot(vm); // tooltipScope
-    zym_popRoot(vm); // clip
-    zym_popRoot(vm); // id
-    zym_popRoot(vm); // disabled
-    zym_popRoot(vm); // treeNode
-    zym_popRoot(vm); // group
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // child{,2v,3v,5v}
-
-    // batch 2 (popped newest-first)
-    zym_popRoot(vm); // combo
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // inputTextMultiline{,4,5}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // inputText{,2,3}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // dragFloat{,2,3,5}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // dragInt{,2,3,5}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // sliderFloat{,4,5}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // sliderInt{,4,5}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // inputFloat{,2,3,4}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // inputInt{,2,3}
-
-    // misc dispatchers
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // collapsingHeader{,1,2}
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); // progressBar{,1,3,4}
-    // tooltip
-    zym_popRoot(vm);
-    // state queries (8)
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // unindent dispatcher (3)
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // indent dispatcher (3)
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // dummy, spacing, separator, newLine
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // sameLine dispatcher (4)
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // selectable dispatcher (3)
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // radioButton, checkbox
-    zym_popRoot(vm); zym_popRoot(vm);
-    // arrowButton, invisibleButton, smallButton
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // button dispatcher (3)
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // text family (7: bullet, bulletText, labelText, textDisabled, textWrapped, textColored, text)
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // setNextWindowSize, setNextWindowPos, window dispatcher, window3, window2,
-    // setErrorTooltip, setErrorLogging, silent, lastError, frame
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    zym_popRoot(vm); zym_popRoot(vm); zym_popRoot(vm);
-    // context
-    zym_popRoot(vm);
-    return obj;
+    // NOTE: `roots.popAll()` is called by `ui.cpp`'s `nativeUi_create`
+    // AFTER both `registerImGuiBindings` and `registerImPlotBindings`
+    // have run — we leave every root staged here so the ImPlot
+    // registration can still see them if it ever needs to inspect the
+    // partial `obj` (it currently doesn't, but the invariant is "roots
+    // are drained exactly once, at the very end of nativeUi_create").
 }

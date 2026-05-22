@@ -135,6 +135,7 @@ endif()
 set(ZYM_NATIVE_SOURCES
         src/natives/natives.hpp
         src/natives/natives.cpp
+        src/natives/root_scope.hpp
         src/natives/cli_catalog.hpp
         src/natives/cli_catalog.cpp
         src/natives/Zym/zym_native.hpp
@@ -165,13 +166,22 @@ set(ZYM_NATIVE_SOURCES
 
 # Slice 1: optional `sdl` native sources. Linked into zym when ZYM_SDL=ON.
 if(ZYM_SDL)
-    list(APPEND ZYM_NATIVE_SOURCES src/natives/sdl.cpp)
+    list(APPEND ZYM_NATIVE_SOURCES src/natives/ui/sdl.cpp)
 endif()
 
 # Slice 1 PR 2: optional `ui` native sources. Linked into zym when
 # ZYM_UI=ON (which implies ZYM_SDL=ON; see the soft-dep check above).
+# Split across src/natives/ui/:
+#   * ui.cpp     — thin FFI binder + per-window context lifecycle
+#   * imgui.cpp  — every `u_*` ImGui wrapper + registerImGuiBindings()
+#   * implot.cpp — every `u_plot*` ImPlot wrapper + registerImPlotBindings()
+#                  (placeholder right now; Phase A populates it)
 if(ZYM_UI)
-    list(APPEND ZYM_NATIVE_SOURCES src/natives/ui.cpp)
+    list(APPEND ZYM_NATIVE_SOURCES
+            src/natives/ui/ui_internal.hpp
+            src/natives/ui/ui.cpp
+            src/natives/ui/imgui.cpp
+            src/natives/ui/implot.cpp)
 endif()
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and

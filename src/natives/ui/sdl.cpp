@@ -8,7 +8,7 @@
 // `ZYM_SDL` flag). When disabled, this TU is excluded from the build
 // and `cli_catalog.cpp` omits the `sdl` row.
 
-#include "natives.hpp"
+#include "../natives.hpp"
 #include "sdl_internal.hpp"  // shared `WindowHandle` + `sdlGetWindowHandle`
 
 #include <SDL3/SDL.h>

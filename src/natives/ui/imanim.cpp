@@ -146,6 +146,7 @@
 #include "imgui_internal.h"  // for ImHashStr (used by parseImGuiId in SECTION 3)
 
 #include <unordered_map>     // gradient cache (§8)
+#include <cstdlib>           // std::atexit (process-exit drain of ImAnim globals)
 
 namespace {
 
@@ -3626,6 +3627,31 @@ ZymValue u_anim_clip_load(ZymVM* vm, ZymValue /*self*/, ZymValue pathV) {
 // ---- registration --------------------------------------------------------
 
 void registerImAnimBindings(ZymVM* vm, ZymValue obj, ZymValue context, RootScope& roots) {
+    // ImAnim's clip + tween registries are PROCESS-global (live in
+    // `iam_clip_detail::g_clip_sys` and `iam_detail::g_*` inside ImAnim),
+    // not per-context, and are not freed by ImGui::DestroyContext. The
+    // per-window `destroyUiContext` in `ui.cpp` already drains them, but
+    // that path only runs if the WindowHandle GC-finalizes BEFORE the VM
+    // tears down — which doesn't happen on a normal script exit (the
+    // window handle is reachable from VM roots when `main` returns, so
+    // its finalizer never gets a chance). Register a process-exit
+    // handler here as a belt-and-braces drain so ASan doesn't flag the
+    // owned `ImVector<iam_track>` / `ImVector<keyframe>` / instance
+    // color-entry vectors / `ImGuiStorage` pairs as leaks at exit.
+    // Both calls are idempotent: `iam_clip_shutdown` resets the
+    // `initialized` flag and frees its pool, and `iam_gc(0)` is a no-op
+    // when there are no tween entries. The `static bool` guards against
+    // registering the handler twice if `nativeUi_create` ever runs more
+    // than once in the same process.
+    static bool s_atexit_registered = false;
+    if (!s_atexit_registered) {
+        s_atexit_registered = true;
+        std::atexit([]() {
+            iam_clip_shutdown();
+            iam_gc(0);
+        });
+    }
+
 #define MOD(name, sig, fn) \
     ZymValue name = roots.push(zym_createNativeClosure(vm, sig, (void*)fn, context));
 

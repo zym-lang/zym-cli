@@ -11,6 +11,8 @@
 //   5. Paths     — motion path builder + along-path tween + arc-length
 //   6. Color     — gradient builder + transform interp + style snapshots
 //   7. Clips     — keyframed clip authoring + instance playback
+//   8. UI Feel   — micro-interactions on real widgets: hover scale, glow,
+//                  card highlight, text fade-in, animated underline
 //
 // Drawing uses the flat top-level UI.draw* primitives (screen coords).
 // `UI.getCursorPos()` returns the current draw cursor in screen coords.
@@ -424,6 +426,230 @@ var pageClips = func(dt) {
 }
 
 // ---------------------------------------------------------------------------
+// Page 8: UI Feel — real-widget micro-interactions
+// ---------------------------------------------------------------------------
+//
+// This page shows what the anim system is actually useful for day-to-day:
+// making real UI elements feel responsive. Each demo uses `invisibleButton`
+// to claim a hit region, queries `isItemHovered` / `isItemActive`, then
+// drives a tween whose value is read back every frame to redraw the widget.
+
+var btnLabels = ["save", "open", "build", "deploy"]
+// per-button glow color (tweened toward hover/idle target each frame)
+var btnGlow   = [[0.18,0.20,0.26,1.0],
+                 [0.18,0.20,0.26,1.0],
+                 [0.18,0.20,0.26,1.0],
+                 [0.18,0.20,0.26,1.0]]
+
+// hovered card index; -1 if none
+var hoveredCard = -1
+var cardTitles  = ["Project", "Issues", "Pull Requests"]
+var cardBlurbs  = [
+    "zym-cli  ·  37 files  ·  last edit 2 min ago",
+    "12 open  ·  3 assigned to you  ·  2 due today",
+    "5 open  ·  1 awaiting review  ·  builds green",
+]
+
+// fade-in details panel
+var detailsOpen = false
+
+// animated underline tab strip
+var feelTab    = 0
+var feelTabs   = ["Overview", "Activity", "Settings", "About"]
+
+var pageUiFeel = func(dt) {
+    // ---- Section A: hover-scale + glow buttons ---------------------------
+    UI.text("hover-scale + glow buttons — animTweenFloat for scale, animTweenColor for glow")
+    UI.dummy(0, 6)
+
+    var bw = 110.0; var bh = 44.0; var bgap = 12.0
+    var rowOrigin = UI.getCursorPos()
+
+    var i = 0
+    while (i < 4) {
+        // Place each button on the same row by drawing into a w×h region;
+        // use sameLine() between iterations so ImGui advances horizontally.
+        if (i > 0) { UI.sameLine(0, bgap) }
+        var bid = "feel/btn/" + str(i)
+        UI.invisibleButton(bid, bw, bh)
+        var hovered = UI.isItemHovered()
+        var active  = UI.isItemActive()
+        var rmin = UI.getItemRectMin()
+        var rmax = UI.getItemRectMax()
+        var cx = (rmin.x + rmax.x) * 0.5
+        var cy = (rmin.y + rmax.y) * 0.5
+
+        // tweened scale: 1.0 idle, 1.08 hover, 0.95 press
+        var targetScale = 1.0
+        if (hovered) { targetScale = 1.08 }
+        if (active)  { targetScale = 0.95 }
+        var scale = UI.animTweenFloat("feel/btn-scale/"+str(i), 1, targetScale,
+            0.18, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+        // tweened glow color: idle dark, hover blue, press orange
+        var targetCol = [0.18, 0.20, 0.26, 1.0]
+        if (hovered) { targetCol = [0.20, 0.55, 0.95, 1.0] }
+        if (active)  { targetCol = [0.95, 0.55, 0.20, 1.0] }
+        btnGlow[i] = UI.animTweenColor("feel/btn-col/"+str(i), 1, targetCol,
+            0.18, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
+            UI.ANIM_COL_OKLAB, dt)
+
+        // tiny click-shake offset: animShake returns the live offset every frame;
+        // animTriggerShake re-arms the decay envelope. Both share the same id.
+        if (UI.isItemClicked()) {
+            UI.animTriggerShake("feel/btn-shake/"+str(i))
+        }
+        var sh = UI.animShake("feel/btn-shake/"+str(i), 6.0, 32.0, 0.40, dt)
+
+        // draw: scaled rounded rect + label
+        var hw = bw * 0.5 * scale; var hh = bh * 0.5 * scale
+        var x0 = cx - hw + sh; var y0 = cy - hh
+        var w  = hw * 2.0;     var h  = hh * 2.0
+        var col = UI.color(floor(btnGlow[i][0]*255),
+                           floor(btnGlow[i][1]*255),
+                           floor(btnGlow[i][2]*255), 255)
+        var brd = UI.color(255, 255, 255, 40)
+        UI.drawRectFilled(x0, y0, w, h, col)
+        UI.drawRect(x0, y0, w, h, brd)
+        // crude centered text — drawText is left-baselined, so offset by an
+        // approximation of label width × char-width
+        var label = btnLabels[i]
+        var approxW = length(label) * 7.0
+        UI.drawText(cx - approxW*0.5, cy - 7, UI.color(240,242,248,255), label)
+
+        i++
+    }
+    UI.dummy(0, 16)
+    UI.textDisabled("hover to grow + glow, click for a quick shake. all values are tweened, not snapped.")
+    UI.dummy(0, 12)
+
+    // ---- Section B: card highlight (sibling dimming) ---------------------
+    UI.text("card row — hovered card brightens, siblings dim:")
+    UI.dummy(0, 6)
+
+    var cw = 220.0; var ch = 96.0; var cgap = 14.0
+    var newHovered = -1
+    var ci = 0
+    while (ci < 3) {
+        if (ci > 0) { UI.sameLine(0, cgap) }
+        UI.invisibleButton("feel/card/"+str(ci), cw, ch)
+        var hov = UI.isItemHovered()
+        if (hov) { newHovered = ci }
+        var rmin2 = UI.getItemRectMin()
+        var rmax2 = UI.getItemRectMax()
+
+        // alpha tween: 1.0 if this card hovered OR no card hovered; 0.45 if a sibling is hovered
+        var targetAlpha = 1.0
+        if (hoveredCard >= 0 and hoveredCard != ci) { targetAlpha = 0.45 }
+        var alpha = UI.animTweenFloat("feel/card-a/"+str(ci), 1, targetAlpha,
+            0.22, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+        // lift tween: 0 idle, -4 hovered (rises a few px)
+        var targetLift = 0.0
+        if (hov) { targetLift = -4.0 }
+        var lift = UI.animTweenFloat("feel/card-l/"+str(ci), 1, targetLift,
+            0.18, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+        var a8 = floor(alpha * 255)
+        var bg     = UI.color(28, 32, 40, a8)
+        var bgHi   = UI.color(40, 48, 64, a8)
+        var border = UI.color(120, 180, 255, a8)
+        var x0 = rmin2.x; var y0 = rmin2.y + lift; var w = cw; var h = ch
+        if (hov) {
+            UI.drawRectFilled(x0, y0, w, h, bgHi)
+            UI.drawRect       (x0, y0, w, h, border)
+        } else {
+            UI.drawRectFilled(x0, y0, w, h, bg)
+            UI.drawRect       (x0, y0, w, h, UI.color(70, 80, 96, a8))
+        }
+        UI.drawText(x0 + 12, y0 + 12, UI.color(240, 242, 248, a8), cardTitles[ci])
+        UI.drawText(x0 + 12, y0 + 38, UI.color(180, 188, 204, a8), cardBlurbs[ci])
+        ci++
+    }
+    hoveredCard = newHovered
+    UI.dummy(0, 16)
+
+    // ---- Section C: fade-in details on hover -----------------------------
+    UI.text("expandable details — clicking the header tweens an info block in/out:")
+    UI.dummy(0, 6)
+
+    UI.invisibleButton("feel/expand/hdr", 360, 28)
+    var hdrHov = UI.isItemHovered()
+    var hdrMin = UI.getItemRectMin()
+    if (UI.isItemClicked()) { detailsOpen = !detailsOpen }
+
+    var hdrBg = UI.color(36, 42, 54, 255)
+    if (hdrHov) { hdrBg = UI.color(50, 58, 76, 255) }
+    UI.drawRectFilled(hdrMin.x, hdrMin.y, 360, 28, hdrBg)
+    var caret = "▶"
+    if (detailsOpen) { caret = "▼" }
+    UI.drawText(hdrMin.x + 10, hdrMin.y + 6, UI.color(240,242,248,255),
+        caret + "   build details")
+
+    // alpha tween 0..1
+    var detailTarget = 0.0
+    if (detailsOpen) { detailTarget = 1.0 }
+    var detailA = UI.animTweenFloat("feel/details-a", 1, detailTarget,
+        0.28, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+    // height tween 0..72
+    var detailH = UI.animTweenFloat("feel/details-h", 1, detailTarget * 72.0,
+        0.28, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+    if (detailH > 0.5) {
+        var dx = hdrMin.x; var dy = hdrMin.y + 32
+        var a8 = floor(detailA * 255)
+        UI.drawRectFilled(dx, dy, 360, detailH, UI.color(22, 26, 34, a8))
+        UI.drawRect       (dx, dy, 360, detailH, UI.color(70, 80, 96, a8))
+        if (detailA > 0.05) {
+            UI.drawText(dx + 12, dy + 10, UI.color(200,210,220, a8), "target:    zym (Release)")
+            UI.drawText(dx + 12, dy + 30, UI.color(200,210,220, a8), "compiler:  clang 18.1.3")
+            UI.drawText(dx + 12, dy + 50, UI.color(200,210,220, a8), "duration:  4.21s  ·  warnings: 0")
+        }
+    }
+    UI.dummy(360, 32 + 76)
+
+    // ---- Section D: animated underline tab strip -------------------------
+    UI.text("tab strip with a tweened underline that slides between tabs:")
+    UI.dummy(0, 6)
+
+    var tw = 110.0; var th = 28.0
+    var stripOrigin = UI.getCursorPos()
+    var ti = 0
+    while (ti < 4) {
+        if (ti > 0) { UI.sameLine(0, 0) }
+        UI.invisibleButton("feel/tab/"+str(ti), tw, th)
+        if (UI.isItemClicked()) { feelTab = ti }
+        var trmin = UI.getItemRectMin()
+        var trmax = UI.getItemRectMax()
+        var thov = UI.isItemHovered()
+
+        var tcol = UI.color(160, 168, 184, 255)
+        if (feelTab == ti) { tcol = UI.color(240, 242, 248, 255) }
+        if (thov and feelTab != ti) { tcol = UI.color(210, 220, 235, 255) }
+        var lblW = length(feelTabs[ti]) * 7.0
+        var cx = (trmin.x + trmax.x) * 0.5
+        var cy = (trmin.y + trmax.y) * 0.5
+        UI.drawText(cx - lblW*0.5, cy - 7, tcol, feelTabs[ti])
+        ti++
+    }
+    // separator line under all tabs
+    UI.drawLine(stripOrigin.x, stripOrigin.y + th,
+                stripOrigin.x + tw*4, stripOrigin.y + th,
+                UI.color(70, 80, 96, 255))
+
+    // tween underline X and width toward the selected tab
+    var targetUx = stripOrigin.x + feelTab * tw
+    var underlineX = UI.animTweenFloat("feel/underline-x", 1, targetUx,
+        0.28, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+    UI.drawRectFilled(underlineX, stripOrigin.y + th - 2,
+                      tw, 2,
+                      UI.color(80, 170, 255, 255))
+
+    UI.dummy(tw*4, th + 8)
+    UI.textDisabled("click any tab — the underline tweens to follow.")
+}
+
+// ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
 
@@ -468,6 +694,7 @@ while (!win.shouldClose() and !done) {
                 UI.tabItem("Paths",     func() { pagePaths(dt)   })
                 UI.tabItem("Color",     func() { pageColor(dt)   })
                 UI.tabItem("Clips",     func() { pageClips(dt)   })
+                UI.tabItem("UI Feel",   func() { pageUiFeel(dt)  })
             })
         })
     })

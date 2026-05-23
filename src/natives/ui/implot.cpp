@@ -927,13 +927,16 @@ ZymValue u_plotPieChart(ZymVM* vm, ZymValue, ZymValue labelsV, ZymValue valuesV,
 // ---- PlotHeatmap ----
 // (label, values, rows, cols, scaleMin?, scaleMax?, labelFmt?, xMin?, yMin?, xMax?, yMax?, flags?)
 //
+// Variadic because the fixed-arity signature would have 12 params,
+// exceeding the native-closure 10-param maximum. Fixed: (label, values,
+// rows, cols); the remaining 8 trail through vargs in order:
+//   scaleMin, scaleMax, labelFmt, xMin, yMin, xMax, yMax, flags
+//
 // `values` is a row-major (default) or column-major (flags) flat matrix
 // of length rows*cols. Bounds default to (0,0)-(1,1) matching ImPlot.
 ZymValue u_plotHeatmap(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue valuesV,
-                       ZymValue rowsV, ZymValue colsV, ZymValue scaleMinV,
-                       ZymValue scaleMaxV, ZymValue labelFmtV,
-                       ZymValue xMinV, ZymValue yMinV, ZymValue xMaxV, ZymValue yMaxV,
-                       ZymValue flagsV) {
+                       ZymValue rowsV, ZymValue colsV,
+                       ZymValue* vargs, int vargc) {
     std::string label;
     if (!reqStr(vm, labelV, "ui.plotHeatmap(label, values, rows, cols, ...)", &label)) return ZYM_ERROR;
     int rows, cols;
@@ -949,14 +952,15 @@ ZymValue u_plotHeatmap(ZymVM* vm, ZymValue, ZymValue labelV, ZymValue valuesV,
             values.count, need);
         return ZYM_ERROR;
     }
-    double scaleMin = optNum(scaleMinV, 0.0);
-    double scaleMax = optNum(scaleMaxV, 0.0);
-    const char* labelFmt = optStr(labelFmtV, "%.1f");
-    double xMin = optNum(xMinV, 0.0);
-    double yMin = optNum(yMinV, 0.0);
-    double xMax = optNum(xMaxV, 1.0);
-    double yMax = optNum(yMaxV, 1.0);
-    int    flags = optInt(flagsV, 0);
+    auto va = [&](int i) -> ZymValue { return i < vargc ? vargs[i] : zym_newNull(); };
+    double scaleMin = optNum(va(0), 0.0);
+    double scaleMax = optNum(va(1), 0.0);
+    const char* labelFmt = optStr(va(2), "%.1f");
+    double xMin = optNum(va(3), 0.0);
+    double yMin = optNum(va(4), 0.0);
+    double xMax = optNum(va(5), 1.0);
+    double yMax = optNum(va(6), 1.0);
+    int    flags = optInt(va(7), 0);
     ImPlot::PlotHeatmap(label.c_str(), values.data, rows, cols, scaleMin, scaleMax,
                         labelFmt, ImPlotPoint(xMin, yMin), ImPlotPoint(xMax, yMax),
                         specWithFlags(flags));
@@ -2257,7 +2261,11 @@ void registerImPlotBindings(ZymVM* vm, ZymValue obj, ZymValue context, RootScope
 
     // plotPieChart / plotHeatmap / plotHistogram / plotHistogram2D / plotDigital — single shapes
     MOD(plotPieChart,    "plotPieChart(labels, values, x, y, radius, labelFmt, angle0, flags)", u_plotPieChart)
-    MOD(plotHeatmap,     "plotHeatmap(label, values, rows, cols, scaleMin, scaleMax, labelFmt, xMin, yMin, xMax, yMax, flags)", u_plotHeatmap)
+    // plotHeatmap is variadic (12 conceptual params > 10-param closure max).
+    // Fixed: (label, values, rows, cols); rest via vargs.
+    ZymValue plotHeatmap = roots.push(zym_createNativeClosureVariadic(
+        vm, "plotHeatmap(label, values, rows, cols, ...)",
+        (void*)u_plotHeatmap, context));
     MOD(plotHistogram,   "plotHistogram(label, values, bins, barScale, rangeMin, rangeMax, flags)", u_plotHistogram)
     MOD(plotHistogram2D, "plotHistogram2D(label, xs, ys, xBins, yBins, xMin, xMax, yMin, yMax, flags)", u_plotHistogram2D)
     MOD(plotDigital,     "plotDigital(label, xs, ys, flags)", u_plotDigital)

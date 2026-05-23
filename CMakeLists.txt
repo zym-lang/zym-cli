@@ -510,6 +510,48 @@ if(ZYM_UI)
     endif()
 endif()
 
+# --- ImAnim (Slice 1 PR 2e) ---------------------------------------------
+# Vendored under third_party/imanim (git submodule, pinned to tag 1.0.0,
+# sha 8a537521ba41b3dfeec5173f2f89a8dc3d6387c8). Built as a small static
+# library `zym_imanim` that links PUBLICLY against `zym_imgui` (ImAnim
+# is a pure ImGui addon — its public header `im_anim.h` includes
+# `imgui.h` directly, so the include path / SDL3 transitive surface
+# already provided by zym_imgui is exactly what it needs).
+#
+# Sources: ImAnim core only (im_anim.cpp). The upstream tag also ships
+# `im_anim_demo.cpp`, `im_anim_doc.cpp`, and `im_anim_usecase.cpp`
+# (~820 KB combined) which are reference/demo TUs — intentionally not
+# compiled here. Zym-side `UI.anim*` bindings are deferred (this PR
+# only ensures the vendor compile and link succeeds).
+if(ZYM_UI)
+    set(ZYM_IMANIM_DIR "${CMAKE_SOURCE_DIR}/third_party/imanim")
+    add_library(zym_imanim STATIC
+            "${ZYM_IMANIM_DIR}/im_anim.cpp"
+    )
+    target_include_directories(zym_imanim PUBLIC "${ZYM_IMANIM_DIR}")
+    # PUBLIC link to zym_imgui propagates ImGui includes to any TU
+    # that pulls in <im_anim.h>.
+    target_link_libraries(zym_imanim PUBLIC zym_imgui)
+    # Same LTO / -fno-pie / -flto-mode propagation as zym_implot.
+    if(ZYM_LTO_OK)
+        set_property(TARGET zym_imanim PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET zym_imanim PROPERTY INTERPROCEDURAL_OPTIMIZATION_TINY TRUE)
+    endif()
+    target_compile_options(zym_imanim PRIVATE
+            $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+    if(NOT WIN32)
+        target_compile_options(zym_imanim PRIVATE -fno-pie)
+    endif()
+    # Silence ImAnim's own warnings the same way we do for ImGui / ImPlot.
+    target_compile_options(zym_imanim PRIVATE -w)
+    target_link_libraries(zym PRIVATE zym_imanim)
+    target_compile_definitions(zym PRIVATE ZYM_IMANIM_ENABLED=1)
+    message(STATUS ">> ZYM_UI: ON — vendored ImAnim (1.0.0) linked into zym via zym_imanim")
+    if(ZYM_LTO_OK)
+        message(STATUS ">> ZYM_UI: LTO + Release flags propagated to zym_imanim")
+    endif()
+endif()
+
 if(RUNTIME_ONLY)
     message(STATUS ">> RUNTIME_ONLY: ON - excluding full_executor; runtime_loader path only")
     target_compile_definitions(zym PRIVATE ZYM_RUNTIME_ONLY=1)

@@ -330,7 +330,7 @@ Blend between two registered paths.
 | `UI.animPathMorph(pathA, pathB, blend, t, opts)` | `[x, y]` | `blend` in `[0, 1]`. `opts` is `null` or a flat options list — see source for slot order. |
 | `UI.animPathMorphTangent(pathA, pathB, blend, t, opts)` | `[x, y]` | |
 | `UI.animPathMorphAngle(pathA, pathB, blend, t, opts)` | number | Radians. |
-| `UI.animTweenPathMorph(id, channelId, pathA, pathB, dur, ease, policy, opts, dt)` | `[x, y]` | Animates the blend factor and samples the morphed path. |
+| `UI.animTweenPathMorph(id, channelId, pathA, pathB, targetBlend, dur, pathEase, morphEase, policy, dt, opts?)` | `[x, y]` | Animates the blend factor and samples the morphed path. Variadic: `dt` is required, `opts` optional (omit or `null` for defaults). The native closure signature parser caps fixed params at 9 when `...` is used, so `dt` / `opts` ride the variadic tail. |
 | `UI.animGetMorphBlend(id, channelId)` | number | Current blend factor for an in-progress morph. |
 
 ### Text along path

@@ -1800,20 +1800,31 @@ ZymValue u_anim_path_morph_angle(ZymVM* vm, ZymValue /*self*/,
 //                         pathEase, morphEase, policy, dt, opts) -> [x,y]`
 //   Animates both the t-along-path AND the blend factor between the
 //   two paths in a single tween. `opts` may be null.
+// NOTE: bound as variadic — the closure signature parser caps at 10
+// tokens total and `...` counts as one, leaving room for at most 9 fixed
+// params. We keep (id, channelId, pathA, pathB, targetBlend, dur,
+// pathEase, morphEase, policy) fixed and push the trailing `dt` + `opts`
+// through vargs: vargs[0] => dt (required), vargs[1] => opts (null/list).
 ZymValue u_anim_tween_path_morph(ZymVM* vm, ZymValue /*self*/,
                                  ZymValue idV, ZymValue chV,
                                  ZymValue aV, ZymValue bV,
                                  ZymValue targetBlendV, ZymValue durV,
                                  ZymValue pathEzV, ZymValue morphEzV,
-                                 ZymValue policyV, ZymValue dtV,
-                                 ZymValue optsV) {
+                                 ZymValue policyV,
+                                 ZymValue* vargs, int vargc) {
     const char* W = "ui.animTweenPathMorph(id, channelId, pathA, pathB, "
-                    "targetBlend, dur, pathEase, morphEase, policy, dt, opts)";
+                    "targetBlend, dur, pathEase, morphEase, policy, ...)";
     ImGuiID id, ch, a, b;
     double targetBlend, dur, dt;
     iam_ease_desc pathEz, morphEz;
     int policy;
     iam_morph_opts opts;
+    if (vargc < 1) {
+        zym_runtimeError(vm, "%s expects `dt` as the 10th arg", W);
+        return ZYM_ERROR;
+    }
+    ZymValue dtV   = vargs[0];
+    ZymValue optsV = (vargc > 1) ? vargs[1] : zym_newNull();
     if (!parseImGuiId(vm, idV, W, &id))             return ZYM_ERROR;
     if (!parseImGuiId(vm, chV, W, &ch))             return ZYM_ERROR;
     if (!parseImGuiId(vm, aV,  W, &a))              return ZYM_ERROR;
@@ -3694,7 +3705,12 @@ void registerImAnimBindings(ZymVM* vm, ZymValue obj, ZymValue context, RootScope
     MOD(animPathMorph,           "animPathMorph(pathA, pathB, t, blend, opts)",                                                          u_anim_path_morph)
     MOD(animPathMorphTangent,    "animPathMorphTangent(pathA, pathB, t, blend, opts)",                                                   u_anim_path_morph_tangent)
     MOD(animPathMorphAngle,      "animPathMorphAngle(pathA, pathB, t, blend, opts)",                                                     u_anim_path_morph_angle)
-    MOD(animTweenPathMorph,      "animTweenPathMorph(id, channelId, pathA, pathB, targetBlend, dur, pathEase, morphEase, policy, dt, opts)", u_anim_tween_path_morph)
+    // animTweenPathMorph — 11 conceptual params; signature parser caps at
+    // 10 tokens incl. `...`, so we keep 9 fixed and pass `dt` + `opts`
+    // through the variadic tail (vargs[0]=dt, vargs[1]=opts).
+    ZymValue animTweenPathMorph = roots.push(zym_createNativeClosureVariadic(
+        vm, "animTweenPathMorph(id, channelId, pathA, pathB, targetBlend, dur, pathEase, morphEase, policy, ...)",
+        (void*)u_anim_tween_path_morph, context));
     MOD(animGetMorphBlend,       "animGetMorphBlend(id, channelId)",                                                                     u_anim_get_morph_blend)
     MOD(animTextPath,            "animTextPath(pathId, text, opts)",                                                                     u_anim_text_path)
     MOD(animTextPathAnimated,    "animTextPathAnimated(pathId, text, progress, opts)",                                                   u_anim_text_path_animated)

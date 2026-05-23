@@ -1,0 +1,450 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Anatole DP
+//
+// ZYM UI.anim* SHOWCASE — a focused tour of the ImAnim bindings.
+//
+// Pages:
+//   1. Easings   — preset + parametric easing previews via animEvalPreset / tween
+//   2. Tweens    — float / vec2 / vec4 / color tweens with policies and rebase
+//   3. Waveforms — oscillate / shake / wiggle on multiple value kinds
+//   4. Drag      — inertial drag feedback with snap points
+//   5. Paths     — motion path builder + along-path tween + arc-length
+//   6. Color     — gradient builder + transform interp + style snapshots
+//   7. Clips     — keyframed clip authoring + instance playback
+//
+// Drawing uses the flat top-level UI.draw* primitives (screen coords).
+// `UI.getCursorPos()` returns the current draw cursor in screen coords.
+
+var win = SDL.createWindow("zym ui.anim showcase", 1200, 780, { resizable: true })
+if (win == null) { print("failed: %v", SDL.lastError()); return }
+
+// ---------------------------------------------------------------------------
+// Shared state
+// ---------------------------------------------------------------------------
+
+var PI  = 3.14159265358979
+var PI2 = PI * 2.0
+
+var clockStart = Time.clock()
+var lastT      = 0.0
+var frame      = 0
+
+// ---------------------------------------------------------------------------
+// Page 1: easing curve previews
+// ---------------------------------------------------------------------------
+
+var easeNames = [
+    "Linear", "InQuad", "OutQuad", "InOutQuad",
+    "InCubic", "OutCubic", "InOutCubic",
+    "InQuart", "OutQuart", "InOutQuart",
+    "InQuint", "OutQuint", "InOutQuint",
+    "InSine", "OutSine", "InOutSine",
+    "InExpo", "OutExpo", "InOutExpo",
+    "InCirc", "OutCirc", "InOutCirc",
+]
+var easeIds = [
+    UI.ANIM_EASE_LINEAR,
+    UI.ANIM_EASE_IN_QUAD,     UI.ANIM_EASE_OUT_QUAD,     UI.ANIM_EASE_IN_OUT_QUAD,
+    UI.ANIM_EASE_IN_CUBIC,    UI.ANIM_EASE_OUT_CUBIC,    UI.ANIM_EASE_IN_OUT_CUBIC,
+    UI.ANIM_EASE_IN_QUART,    UI.ANIM_EASE_OUT_QUART,    UI.ANIM_EASE_IN_OUT_QUART,
+    UI.ANIM_EASE_IN_QUINT,    UI.ANIM_EASE_OUT_QUINT,    UI.ANIM_EASE_IN_OUT_QUINT,
+    UI.ANIM_EASE_IN_SINE,     UI.ANIM_EASE_OUT_SINE,     UI.ANIM_EASE_IN_OUT_SINE,
+    UI.ANIM_EASE_IN_EXPO,     UI.ANIM_EASE_OUT_EXPO,     UI.ANIM_EASE_IN_OUT_EXPO,
+    UI.ANIM_EASE_IN_CIRC,     UI.ANIM_EASE_OUT_CIRC,     UI.ANIM_EASE_IN_OUT_CIRC,
+]
+var easeSel = [5] // OutCubic
+
+var pageEasings = func(dt) {
+    UI.text("preset easings — sampled via animEvalPreset(type, t):")
+    UI.dummy(0, 4)
+    UI.combo("preset", easeSel, easeNames)
+    UI.dummy(0, 6)
+
+    var origin = UI.getCursorPos()
+    var w = 520; var h = 180
+    var bg  = UI.color(20, 24, 32, 255)
+    var grd = UI.color(60, 70, 82, 255)
+    var ln  = UI.color(120, 200, 255, 255)
+    var dot = UI.color(255, 200, 80, 255)
+    UI.drawRectFilled(origin.x, origin.y, w, h, bg)
+    UI.drawRect(origin.x, origin.y, w, h, grd)
+
+    // curve
+    var prevX = origin.x; var prevY = origin.y + h
+    var i = 1
+    while (i <= 80) {
+        var u = i / 80.0
+        var v = UI.animEvalPreset(easeIds[easeSel[0]], u)
+        var px = origin.x + u*w
+        var py = origin.y + h - v*h
+        UI.drawLine(prevX, prevY, px, py, ln)
+        prevX = px; prevY = py
+        i++
+    }
+
+    // animated marker
+    var t = (Time.clock() - clockStart) % 2.0
+    var u = t / 2.0
+    var v = UI.animEvalPreset(easeIds[easeSel[0]], u)
+    UI.drawCircleFilled(origin.x + u*w, origin.y + h - v*h, 6, dot)
+
+    UI.dummy(w, h + 8)
+    UI.textDisabled("animTweenFloat also drives the marker on the Tweens tab")
+}
+
+// ---------------------------------------------------------------------------
+// Page 2: tweens (float / vec2 / color) + policies + rebase
+// ---------------------------------------------------------------------------
+
+var tweenTargetX = [40.0]
+var tweenPolicy  = [0] // CROSSFADE
+var policyNames  = ["Crossfade", "Cut", "Queue"]
+var policyIds    = [UI.ANIM_POLICY_CROSSFADE, UI.ANIM_POLICY_CUT, UI.ANIM_POLICY_QUEUE]
+var tweenColorA  = [0.2, 0.6, 1.0, 1.0]
+var tweenColorB  = [1.0, 0.4, 0.2, 1.0]
+var colorToggle  = false
+var lastColor    = [0.2, 0.6, 1.0, 1.0]
+
+var pageTweens = func(dt) {
+    UI.text("static-target tween — slide the target, watch the marker chase it:")
+    UI.dummy(0, 4)
+    UI.sliderFloat("target X (px)", tweenTargetX, 0, 480, "%.0f")
+    UI.combo("policy", tweenPolicy, policyNames)
+
+    var origin = UI.getCursorPos()
+    var w = 520; var h = 60
+    var bg  = UI.color(20, 24, 32, 255)
+    var trk = UI.color(60, 70, 82, 255)
+    var dot = UI.color(120, 200, 255, 255)
+    UI.drawRectFilled(origin.x, origin.y, w, h, bg)
+    UI.drawLine(origin.x+10, origin.y+h/2, origin.x+w-10, origin.y+h/2, trk)
+
+    var cur = UI.animTweenFloat("tween-marker", 1, tweenTargetX[0], 0.6,
+        UI.ANIM_EASE_OUT_CUBIC, policyIds[tweenPolicy[0]], dt)
+    UI.drawCircleFilled(origin.x + 20 + cur, origin.y + h/2, 10, dot)
+    UI.dummy(w, h + 6)
+
+    UI.dummy(0, 8)
+    UI.text("color tween (toggle to flip target):")
+    if (UI.button("flip color")) { colorToggle = !colorToggle }
+    var target = tweenColorA
+    if (colorToggle) { target = tweenColorB }
+    lastColor = UI.animTweenColor("tween-color", 1, target, 0.8,
+        UI.ANIM_EASE_IN_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
+        UI.ANIM_COL_OKLAB, dt)
+    var origin2 = UI.getCursorPos()
+    if (typeof(lastColor) != "list") print(lastColor)
+    var sw = UI.color(floor(lastColor[0]*255), floor(lastColor[1]*255),
+                      floor(lastColor[2]*255), floor(lastColor[3]*255))
+    UI.drawRectFilled(origin2.x, origin2.y, 120, 50, sw)
+    UI.dummy(120, 56)
+    UI.textDisabled("color space: OKLAB (perceptually uniform)")
+}
+
+// ---------------------------------------------------------------------------
+// Page 3: waveforms — oscillate / shake / wiggle
+// ---------------------------------------------------------------------------
+
+var oscFreq = [1.5]
+var oscAmp  = [30.0]
+var wigFreq = [3.0]
+
+var pageWaves = func(dt) {
+    UI.text("continuous waveforms overlaid on a base value:")
+    UI.dummy(0, 4)
+    UI.sliderFloat("oscillate freq", oscFreq, 0.1, 5.0, "%.2f")
+    UI.sliderFloat("oscillate amp",  oscAmp,  0,   80,  "%.1f")
+    UI.sliderFloat("wiggle freq",    wigFreq, 0.1, 8.0, "%.2f")
+    UI.dummy(0, 8)
+
+    var origin = UI.getCursorPos()
+    var w = 520; var h = 220
+    var bg     = UI.color(20, 24, 32, 255)
+    var grid   = UI.color(80,80,80,200)
+    var label  = UI.color(180,200,220,255)
+    UI.drawRectFilled(origin.x, origin.y, w, h, bg)
+    UI.drawLine(origin.x, origin.y + h/3,   origin.x+w, origin.y + h/3,   grid)
+    UI.drawLine(origin.x, origin.y + 2*h/3, origin.x+w, origin.y + 2*h/3, grid)
+
+    var cx = origin.x + 80
+    var oscY = UI.animOscillate("waves", 1, origin.y + h/6 + 24,
+        oscAmp[0], oscFreq[0], 0, UI.ANIM_WAVE_SINE, dt)
+    UI.drawCircleFilled(cx, oscY, 14, UI.color(120,200,255,255))
+    UI.drawText(origin.x + 8, origin.y + 6, label, "oscillate (sine)")
+
+    var shakeY = UI.animShake("waves", 2, origin.y + h/2 + 24,
+        25, 18, 0.6, dt)
+    UI.drawCircleFilled(cx + 160, shakeY, 14, UI.color(255,180,80,255))
+    UI.drawText(origin.x + 8, origin.y + h/3 + 6, label, "shake (one-shot)")
+
+    var wigY = UI.animWiggle("waves", 3, origin.y + 5*h/6 - 8,
+        20, wigFreq[0], dt)
+    UI.drawCircleFilled(cx + 320, wigY, 14, UI.color(180,255,140,255))
+    UI.drawText(origin.x + 8, origin.y + 2*h/3 + 6, label, "wiggle (smoothed noise)")
+
+    UI.dummy(w, h + 8)
+    if (UI.button("trigger shake")) {
+        UI.animTriggerShake("waves", 2, 0.8, dt)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page 4: drag feedback with snap points
+// ---------------------------------------------------------------------------
+
+var dragState = "idle"
+var dragPos   = [260.0, 120.0]
+
+var pageDrag = func(dt) {
+    UI.text("click and drag the puck; release to inertia-snap to nearest target:")
+    UI.dummy(0, 4)
+
+    var origin = UI.getCursorPos()
+    var w = 520; var h = 260
+    UI.drawRectFilled(origin.x, origin.y, w, h, UI.color(20, 24, 32, 255))
+
+    var snaps = [[60.0, 60.0], [260.0, 60.0], [460.0, 60.0],
+                 [60.0, 200.0], [260.0, 200.0], [460.0, 200.0]]
+    var snapCol = UI.color(80,140,180,255)
+    var i = 0
+    while (i < length(snaps)) {
+        var s = snaps[i]
+        UI.drawCircle(origin.x + s[0], origin.y + s[1], 14, snapCol)
+        i++
+    }
+
+    var mp = UI.getMousePos()
+    var localX = mp.x - origin.x
+    var localY = mp.y - origin.y
+    var hovering = (localX >= 0 and localX <= w and localY >= 0 and localY <= h)
+
+    if (hovering and UI.isMouseClicked(0)) {
+        UI.animDragBegin("drag", 1, [localX, localY])
+        dragState = "dragging"
+    }
+    if (dragState == "dragging" and UI.isMouseDown(0)) {
+        var st = UI.animDragUpdate("drag", 1, [localX, localY], dt)
+        dragPos = st[0]
+    } else { if (dragState == "dragging" and !UI.isMouseDown(0)) {
+        UI.animDragRelease("drag", 1, [localX, localY],
+            6.0, 0.5, snaps, 60.0, 0.4, UI.ANIM_EASE_OUT_CUBIC, dt)
+        dragState = "settling"
+    } else { if (dragState == "settling") {
+        var st = UI.animDragUpdate("drag", 1, dragPos, dt)
+        dragPos = st[0]
+        if (!st[3] and !st[4]) { dragState = "idle" }
+    } } }
+
+    UI.drawCircleFilled(origin.x + dragPos[0], origin.y + dragPos[1], 18,
+        UI.color(255, 200, 80, 255))
+
+    UI.dummy(w, h + 8)
+    UI.textDisabled("state: " + dragState)
+}
+
+// ---------------------------------------------------------------------------
+// Page 5: motion paths
+// ---------------------------------------------------------------------------
+
+var pathBuilt = false
+
+var buildPath = func() {
+    UI.animPathBegin("anim-path", [40.0, 140.0])
+    UI.animPathCubicTo([120.0, 20.0], [240.0, 20.0], [320.0, 140.0])
+    UI.animPathCubicTo([400.0, 260.0], [480.0, 260.0], [520.0, 140.0])
+    UI.animPathEnd()
+    UI.animPathBuildArcLut("anim-path", 64)
+    pathBuilt = true
+}
+
+var pagePaths = func(dt) {
+    if (!pathBuilt) { buildPath() }
+    UI.text("animTweenPath along a built motion path (cubic bezier ribbon):")
+    UI.dummy(0, 4)
+
+    var origin = UI.getCursorPos()
+    var w = 560; var h = 280
+    UI.drawRectFilled(origin.x, origin.y, w, h, UI.color(20, 24, 32, 255))
+
+    // draw path as polyline using parametric eval
+    var pathCol = UI.color(80,140,200,255)
+    var n = 64; var i = 1
+    var prev = UI.animPathEvaluate("anim-path", 0.0)
+    while (i <= n) {
+        var u = i / (n * 1.0)
+        var p = UI.animPathEvaluate("anim-path", u)
+        UI.drawLine(origin.x + prev[0], origin.y + prev[1],
+                    origin.x + p[0],    origin.y + p[1], pathCol)
+        prev = p
+        i++
+    }
+
+    // travel a marker along the path
+    var pos = UI.animTweenPath("path-walker", 1, "anim-path", 2.0,
+        UI.ANIM_EASE_IN_OUT_SINE, UI.ANIM_POLICY_CROSSFADE, dt)
+    UI.drawCircleFilled(origin.x + pos[0], origin.y + pos[1], 12,
+        UI.color(255, 200, 80, 255))
+
+    UI.dummy(w, h + 8)
+    UI.textDisabled("path length (parametric): " + str(UI.animPathLength("anim-path")))
+}
+
+// ---------------------------------------------------------------------------
+// Page 6: gradient + transform interpolation
+// ---------------------------------------------------------------------------
+
+var gradBuilt = false
+var buildGrads = func() {
+    UI.animGradientBegin("grad-a", UI.ANIM_COL_OKLAB)
+    UI.animGradientAddStop(0.0, [0.05, 0.05, 0.20, 1.0])
+    UI.animGradientAddStop(0.5, [0.20, 0.60, 1.00, 1.0])
+    UI.animGradientAddStop(1.0, [1.00, 0.95, 0.70, 1.0])
+    UI.animGradientEnd()
+
+    UI.animGradientBegin("grad-b", UI.ANIM_COL_OKLAB)
+    UI.animGradientAddStop(0.0, [0.30, 0.00, 0.30, 1.0])
+    UI.animGradientAddStop(0.5, [1.00, 0.40, 0.10, 1.0])
+    UI.animGradientAddStop(1.0, [1.00, 0.90, 0.20, 1.0])
+    UI.animGradientEnd()
+    gradBuilt = true
+}
+
+var gradBlend = [0.0]
+var pageColor = func(dt) {
+    if (!gradBuilt) { buildGrads() }
+    UI.text("gradient lerp (a → b in OKLAB) + animated quad transform:")
+    UI.dummy(0, 4)
+    UI.sliderFloat("blend", gradBlend, 0, 1, "%.2f")
+
+    var origin = UI.getCursorPos()
+    var w = 560; var bandH = 40
+    var steps = 80; var i = 0
+    while (i < steps) {
+        var u = i / (steps * 1.0)
+        var c = UI.animGradientLerp("grad-a", "grad-b", gradBlend[0], u)
+        var col = UI.color(floor(c[0]*255), floor(c[1]*255), floor(c[2]*255), 255)
+        UI.drawRectFilled(origin.x + u*w, origin.y,
+            (w / steps) + 1, bandH, col)
+        i++
+    }
+    UI.dummy(w, bandH + 12)
+
+    UI.text("transform tween (animated rotate + scale on a glyph quad):")
+    var origin2 = UI.getCursorPos()
+    var bw = 560; var bh = 200
+    UI.drawRectFilled(origin2.x, origin2.y, bw, bh, UI.color(20, 24, 32, 255))
+
+    var t = (Time.clock() - clockStart)
+    var targetRot = sin(t * 0.7) * PI
+    var targetScale = 1.0 + 0.5*sin(t * 1.1)
+    var xf = UI.animTweenTransform("xform", 1,
+        [bw/2.0, bh/2.0, targetScale, targetScale, targetRot],
+        0.4, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
+        UI.ANIM_ROTATION_SHORTEST, dt)
+    var q = UI.animMakeGlyphQuad([-40.0, -40.0], [80.0, 80.0])
+    var qt = UI.animTransformQuad(q, xf)
+    var c1 = UI.color(120,200,255,255)
+    UI.drawLine(origin2.x+qt[0][0], origin2.y+qt[0][1], origin2.x+qt[1][0], origin2.y+qt[1][1], c1)
+    UI.drawLine(origin2.x+qt[1][0], origin2.y+qt[1][1], origin2.x+qt[2][0], origin2.y+qt[2][1], c1)
+    UI.drawLine(origin2.x+qt[2][0], origin2.y+qt[2][1], origin2.x+qt[3][0], origin2.y+qt[3][1], c1)
+    UI.drawLine(origin2.x+qt[3][0], origin2.y+qt[3][1], origin2.x+qt[0][0], origin2.y+qt[0][1], c1)
+    UI.dummy(bw, bh + 8)
+}
+
+// ---------------------------------------------------------------------------
+// Page 7: clips
+// ---------------------------------------------------------------------------
+
+var clipBuilt = false
+var clipInst  = 0
+
+var buildClip = func() {
+    UI.animClipBegin("demo-clip")
+    UI.animClipKeyFloat("x", 0.0,  40.0,  UI.ANIM_EASE_LINEAR)
+    UI.animClipKeyFloat("x", 1.0,  480.0, UI.ANIM_EASE_OUT_CUBIC)
+    UI.animClipKeyFloat("x", 2.0,  40.0,  UI.ANIM_EASE_IN_OUT_CUBIC)
+    UI.animClipKeyColor("col", 0.0, [0.2,0.6,1.0,1.0], UI.ANIM_EASE_LINEAR, UI.ANIM_COL_OKLAB)
+    UI.animClipKeyColor("col", 1.0, [1.0,0.4,0.2,1.0], UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_COL_OKLAB)
+    UI.animClipKeyColor("col", 2.0, [0.2,0.6,1.0,1.0], UI.ANIM_EASE_IN_OUT_CUBIC, UI.ANIM_COL_OKLAB)
+    UI.animClipSetLoop(true)
+    UI.animClipEnd()
+    clipBuilt = true
+}
+
+var pageClips = func(dt) {
+    if (!clipBuilt) { buildClip() }
+    UI.text("keyframed clip — float (x position) and color channels in lockstep:")
+    UI.dummy(0, 4)
+    if (UI.button("play")) { clipInst = UI.animPlay("demo-clip", 0) }
+    UI.sameLine(0, 8)
+    if (UI.button("stop")) { if (clipInst != 0) { UI.animInstanceStop(clipInst) } }
+    UI.sameLine(0, 8)
+    UI.textDisabled("duration: " + str(UI.animClipDuration("demo-clip")) + "s")
+    UI.dummy(0, 6)
+
+    var origin = UI.getCursorPos()
+    var w = 560; var h = 100
+    UI.drawRectFilled(origin.x, origin.y, w, h, UI.color(20, 24, 32, 255))
+
+    if (clipInst != 0 and UI.animInstanceValid(clipInst)) {
+        var x = UI.animInstanceGetFloat(clipInst, "x", 40.0)
+        var c = UI.animInstanceGetColor(clipInst, "col", [0.5,0.5,0.5,1.0])
+        var col = UI.color(floor(c[0]*255), floor(c[1]*255), floor(c[2]*255), 255)
+        UI.drawCircleFilled(origin.x + x, origin.y + h/2, 22, col)
+    } else {
+        UI.textDisabled("press play to launch an instance")
+    }
+    UI.dummy(w, h + 8)
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+
+var done = false
+
+while (!win.shouldClose() and !done) {
+    var e = SDL.pollEvent()
+    while (e != null) {
+        if (e.type == "quit") { done = true }
+        e = SDL.pollEvent()
+    }
+
+    var nowT = Time.clock() - clockStart
+    var dt = nowT - lastT
+    if (dt < 0.0) { dt = 0.0 }
+    if (dt > 0.1) { dt = 0.1 }
+    lastT = nowT
+
+    UI.frame(win, func() {
+        frame++
+        var size = win.getSize()
+        UI.setNextWindowPos(0, 0)
+        UI.setNextWindowSize(size.w, size.h)
+
+        var wf = UI.WINDOW_NO_TITLE_BAR + UI.WINDOW_NO_RESIZE
+               + UI.WINDOW_NO_MOVE      + UI.WINDOW_NO_COLLAPSE
+               + UI.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
+               + UI.WINDOW_NO_SAVED_SETTINGS
+
+        UI.window("root", wf, func() {
+            UI.text("◆  ZYM UI.anim* SHOWCASE")
+            UI.sameLine(0, 20); UI.textDisabled("ImAnim v1.0")
+            UI.sameLine(size.w - 180)
+            UI.textDisabled(str(floor(UI.framerate()))+" fps  ·  frame "+str(frame))
+            UI.dummy(0, 6)
+
+            UI.tabBar("anim-nav", func() {
+                UI.tabItem("Easings",   func() { pageEasings(dt) })
+                UI.tabItem("Tweens",    func() { pageTweens(dt)  })
+                UI.tabItem("Waveforms", func() { pageWaves(dt)   })
+                UI.tabItem("Drag",      func() { pageDrag(dt)    })
+                UI.tabItem("Paths",     func() { pagePaths(dt)   })
+                UI.tabItem("Color",     func() { pageColor(dt)   })
+                UI.tabItem("Clips",     func() { pageClips(dt)   })
+            })
+        })
+    })
+}
+
+win.free()

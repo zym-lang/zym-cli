@@ -38,6 +38,7 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 #include "implot.h"
+#include "im_anim.h"
 
 #include <SDL3/SDL.h>
 
@@ -231,6 +232,20 @@ ZymValue u_frame(ZymVM* vm, ZymValue /*self*/, ZymValue winV, ZymValue bodyV) {
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
+    // ImAnim has no per-context state of its own — it stores channels
+    // inside ImGui's current context via ImPool + ImGuiStorage — so a
+    // single per-frame begin call is all the bookkeeping it needs.
+    // Both `iam_update_begin_frame()` (tween bookkeeping) and
+    // `iam_clip_update(dt)` (clip-system advance) are driven here so
+    // scripts don't have to remember the paired init calls. The single
+    // `isAnimAutoFrameUpdateEnabled()` flag (toggled from script via
+    // `UI.animSetAutoFrameUpdate(bool)`) gates BOTH — there's no
+    // realistic scenario where you'd want one auto and the other manual,
+    // since the clip system feeds off the tween system.
+    if (isAnimAutoFrameUpdateEnabled()) {
+        iam_update_begin_frame();
+        iam_clip_update(ImGui::GetIO().DeltaTime);
+    }
 
     // Root the body closure across the re-entrant call: it lives in the
     // caller's argument slot, but re-entry into the VM can shuffle the
@@ -292,6 +307,7 @@ ZymValue nativeUi_create(ZymVM* vm) {
     // Delegate the bulk of the registration to the per-wrapper TUs.
     registerImGuiBindings(vm, obj, context, roots);
     registerImPlotBindings(vm, obj, context, roots);
+    registerImAnimBindings(vm, obj, context, roots);
 
     // Drain every GC root we staged through `roots` above. Everything
     // that needs long-term survival is now reachable from `obj`, which

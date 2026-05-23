@@ -241,4 +241,14 @@ using zym_ui_internal::requireFrame;
 
 void registerImGuiBindings(ZymVM* vm, ZymValue obj, ZymValue ctx, RootScope& roots);
 void registerImPlotBindings(ZymVM* vm, ZymValue obj, ZymValue ctx, RootScope& roots);
+void registerImAnimBindings(ZymVM* vm, ZymValue obj, ZymValue ctx, RootScope& roots);
+
+// ---- Cross-TU accessor: auto-frame-update flag --------------------------
+//
+// Defined in `imanim.cpp`. `ui.cpp::u_frame` queries it once per frame
+// to decide whether to drive `iam_update_begin_frame()` + `iam_clip_update(dt)`
+// automatically. Scripts can flip it via `UI.animSetAutoFrameUpdate(bool)`
+// to take over the driving manually (via `UI.animUpdateBeginFrame()` and
+// `UI.animClipUpdate(dt)`) for scrub / pause / multi-pass scenarios.
+bool isAnimAutoFrameUpdateEnabled();
 

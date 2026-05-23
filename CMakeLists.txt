@@ -181,7 +181,8 @@ if(ZYM_UI)
             src/natives/ui/ui_internal.hpp
             src/natives/ui/ui.cpp
             src/natives/ui/imgui.cpp
-            src/natives/ui/implot.cpp)
+            src/natives/ui/implot.cpp
+            src/natives/ui/imanim.cpp)
 endif()
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and

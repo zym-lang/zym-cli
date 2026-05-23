@@ -85,6 +85,17 @@ void destroyUiContext(WindowHandle* w) {
     }
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
+    // ImAnim's clip + tween registries are PROCESS-global (live in
+    // `iam_clip_detail::g_clip_sys` and `iam_detail::g_*` inside ImAnim),
+    // not per-context. Drain them here so ASan doesn't flag the owned
+    // `ImVector<iam_track>` / `ImVector<keyframe>` / instance color-entry
+    // vectors / `ImGuiStorage` pairs as leaks at process exit. Safe to
+    // call multiple times — `iam_clip_shutdown` resets the `initialized`
+    // flag, and `iam_gc(0)` is a no-op if there are no tween entries.
+    // No-op for processes that never touched the anim system (both
+    // functions early-out when their state is empty).
+    iam_clip_shutdown();
+    iam_gc(0);
     ImGui::DestroyContext(ctx);
     // Restore the previous context (may be null), but never reinstate
     // the freed one.

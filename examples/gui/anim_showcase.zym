@@ -133,7 +133,6 @@ var pageTweens = func(dt) {
         UI.ANIM_EASE_IN_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
         UI.ANIM_COL_OKLAB, dt)
     var origin2 = UI.getCursorPos()
-    if (typeof(lastColor) != "list") print(lastColor)
     var sw = UI.color(floor(lastColor[0]*255), floor(lastColor[1]*255),
                       floor(lastColor[2]*255), floor(lastColor[3]*255))
     UI.drawRectFilled(origin2.x, origin2.y, 120, 50, sw)
@@ -167,24 +166,23 @@ var pageWaves = func(dt) {
     UI.drawLine(origin.x, origin.y + 2*h/3, origin.x+w, origin.y + 2*h/3, grid)
 
     var cx = origin.x + 80
-    var oscY = UI.animOscillate("waves", 1, origin.y + h/6 + 24,
-        oscAmp[0], oscFreq[0], 0, UI.ANIM_WAVE_SINE, dt)
-    UI.drawCircleFilled(cx, oscY, 14, UI.color(120,200,255,255))
+    // oscillate/shake/wiggle return RAW offset/value — we add the base ourselves.
+    var oscOff = UI.animOscillate("waves-osc", oscAmp[0], oscFreq[0],
+        UI.ANIM_WAVE_SINE, 0, dt)
+    UI.drawCircleFilled(cx, origin.y + h/6 + 24 + oscOff, 14, UI.color(120,200,255,255))
     UI.drawText(origin.x + 8, origin.y + 6, label, "oscillate (sine)")
 
-    var shakeY = UI.animShake("waves", 2, origin.y + h/2 + 24,
-        25, 18, 0.6, dt)
-    UI.drawCircleFilled(cx + 160, shakeY, 14, UI.color(255,180,80,255))
+    var shakeOff = UI.animShake("waves-shake", 25, 18, 0.6, dt)
+    UI.drawCircleFilled(cx + 160, origin.y + h/2 + 24 + shakeOff, 14, UI.color(255,180,80,255))
     UI.drawText(origin.x + 8, origin.y + h/3 + 6, label, "shake (one-shot)")
 
-    var wigY = UI.animWiggle("waves", 3, origin.y + 5*h/6 - 8,
-        20, wigFreq[0], dt)
-    UI.drawCircleFilled(cx + 320, wigY, 14, UI.color(180,255,140,255))
+    var wigOff = UI.animWiggle("waves-wig", 20, wigFreq[0], dt)
+    UI.drawCircleFilled(cx + 320, origin.y + 5*h/6 - 8 + wigOff, 14, UI.color(180,255,140,255))
     UI.drawText(origin.x + 8, origin.y + 2*h/3 + 6, label, "wiggle (smoothed noise)")
 
     UI.dummy(w, h + 8)
     if (UI.button("trigger shake")) {
-        UI.animTriggerShake("waves", 2, 0.8, dt)
+        UI.animTriggerShake("waves-shake")
     }
 }
 
@@ -192,8 +190,9 @@ var pageWaves = func(dt) {
 // Page 4: drag feedback with snap points
 // ---------------------------------------------------------------------------
 
-var dragState = "idle"
-var dragPos   = [260.0, 120.0]
+var dragState   = "idle"
+var dragPos     = [260.0, 120.0]
+var dragRelease = [260.0, 120.0]  // pos passed to the first release call; reused while settling
 
 var pageDrag = func(dt) {
     UI.text("click and drag the puck; release to inertia-snap to nearest target:")
@@ -219,20 +218,31 @@ var pageDrag = func(dt) {
     var hovering = (localX >= 0 and localX <= w and localY >= 0 and localY <= h)
 
     if (hovering and UI.isMouseClicked(0)) {
-        UI.animDragBegin("drag", 1, [localX, localY])
+        var st = UI.animDragBegin("drag", [localX, localY])
+        dragPos = st[0]
         dragState = "dragging"
     }
     if (dragState == "dragging" and UI.isMouseDown(0)) {
-        var st = UI.animDragUpdate("drag", 1, [localX, localY], dt)
+        var st = UI.animDragUpdate("drag", [localX, localY], dt)
         dragPos = st[0]
     } else { if (dragState == "dragging" and !UI.isMouseDown(0)) {
-        UI.animDragRelease("drag", 1, [localX, localY],
-            6.0, 0.5, snaps, 60.0, 0.4, UI.ANIM_EASE_OUT_CUBIC, dt)
+        // First release call: sets up snap target (closest of `snaps` to release pos)
+        // and starts the snap animation. dragRelease is captured so subsequent
+        // per-frame release ticks pass the same release pos to upstream.
+        dragRelease = [localX, localY]
+        var st = UI.animDragRelease("drag", dragRelease,
+            [0.0, 0.0], snaps, 0.4, 1.0, UI.ANIM_EASE_OUT_CUBIC, dt)
+        dragPos = st[0]
         dragState = "settling"
     } else { if (dragState == "settling") {
-        var st = UI.animDragUpdate("drag", 1, dragPos, dt)
+        // Subsequent release calls with EMPTY snap opts so upstream
+        // doesn't re-arm the snap (which would reset snap_progress=0
+        // every frame); this lets it just advance the in-progress
+        // snap animation set up by the first release call.
+        var st = UI.animDragRelease("drag", dragRelease,
+            [0.0, 0.0], null, 0.4, 1.0, UI.ANIM_EASE_OUT_CUBIC, dt)
         dragPos = st[0]
-        if (!st[3] and !st[4]) { dragState = "idle" }
+        if (!st[4]) { dragState = "idle" }
     } } }
 
     UI.drawCircleFilled(origin.x + dragPos[0], origin.y + dragPos[1], 18,
@@ -295,13 +305,13 @@ var pagePaths = func(dt) {
 
 var gradBuilt = false
 var buildGrads = func() {
-    UI.animGradientBegin("grad-a", UI.ANIM_COL_OKLAB)
+    UI.animGradientBegin("grad-a")
     UI.animGradientAddStop(0.0, [0.05, 0.05, 0.20, 1.0])
     UI.animGradientAddStop(0.5, [0.20, 0.60, 1.00, 1.0])
     UI.animGradientAddStop(1.0, [1.00, 0.95, 0.70, 1.0])
     UI.animGradientEnd()
 
-    UI.animGradientBegin("grad-b", UI.ANIM_COL_OKLAB)
+    UI.animGradientBegin("grad-b")
     UI.animGradientAddStop(0.0, [0.30, 0.00, 0.30, 1.0])
     UI.animGradientAddStop(0.5, [1.00, 0.40, 0.10, 1.0])
     UI.animGradientAddStop(1.0, [1.00, 0.90, 0.20, 1.0])
@@ -319,9 +329,12 @@ var pageColor = func(dt) {
     var origin = UI.getCursorPos()
     var w = 560; var bandH = 40
     var steps = 80; var i = 0
+    // Blend grad-a and grad-b into a transient gradient `grad-mix`, then sample it.
+    UI.animGradientLerp("grad-a", "grad-b", gradBlend[0],
+        UI.ANIM_COL_OKLAB, "grad-mix")
     while (i < steps) {
         var u = i / (steps * 1.0)
-        var c = UI.animGradientLerp("grad-a", "grad-b", gradBlend[0], u)
+        var c = UI.animGradientSample("grad-mix", u, UI.ANIM_COL_OKLAB)
         var col = UI.color(floor(c[0]*255), floor(c[1]*255), floor(c[2]*255), 255)
         UI.drawRectFilled(origin.x + u*w, origin.y,
             (w / steps) + 1, bandH, col)
@@ -341,8 +354,13 @@ var pageColor = func(dt) {
         [bw/2.0, bh/2.0, targetScale, targetScale, targetRot],
         0.4, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
         UI.ANIM_ROTATION_SHORTEST, dt)
-    var q = UI.animMakeGlyphQuad([-40.0, -40.0], [80.0, 80.0])
-    var qt = UI.animTransformQuad(q, xf)
+    // xf = [posX, posY, scaleX, scaleY, rotationRad] from animTweenTransform.
+    // animTransformQuad does rotate-around-center then translate (no scale),
+    // so we bake the tweened scale into the glyph quad's width/height and pass
+    // the tweened rotation + position into animTransformQuad.
+    var sx = xf[2]; var sy = xf[3]
+    var q = UI.animMakeGlyphQuad([0.0, 0.0], 0.0, 80.0*sx, 80.0*sy, 0.0)
+    var qt = UI.animTransformQuad(q, [0.0, 0.0], xf[4], [xf[0], xf[1]])
     var c1 = UI.color(120,200,255,255)
     UI.drawLine(origin2.x+qt[0][0], origin2.y+qt[0][1], origin2.x+qt[1][0], origin2.y+qt[1][1], c1)
     UI.drawLine(origin2.x+qt[1][0], origin2.y+qt[1][1], origin2.x+qt[2][0], origin2.y+qt[2][1], c1)
@@ -360,13 +378,15 @@ var clipInst  = 0
 
 var buildClip = func() {
     UI.animClipBegin("demo-clip")
-    UI.animClipKeyFloat("x", 0.0,  40.0,  UI.ANIM_EASE_LINEAR)
-    UI.animClipKeyFloat("x", 1.0,  480.0, UI.ANIM_EASE_OUT_CUBIC)
-    UI.animClipKeyFloat("x", 2.0,  40.0,  UI.ANIM_EASE_IN_OUT_CUBIC)
-    UI.animClipKeyColor("col", 0.0, [0.2,0.6,1.0,1.0], UI.ANIM_EASE_LINEAR, UI.ANIM_COL_OKLAB)
-    UI.animClipKeyColor("col", 1.0, [1.0,0.4,0.2,1.0], UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_COL_OKLAB)
-    UI.animClipKeyColor("col", 2.0, [0.2,0.6,1.0,1.0], UI.ANIM_EASE_IN_OUT_CUBIC, UI.ANIM_COL_OKLAB)
-    UI.animClipSetLoop(true)
+    // animClipKeyFloat(channelId, time, value, easeType, bezier4) — bezier4=null for non-bezier eases
+    UI.animClipKeyFloat("x", 0.0,  40.0,  UI.ANIM_EASE_LINEAR,       null)
+    UI.animClipKeyFloat("x", 1.0,  480.0, UI.ANIM_EASE_OUT_CUBIC,    null)
+    UI.animClipKeyFloat("x", 2.0,  40.0,  UI.ANIM_EASE_IN_OUT_CUBIC, null)
+    // animClipKeyColor(channelId, time, color, colorSpace, easeType, bezier4)
+    UI.animClipKeyColor("col", 0.0, [0.2,0.6,1.0,1.0], UI.ANIM_COL_OKLAB, UI.ANIM_EASE_LINEAR,       null)
+    UI.animClipKeyColor("col", 1.0, [1.0,0.4,0.2,1.0], UI.ANIM_COL_OKLAB, UI.ANIM_EASE_OUT_CUBIC,    null)
+    UI.animClipKeyColor("col", 2.0, [0.2,0.6,1.0,1.0], UI.ANIM_COL_OKLAB, UI.ANIM_EASE_IN_OUT_CUBIC, null)
+    UI.animClipSetLoop(true, UI.ANIM_DIR_NORMAL, -1)
     UI.animClipEnd()
     clipBuilt = true
 }
@@ -375,7 +395,9 @@ var pageClips = func(dt) {
     if (!clipBuilt) { buildClip() }
     UI.text("keyframed clip — float (x position) and color channels in lockstep:")
     UI.dummy(0, 4)
-    if (UI.button("play")) { clipInst = UI.animPlay("demo-clip", 0) }
+    // Instance id must be non-zero (0 is upstream's "invalid instance" sentinel),
+    // so we pass a stable string id which the binding hashes via ImHashStr.
+    if (UI.button("play")) { clipInst = UI.animPlay("demo-clip", "demo-clip/inst") }
     UI.sameLine(0, 8)
     if (UI.button("stop")) { if (clipInst != 0) { UI.animInstanceStop(clipInst) } }
     UI.sameLine(0, 8)
@@ -387,8 +409,12 @@ var pageClips = func(dt) {
     UI.drawRectFilled(origin.x, origin.y, w, h, UI.color(20, 24, 32, 255))
 
     if (clipInst != 0 and UI.animInstanceValid(clipInst)) {
-        var x = UI.animInstanceGetFloat(clipInst, "x", 40.0)
-        var c = UI.animInstanceGetColor(clipInst, "col", [0.5,0.5,0.5,1.0])
+        // animInstanceGetFloat(id, channelId) returns number or null
+        // animInstanceGetColor(id, channelId, colorSpace) returns [r,g,b,a] or null
+        var x = UI.animInstanceGetFloat(clipInst, "x")
+        var c = UI.animInstanceGetColor(clipInst, "col", UI.ANIM_COL_OKLAB)
+        if (x == null) { x = 40.0 }
+        if (c == null) { c = [0.5, 0.5, 0.5, 1.0] }
         var col = UI.color(floor(c[0]*255), floor(c[1]*255), floor(c[2]*255), 255)
         UI.drawCircleFilled(origin.x + x, origin.y + h/2, 22, col)
     } else {

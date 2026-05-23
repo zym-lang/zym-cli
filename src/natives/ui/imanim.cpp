@@ -261,17 +261,21 @@ ZymValue u_anim_eval_preset(ZymVM* vm, ZymValue /*self*/,
 
 static ZymValue packVec2(ZymVM* vm, ImVec2 v) {
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber((double)v.x));
     zym_listAppend(vm, l, zym_newNumber((double)v.y));
+    zym_popRoot(vm);
     return l;
 }
 
 static ZymValue packVec4(ZymVM* vm, ImVec4 v) {
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber((double)v.x));
     zym_listAppend(vm, l, zym_newNumber((double)v.y));
     zym_listAppend(vm, l, zym_newNumber((double)v.z));
     zym_listAppend(vm, l, zym_newNumber((double)v.w));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -393,11 +397,13 @@ static bool parseEasePerAxis(ZymVM* vm, ZymValue v, const char* where,
 static ZymValue packEaseDesc(ZymVM* vm, int type, float p0, float p1,
                              float p2, float p3) {
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber((double)type));
     zym_listAppend(vm, l, zym_newNumber((double)p0));
     zym_listAppend(vm, l, zym_newNumber((double)p1));
     zym_listAppend(vm, l, zym_newNumber((double)p2));
     zym_listAppend(vm, l, zym_newNumber((double)p3));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -1260,12 +1266,14 @@ ZymValue u_anim_trigger_shake(ZymVM* vm, ZymValue /*self*/, ZymValue idV) {
 // Pack an `iam_drag_feedback` into the canonical 6-list shape.
 static ZymValue packDragFeedback(ZymVM* vm, iam_drag_feedback const& f) {
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, packVec2(vm, f.position));
     zym_listAppend(vm, l, packVec2(vm, f.offset));
     zym_listAppend(vm, l, packVec2(vm, f.velocity));
     zym_listAppend(vm, l, zym_newBool(f.is_dragging));
     zym_listAppend(vm, l, zym_newBool(f.is_snapping));
     zym_listAppend(vm, l, zym_newNumber((double)f.snap_progress));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -1948,7 +1956,9 @@ static bool reqQuad(ZymVM* vm, ZymValue v, const char* where, ImVec2 out[4]) {
 
 static ZymValue packQuad(ZymVM* vm, const ImVec2 q[4]) {
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     for (int i = 0; i < 4; ++i) zym_listAppend(vm, l, packVec2(vm, q[i]));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -2467,11 +2477,13 @@ static bool reqTransform(ZymVM* vm, ZymValue v, const char* where, iam_transform
 
 static ZymValue packTransform(ZymVM* vm, iam_transform const& t) {
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber((double)t.position.x));
     zym_listAppend(vm, l, zym_newNumber((double)t.position.y));
     zym_listAppend(vm, l, zym_newNumber((double)t.scale.x));
     zym_listAppend(vm, l, zym_newNumber((double)t.scale.y));
     zym_listAppend(vm, l, zym_newNumber((double)t.rotation));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -2554,7 +2566,9 @@ ZymValue u_anim_transform_to_matrix(ZymVM* vm, ZymValue /*self*/, ZymValue xfV) 
     float m[6];
     iam_transform_to_matrix(xf, m);
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     for (int i = 0; i < 6; ++i) zym_listAppend(vm, l, zym_newNumber((double)m[i]));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -2648,12 +2662,14 @@ enum {
 static ZymValue packVarFloat(ZymVM* vm, int mode, double amt,
                              double mn, double mx, double seed) {
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber(kVarTagFloat));
     zym_listAppend(vm, l, zym_newNumber(mode));
     zym_listAppend(vm, l, zym_newNumber(amt));
     zym_listAppend(vm, l, zym_newNumber(mn));
     zym_listAppend(vm, l, zym_newNumber(mx));
     zym_listAppend(vm, l, zym_newNumber(seed));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -2681,12 +2697,14 @@ ZymValue u_anim_var_int(ZymVM* vm, ZymValue /*self*/,
     if (!reqInt(vm, mxV,   W, &mx))   return ZYM_ERROR;
     if (!reqInt(vm, seedV, W, &seed)) return ZYM_ERROR;
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber(kVarTagInt));
     zym_listAppend(vm, l, zym_newNumber(mode));
     zym_listAppend(vm, l, zym_newNumber(amt));
     zym_listAppend(vm, l, zym_newNumber(mn));
     zym_listAppend(vm, l, zym_newNumber(mx));
     zym_listAppend(vm, l, zym_newNumber((unsigned int)seed));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -2701,6 +2719,7 @@ ZymValue u_anim_var_vec2(ZymVM* vm, ZymValue /*self*/,
     if (!reqVec2(vm, mxV,  W, &mx))      return ZYM_ERROR;
     if (!reqInt(vm, seedV, W, &seed))    return ZYM_ERROR;
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber(kVarTagVec2));
     zym_listAppend(vm, l, zym_newNumber(mode));
     zym_listAppend(vm, l, zym_newNumber(amt.x));
@@ -2710,6 +2729,7 @@ ZymValue u_anim_var_vec2(ZymVM* vm, ZymValue /*self*/,
     zym_listAppend(vm, l, zym_newNumber(mx.x));
     zym_listAppend(vm, l, zym_newNumber(mx.y));
     zym_listAppend(vm, l, zym_newNumber((unsigned int)seed));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -2724,12 +2744,14 @@ ZymValue u_anim_var_vec4(ZymVM* vm, ZymValue /*self*/,
     if (!reqVec4(vm, mxV,  W, &mx))      return ZYM_ERROR;
     if (!reqInt(vm, seedV, W, &seed))    return ZYM_ERROR;
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber(kVarTagVec4));
     zym_listAppend(vm, l, zym_newNumber(mode));
     for (int i = 0; i < 4; ++i) zym_listAppend(vm, l, zym_newNumber(((float*)&amt)[i]));
     for (int i = 0; i < 4; ++i) zym_listAppend(vm, l, zym_newNumber(((float*)&mn)[i]));
     for (int i = 0; i < 4; ++i) zym_listAppend(vm, l, zym_newNumber(((float*)&mx)[i]));
     zym_listAppend(vm, l, zym_newNumber((unsigned int)seed));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -2746,6 +2768,7 @@ ZymValue u_anim_var_color(ZymVM* vm, ZymValue /*self*/,
     if (!reqInt(vm, spaceV, W, &space))  return ZYM_ERROR;
     if (!reqInt(vm, seedV,  W, &seed))   return ZYM_ERROR;
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber(kVarTagColor));
     zym_listAppend(vm, l, zym_newNumber(mode));
     for (int i = 0; i < 4; ++i) zym_listAppend(vm, l, zym_newNumber(((float*)&amt)[i]));
@@ -2753,6 +2776,7 @@ ZymValue u_anim_var_color(ZymVM* vm, ZymValue /*self*/,
     for (int i = 0; i < 4; ++i) zym_listAppend(vm, l, zym_newNumber(((float*)&mx)[i]));
     zym_listAppend(vm, l, zym_newNumber(space));
     zym_listAppend(vm, l, zym_newNumber((unsigned int)seed));
+    zym_popRoot(vm);
     return l;
 }
 
@@ -3590,8 +3614,10 @@ ZymValue u_anim_clip_load(ZymVM* vm, ZymValue /*self*/, ZymValue pathV) {
     ImGuiID outId = 0;
     iam_result r = iam_clip_load(path.c_str(), &outId);
     ZymValue l = zym_newList(vm);
+    zym_pushRoot(vm, l);
     zym_listAppend(vm, l, zym_newNumber((double)(int)r));
     zym_listAppend(vm, l, zym_newNumber((double)outId));
+    zym_popRoot(vm);
     return l;
 }
 

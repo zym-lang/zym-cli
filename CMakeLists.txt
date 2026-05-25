@@ -1,26 +1,12 @@
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Tiny")
-
-if(WIN32)
-    # MinGW-w64 GCC doesn't ship the asan/ubsan runtimes, so Debug drops the
-    # sanitizer flags on Windows. Everything else (-g -O0, -fno-exceptions,
-    # frame pointers) stays the same.
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fno-omit-frame-pointer -fno-exceptions")
-    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fno-omit-frame-pointer")
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "")
-else()
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-exceptions")
-    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer")
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
-endif()
-
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
-#set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections")
-
-set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_EXE_LINKER_FLAGS_TINY "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s -Wl,-Map,zym_cli.map")
+# NOTE: per-config compile/link flag setup is intentionally below
+# `project()` (further down in this file). The mingw toolchain file
+# (cmake/toolchains/mingw64.cmake) is loaded as part of project()'s
+# compiler-detection step, so `WIN32` and `CMAKE_SYSTEM_NAME` are not
+# reliably populated above `project()`. Doing the flag conditionals
+# pre-project() caused the Windows branch to silently take the Linux
+# path, which re-added `-fvisibility=hidden` under `-Oz -flto` and
+# tripped a mingw-gcc ICE in `binds_to_current_def_p`.
 
 set(PGO_MODE "OFF")
 if(PGO_MODE STREQUAL "GEN")
@@ -35,8 +21,8 @@ elseif(PGO_MODE STREQUAL "USE")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use -fprofile-correction")
 endif()
 
-set(CMAKE_BUILD_TYPE Release)
-set(USE_COMPRESSION OFF)
+set(CMAKE_BUILD_TYPE Tiny)
+set(USE_COMPRESSION ON)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
 set(RUNTIME_ONLY OFF)
@@ -84,6 +70,63 @@ cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ZYM_LTO_OK OUTPUT ZYM_LTO_ERR)
+
+# --- Per-config compile/link flags --------------------------------------
+# Deferred until after `project()` so `WIN32` / `CMAKE_SYSTEM_NAME` are
+# populated (the mingw toolchain is loaded during project()'s
+# compiler-detection, not before CMakeLists.txt starts).
+if(WIN32)
+    # MinGW-w64 GCC doesn't ship the asan/ubsan runtimes, so Debug drops the
+    # sanitizer flags on Windows. Everything else (-g -O0, -fno-exceptions,
+    # frame pointers) stays the same.
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fno-omit-frame-pointer -fno-exceptions")
+    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "")
+else()
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-exceptions")
+    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
+endif()
+
+# PE/COFF (mingw-w64) doesn't honor ELF visibility — Windows uses
+# dllexport/dllimport — so `-fvisibility=hidden` is effectively a no-op
+# there, but it interacts badly with `-Oz -flto` on mingw-gcc and
+# triggers an ICE in `binds_to_current_def_p` (symtab.cc:2497) across
+# the GIMPLE DSE/alias passes. Strip visibility flags on Windows for
+# both Release and Tiny; they buy nothing on PE/COFF.
+if(WIN32)
+    set(_ZYM_VIS_CXX "")
+    set(_ZYM_VIS_C   "")
+else()
+    set(_ZYM_VIS_CXX "-fvisibility=hidden -fvisibility-inlines-hidden")
+    set(_ZYM_VIS_C   "-fvisibility=hidden")
+endif()
+
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions ${_ZYM_VIS_CXX} -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG ${_ZYM_VIS_C} -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
+
+# mingw-w64 GCC has a known LTO ICE in `binds_to_current_def_p`
+# (symtab.cc:2497) on this codebase under `-flto=auto` (parallel
+# LTO partitioning). The ICE wanders across GIMPLE passes
+# (dse, alias, sink, store-merging, ...) as each is disabled —
+# the bug is in symbol resolution itself, not the passes, because
+# `-flto=auto` shards the symbol table across worker processes
+# and resolution mismatches blow up `binds_to_current_def_p`.
+# Forcing `-flto-partition=none` (single partition, no sharding)
+# is the clean escape. Linux gcc-14 doesn't trip the bug, so this
+# is Windows-only. `Release` escapes because its target_compile/
+# link_options use plain `-flto` (single-partition) instead of
+# the IPO-property-injected `-flto=auto`.
+if(WIN32)
+    set(_ZYM_TINY_LTO_WORKAROUND "-flto-partition=none")
+else()
+    set(_ZYM_TINY_LTO_WORKAROUND "")
+endif()
+
+set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions ${_ZYM_VIS_CXX} -fno-asynchronous-unwind-tables -fno-unwind-tables ${_ZYM_TINY_LTO_WORKAROUND}")
+set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions ${_ZYM_VIS_C} -fno-asynchronous-unwind-tables -fno-unwind-tables ${_ZYM_TINY_LTO_WORKAROUND}")
+set(CMAKE_EXE_LINKER_FLAGS_TINY "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s -Wl,-Map,zym_cli.map ${_ZYM_TINY_LTO_WORKAROUND}")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)

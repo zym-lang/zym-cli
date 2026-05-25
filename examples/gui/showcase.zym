@@ -10,8 +10,11 @@
 //   4. Drawing       -  8 parametric drawing modes using DrawList API
 //   5. Custom        -  hand-crafted widgets: knob, toggle, radial progress,
 //                     bezier editor, radar chart, sparkline, gradient card
-//   6. Theme         -  live accent/rounding/density editor
-//   7. About         -  perf metrics, runtime info
+//   6. Anim          -  ImAnim showcase + micro-interactions: easings,
+//                     tweens, reactive buttons, animated controls,
+//                     staggered lists/cards, feedback (toast/pulse)
+//   7. Theme         -  live accent/rounding/density editor
+//   8. About         -  perf metrics, runtime info
 
 var win = SDL.createWindow("zym ui showcase", 1280, 800, { resizable: true })
 if (win == null) { print("failed: %v", SDL.lastError()); return }
@@ -2586,6 +2589,960 @@ var pageGraphs = func() {
     })
 }
 
+// ===========================================================================
+// Page: Anim  -  ImAnim showcase + micro-interactions for a live-feeling app
+// ---------------------------------------------------------------------------
+// Six sub-tabs:
+//   1. Easings      - easing curve previews + live marker (foundation)
+//   2. Tweens       - float / color tweens with retarget policies
+//   3. Buttons      - hover-scale, glow, press-shake on real hit regions
+//   4. Controls     - animated toggle, checkbox tick, sliding tab underline
+//   5. Lists+Cards  - staggered list reveal, hover-lift cards w/ sibling dim
+//   6. Feedback     - eased progress, toast slide-in, value-change pulse
+//
+// All UI.anim* calls follow ui_anim.md signatures. Drawing uses the
+// showcase's own UI.drawList() object. drawList rect calls take
+// (x, y, w, h, ...) like the rest of the showcase  -  NOT corner coords.
+// ===========================================================================
+
+// ---- Anim shared state ----------------------------------------------------
+
+var aEaseNames = [
+    "Linear","InQuad","OutQuad","InOutQuad",
+    "InCubic","OutCubic","InOutCubic",
+    "InQuart","OutQuart","InOutQuart",
+    "InSine","OutSine","InOutSine",
+    "InExpo","OutExpo","InOutExpo",
+    "InCirc","OutCirc","InOutCirc",
+    "OutBack","OutElastic","OutBounce",
+]
+var aEaseIds = [
+    UI.ANIM_EASE_LINEAR,
+    UI.ANIM_EASE_IN_QUAD,  UI.ANIM_EASE_OUT_QUAD,  UI.ANIM_EASE_IN_OUT_QUAD,
+    UI.ANIM_EASE_IN_CUBIC, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_EASE_IN_OUT_CUBIC,
+    UI.ANIM_EASE_IN_QUART, UI.ANIM_EASE_OUT_QUART, UI.ANIM_EASE_IN_OUT_QUART,
+    UI.ANIM_EASE_IN_SINE,  UI.ANIM_EASE_OUT_SINE,  UI.ANIM_EASE_IN_OUT_SINE,
+    UI.ANIM_EASE_IN_EXPO,  UI.ANIM_EASE_OUT_EXPO,  UI.ANIM_EASE_IN_OUT_EXPO,
+    UI.ANIM_EASE_IN_CIRC,  UI.ANIM_EASE_OUT_CIRC,  UI.ANIM_EASE_IN_OUT_CIRC,
+    UI.ANIM_EASE_OUT_BACK, UI.ANIM_EASE_OUT_ELASTIC, UI.ANIM_EASE_OUT_BOUNCE,
+]
+var aEaseSel = [5] // OutCubic
+
+// Tweens sub-tab
+var aTweenTarget = [40.0]
+var aTweenPolicy = [0]
+var aPolicyNames = ["Crossfade","Cut","Queue"]
+var aPolicyIds   = [UI.ANIM_POLICY_CROSSFADE, UI.ANIM_POLICY_CUT, UI.ANIM_POLICY_QUEUE]
+var aColorFlip   = false
+
+// Buttons sub-tab
+var aBtnLabels = ["Save","Open","Build","Deploy"]
+
+// Controls sub-tab
+var aToggleOn  = false
+var aCheckOn   = [false, true, false]
+var aTabSel    = 0
+var aTabNames  = ["Overview","Activity","Settings","About"]
+
+// Lists + Cards sub-tab
+var aListRevealed = false
+var aListItems    = ["zym-core","renderer","scheduler","net-stack","asset-db","ui-layer"]
+var aCardTitles   = ["Project","Issues","Pull Requests"]
+var aCardBlurbs   = [
+    "zym-cli  .  37 files  .  edited 2m ago",
+    "12 open  .  3 assigned to you",
+    "5 open  .  1 awaiting review",
+]
+var aHoveredCard  = -1
+
+// Feedback sub-tab
+var aProgTarget = [0.0]
+var aToastOpen  = false
+var aPulseValue = 1280
+
+// ---- helpers --------------------------------------------------------------
+// pack a normalised [r,g,b,a] (0..1) into a UI.color
+var aPack01 = func(c) {
+    return UI.color(floor(c[0]*255), floor(c[1]*255), floor(c[2]*255), floor(c[3]*255))
+}
+var aROUND = UI.DRAW_ROUND_CORNERS_ALL
+
+// ---------------------------------------------------------------------------
+// Sub-tab 1: Easings
+// ---------------------------------------------------------------------------
+
+var aPageEasings = func(dt) {
+    secHeader("Easing curves",
+        "the timing functions every other tab is built on  -  sampled via animEvalPreset(type, t)")
+
+    UI.setNextItemWidth(220)
+    UI.combo("curve##aease", aEaseSel, aEaseNames)
+    UI.dummy(0, 8)
+
+    var dl = UI.drawList()
+    var o  = UI.getCursorPos()
+    var w  = 520.0; var h = 200.0
+    var ac = accent[0]
+
+    dl.addRectFilled(o.x, o.y, w, h, packColor([0.05,0.06,0.09,1]), 6.0, aROUND)
+    dl.addRect(o.x, o.y, w, h, packColor([1,1,1,0.07]), 6.0, 1.0, aROUND)
+
+    // baseline + ceiling guides
+    dl.addLine(o.x, o.y+h-1, o.x+w, o.y+h-1, packColor([1,1,1,0.05]), 1.0)
+    dl.addLine(o.x, o.y+1,   o.x+w, o.y+1,   packColor([1,1,1,0.05]), 1.0)
+
+    // the curve
+    var eid   = aEaseIds[aEaseSel[0]]
+    var prevX = o.x
+    var prevY = o.y + h
+    var i = 1
+    while (i <= 96) {
+        var u  = i / 96.0
+        var v  = UI.animEvalPreset(eid, u)
+        var px = o.x + u*w
+        var py = o.y + h - v*h
+        dl.addLine(prevX, prevY, px, py, packColor(ac), 2.0)
+        prevX = px; prevY = py
+        i++
+    }
+
+    // looping marker driven by wall clock
+    var t  = (Time.clock() - clockStart) % 2.0
+    var u  = t / 2.0
+    var v  = UI.animEvalPreset(eid, u)
+    var mx = o.x + u*w
+    var my = o.y + h - v*h
+    dl.addLine(o.x, my, o.x+w, my, packColor([1,1,1,0.06]), 1.0)
+    dl.addLine(mx, o.y, mx, o.y+h, packColor([1,1,1,0.06]), 1.0)
+    dl.addCircleFilled(mx, my, 6.0, packColor([0.98,0.78,0.36,1]), 0)
+
+    UI.dummy(w, h + 10)
+    UI.textDisabled("the dot tracks progress vs. eased value  -  flat regions = slow, steep regions = fast")
+}
+
+// ---------------------------------------------------------------------------
+// Sub-tab 2: Tweens
+// ---------------------------------------------------------------------------
+
+var aPageTweens = func(dt) {
+    secHeader("Static-target tweens",
+        "drag the target  -  the marker chases it through the chosen retarget policy")
+
+    UI.setNextItemWidth(300)
+    UI.sliderFloat("target X##atw", aTweenTarget, 0, 480, "%.0f")
+    UI.setNextItemWidth(220)
+    UI.combo("retarget policy##atw", aTweenPolicy, aPolicyNames)
+    UI.dummy(0, 8)
+
+    var dl = UI.drawList()
+    var o  = UI.getCursorPos()
+    var w  = 520.0; var h = 64.0
+    var ac = accent[0]
+
+    dl.addRectFilled(o.x, o.y, w, h, packColor([0.05,0.06,0.09,1]), 6.0, aROUND)
+    dl.addLine(o.x+20, o.y+h/2, o.x+w-20, o.y+h/2, packColor([1,1,1,0.10]), 2.0)
+    // ghost of the raw (un-tweened) target
+    dl.addCircle(o.x+20+aTweenTarget[0], o.y+h/2, 10.0, packColor([1,1,1,0.14]), 0, 1.5)
+
+    var cur = UI.animTweenFloat("a/tween-x", 1, aTweenTarget[0], 0.55,
+        UI.ANIM_EASE_OUT_CUBIC, aPolicyIds[aTweenPolicy[0]], dt)
+    dl.addCircleFilled(o.x+20+cur, o.y+h/2, 10.0, packColor(ac), 0)
+    UI.dummy(w, h + 12)
+
+    secHeader("Color tween", "perceptual OKLAB interpolation  -  no muddy midpoints")
+    if (UI.button("Flip color##atw")) { aColorFlip = !aColorFlip }
+    UI.sameLine(0, 12)
+
+    var target = [0.24, 0.66, 0.96, 1.0]
+    if (aColorFlip) { target = [0.96, 0.46, 0.24, 1.0] }
+    var cc = UI.animTweenColor("a/tween-col", 1, target, 0.7,
+        UI.ANIM_EASE_IN_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
+        UI.ANIM_COL_OKLAB, dt)
+
+    var o2 = UI.getCursorPos()
+    dl.addRectFilled(o2.x, o2.y, 140, 44, aPack01(cc), 6.0, aROUND)
+    dl.addRect(o2.x, o2.y, 140, 44, packColor([1,1,1,0.10]), 6.0, 1.0, aROUND)
+    UI.dummy(140, 50)
+    UI.textDisabled("policy + ease are independent  -  Crossfade blends, Cut snaps, Queue waits")
+}
+
+// ---------------------------------------------------------------------------
+// Sub-tab 3: Buttons  (micro-interaction)
+// ---------------------------------------------------------------------------
+
+var aPageButtons = func(dt) {
+    secHeader("Reactive buttons",
+        "hover to grow + glow, press to dip, click for a shake  -  every value is tweened, never snapped")
+
+    var dl  = UI.drawList()
+    var bw  = 124.0; var bh = 48.0; var gap = 14.0
+
+    var i = 0
+    while (i < 4) {
+        if (i > 0) { UI.sameLine(0, gap) }
+        var id = "a/btn/" + str(i)
+        UI.invisibleButton(id, bw, bh)
+        var hovered = UI.isItemHovered()
+        var active  = UI.isItemActive()
+        var rmin = UI.getItemRectMin()
+        var rmax = UI.getItemRectMax()
+        var cx = (rmin.x + rmax.x) * 0.5
+        var cy = (rmin.y + rmax.y) * 0.5
+
+        // scale: 1.0 idle / 1.07 hover / 0.94 press
+        var tScale = 1.0
+        if (hovered) { tScale = 1.07 }
+        if (active)  { tScale = 0.94 }
+        var scale = UI.animTweenFloat("a/btn-s/"+str(i), 1, tScale,
+            0.16, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+        // glow color: idle dark / hover accent / press accent-bright
+        var tCol = [0.13, 0.15, 0.19, 1.0]
+        if (hovered) { tCol = accent[0] }
+        if (active)  { tCol = mix(accent[0], white, 0.25) }
+        var gc = UI.animTweenColor("a/btn-c/"+str(i), 1, tCol,
+            0.16, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
+            UI.ANIM_COL_OKLAB, dt)
+
+        // halo alpha rides hover/press
+        var tHalo = 0.0
+        if (hovered) { tHalo = 0.28 }
+        if (active)  { tHalo = 0.42 }
+        var halo = UI.animTweenFloat("a/btn-h/"+str(i), 1, tHalo,
+            0.16, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+        // click shake on X  -  animTriggerShake re-arms, animShake samples
+        // the raw offset (we add the base ourselves below).
+        if (UI.isItemClicked()) {
+            UI.animTriggerShake("a/btn-shake/"+str(i))
+        }
+        var sh = UI.animShake("a/btn-shake/"+str(i), 7.0, 30.0, 0.4, dt)
+
+        var sw = bw*scale; var shh = bh*scale
+        var x0 = cx - sw*0.5 + sh
+        var y0 = cy - shh*0.5
+        var ac = accent[0]
+
+        // halo
+        if (halo > 0.01) {
+            dl.addRectFilled(x0-6, y0-6, sw+12, shh+12,
+                aPack01([ac[0], ac[1], ac[2], halo]), 12.0, aROUND)
+        }
+        dl.addRectFilled(x0, y0, sw, shh, aPack01(gc), 9.0, aROUND)
+        dl.addRect(x0, y0, sw, shh, packColor([1,1,1,0.16]), 9.0, 1.0, aROUND)
+
+        var lbl = aBtnLabels[i]
+        var ts  = UI.calcTextSize(lbl)
+        dl.addText(cx - ts.x*0.5 + sh, cy - ts.y*0.5,
+            packColor([0.96,0.97,0.99,1]), lbl)
+        i++
+    }
+    UI.dummy(0, bh + 16)
+    UI.textDisabled("animTweenFloat drives scale, animTweenColor drives the glow, animShake adds the click kick")
+}
+
+// ---------------------------------------------------------------------------
+// Sub-tab 4: Controls  (micro-interaction)
+// ---------------------------------------------------------------------------
+
+var aPageControls = func(dt) {
+    var dl = UI.drawList()
+
+    secHeader("Animated toggle", "the knob glides and the track cross-fades instead of snapping")
+
+    var tw = 64.0; var th = 32.0
+    UI.invisibleButton("a/toggle", tw, th)
+    if (UI.isItemClicked()) { aToggleOn = !aToggleOn }
+    var trmin = UI.getItemRectMin()
+
+    var tTarget = 0.0
+    if (aToggleOn) { tTarget = 1.0 }
+    var kx = UI.animTweenFloat("a/toggle-x", 1, tTarget,
+        0.22, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+    var trackTgt = [0.18,0.20,0.25,1.0]
+    if (aToggleOn) { trackTgt = accent[0] }
+    var trackCol = UI.animTweenColor("a/toggle-c", 1, trackTgt,
+        0.22, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
+        UI.ANIM_COL_OKLAB, dt)
+
+    var r = th*0.5
+    dl.addRectFilled(trmin.x, trmin.y, tw, th, aPack01(trackCol), r, aROUND)
+    var knobX = trmin.x + r + kx*(tw - th)
+    dl.addCircleFilled(knobX, trmin.y+r, r-4, packColor([0.98,0.99,1.0,1]), 0)
+    UI.sameLine(0, 14)
+    UI.text(aToggleOn ? "Enabled" : "Disabled")
+    UI.dummy(0, 14)
+
+    secHeader("Checkbox tick", "the check mark scales in with a slight overshoot")
+    var clabels = ["Auto-save","Telemetry","Beta features"]
+    var ci = 0
+    while (ci < 3) {
+        var cid = "a/check/" + str(ci)
+        UI.invisibleButton(cid, 22, 22)
+        if (UI.isItemClicked()) { aCheckOn[ci] = !aCheckOn[ci] }
+        var bmin = UI.getItemRectMin()
+        var hov  = UI.isItemHovered()
+
+        var boxCol = [0.12,0.14,0.18,1.0]
+        if (hov) { boxCol = [0.16,0.18,0.23,1.0] }
+        dl.addRectFilled(bmin.x, bmin.y, 22, 22, aPack01(boxCol), 5.0, aROUND)
+        var boxBrd = [1,1,1,0.14]
+        if (aCheckOn[ci]) { boxBrd = accent[0] }
+        dl.addRect(bmin.x, bmin.y, 22, 22, packColor(boxBrd), 5.0, 1.5, aROUND)
+
+        // tick scale tween 0..1 with back-overshoot
+        var tickT = 0.0
+        if (aCheckOn[ci]) { tickT = 1.0 }
+        var ts = UI.animTweenFloat("a/check-t/"+str(ci), 1, tickT,
+            0.2, UI.ANIM_EASE_OUT_BACK, UI.ANIM_POLICY_CROSSFADE, dt)
+        if (ts > 0.02) {
+            var ccx = bmin.x + 11; var ccy = bmin.y + 11
+            var s   = ts
+            var ac  = accent[0]
+            // two-segment check mark, scaled around the box centre
+            dl.addLine(ccx + (-5)*s, ccy + (0)*s,  ccx + (-1)*s, ccy + (4)*s,
+                packColor(ac), 2.4)
+            dl.addLine(ccx + (-1)*s, ccy + (4)*s,  ccx + (6)*s,  ccy + (-5)*s,
+                packColor(ac), 2.4)
+        }
+        UI.sameLine(0, 10)
+        UI.text(clabels[ci])
+        UI.dummy(0, 2)
+        ci++
+    }
+    UI.dummy(0, 12)
+
+    secHeader("Sliding tab underline",
+        "click a tab  -  the underline tweens to follow instead of jumping")
+
+    var tabW = 120.0; var tabH = 30.0
+    var so = UI.getCursorPos()
+    var ti = 0
+    while (ti < 4) {
+        if (ti > 0) { UI.sameLine(0, 0) }
+        UI.invisibleButton("a/tab/"+str(ti), tabW, tabH)
+        if (UI.isItemClicked()) { aTabSel = ti }
+        var trmn = UI.getItemRectMin()
+        var trmx = UI.getItemRectMax()
+        var thov = UI.isItemHovered()
+
+        var col = [0.60,0.64,0.72,1.0]
+        if (aTabSel == ti) { col = [0.95,0.97,0.99,1.0] }
+        if (thov and aTabSel != ti) { col = [0.82,0.86,0.92,1.0] }
+        var lbl = aTabNames[ti]
+        var ts  = UI.calcTextSize(lbl)
+        var ccx = (trmn.x + trmx.x)*0.5
+        var ccy = (trmn.y + trmx.y)*0.5
+        dl.addText(ccx - ts.x*0.5, ccy - ts.y*0.5, packColor(col), lbl)
+        ti++
+    }
+    dl.addLine(so.x, so.y+tabH, so.x+tabW*4, so.y+tabH, packColor([1,1,1,0.08]), 1.0)
+
+    var ux = UI.animTweenFloat("a/tab-underline", 1, so.x + aTabSel*tabW,
+        0.26, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+    dl.addRectFilled(ux, so.y+tabH-2.5, tabW, 3.0, packColor(accent[0]), 1.0, aROUND)
+    UI.dummy(tabW*4, tabH + 10)
+}
+
+// ---------------------------------------------------------------------------
+// Sub-tab 5: Lists + Cards  (micro-interaction)
+// ---------------------------------------------------------------------------
+
+var aPageLists = func(dt) {
+    var dl = UI.drawList()
+
+    secHeader("Staggered list reveal",
+        "each row slides + fades in slightly after the one above it")
+    if (UI.button(aListRevealed ? "Hide rows##alist" : "Reveal rows##alist")) {
+        aListRevealed = !aListRevealed
+    }
+    UI.dummy(0, 8)
+
+    var listO = UI.getCursorPos()
+    var rowH  = 34.0; var rowGap = 6.0
+    var n = length(aListItems)
+    var i = 0
+    while (i < n) {
+        var tVis = 0.0
+        if (aListRevealed) { tVis = 1.0 }
+        // stagger: lower rows use a longer duration so they trail behind
+        var dur = 0.30 + i*0.07
+        var rv = UI.animTweenFloat("a/list-row/"+str(i), 1, tVis,
+            dur, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+        if (rv > 0.004) {
+            var slideX = (1.0 - rv) * 36.0   // slides in from the right
+            var a8 = floor(rv * 255)
+            var ry = listO.y + i*(rowH+rowGap)
+            var rx = listO.x + slideX
+            var ac = accent[0]
+            dl.addRectFilled(rx, ry, 320, rowH, UI.color(20, 23, 30, a8), 6.0, aROUND)
+            dl.addRect(rx, ry, 320, rowH,
+                UI.color(255,255,255, floor(rv*20)), 6.0, 1.0, aROUND)
+            // accent pip on the left edge
+            dl.addRectFilled(rx, ry, 3, rowH,
+                aPack01([ac[0],ac[1],ac[2], rv]), 0.0, UI.DRAW_NONE)
+            dl.addText(rx+14, ry+rowH*0.5-7, UI.color(235,238,244, a8), aListItems[i])
+        }
+        i++
+    }
+    UI.dummy(320, n*(rowH+rowGap) + 10)
+
+    secHeader("Hover-lift cards",
+        "the hovered card rises + brightens while its siblings dim back")
+
+    var cw = 230.0; var ch = 100.0; var cgap = 16.0
+    var newHover = -1
+    var ci = 0
+    while (ci < 3) {
+        if (ci > 0) { UI.sameLine(0, cgap) }
+        UI.invisibleButton("a/card/"+str(ci), cw, ch)
+        var hov = UI.isItemHovered()
+        if (hov) { newHover = ci }
+        var cmin = UI.getItemRectMin()
+
+        var tAlpha = 1.0
+        if (aHoveredCard >= 0 and aHoveredCard != ci) { tAlpha = 0.5 }
+        var alpha = UI.animTweenFloat("a/card-a/"+str(ci), 1, tAlpha,
+            0.2, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+        var tLift = 0.0
+        if (hov) { tLift = -6.0 }
+        var lift = UI.animTweenFloat("a/card-l/"+str(ci), 1, tLift,
+            0.18, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+        var a8 = floor(alpha*255)
+        var x0 = cmin.x; var y0 = cmin.y + lift
+        var ac = accent[0]
+
+        // drop shadow grows as the card lifts
+        var shA = floor((0.0 - lift) / 6.0 * 60.0)
+        if (shA > 0) {
+            dl.addRectFilled(x0+3, y0+6, cw, ch, UI.color(0,0,0,shA), 8.0, aROUND)
+        }
+        var bg = UI.color(22,26,34,a8)
+        if (hov) { bg = UI.color(34,40,52,a8) }
+        dl.addRectFilled(x0, y0, cw, ch, bg, 8.0, aROUND)
+        var brd = UI.color(255,255,255, floor(alpha*22))
+        if (hov) { brd = aPack01([ac[0],ac[1],ac[2],alpha]) }
+        dl.addRect(x0, y0, cw, ch, brd, 8.0, 1.0, aROUND)
+        dl.addText(x0+14, y0+14, UI.color(236,239,245,a8), aCardTitles[ci])
+        dl.addText(x0+14, y0+44, UI.color(150,158,174,a8), aCardBlurbs[ci])
+        ci++
+    }
+    aHoveredCard = newHover
+    UI.dummy(0, ch + 16)
+}
+
+// ---------------------------------------------------------------------------
+// Sub-tab 6: Feedback  (micro-interaction)
+// ---------------------------------------------------------------------------
+
+var aPageFeedback = func(dt) {
+    var dl = UI.drawList()
+
+    secHeader("Eased progress bar", "the fill glides toward its target instead of teleporting")
+    if (UI.button("0%##af"))   { aProgTarget[0] = 0.0 }
+    UI.sameLine(0, 8)
+    if (UI.button("35%##af"))  { aProgTarget[0] = 0.35 }
+    UI.sameLine(0, 8)
+    if (UI.button("70%##af"))  { aProgTarget[0] = 0.70 }
+    UI.sameLine(0, 8)
+    if (UI.button("100%##af")) { aProgTarget[0] = 1.0 }
+    UI.dummy(0, 8)
+
+    var po = UI.getCursorPos()
+    var pw = 420.0; var ph = 22.0
+    var fill = UI.animTweenFloat("a/prog", 1, aProgTarget[0],
+        0.5, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+    dl.addRectFilled(po.x, po.y, pw, ph, packColor([0.05,0.06,0.09,1]), ph*0.5, aROUND)
+    if (fill > 0.001) {
+        dl.addRectFilled(po.x, po.y, pw*fill, ph, packColor(accent[0]), ph*0.5, aROUND)
+    }
+    var ptxt = str(floor(fill*100)) + "%"
+    var pts  = UI.calcTextSize(ptxt)
+    dl.addText(po.x+pw*0.5-pts.x*0.5, po.y+ph*0.5-pts.y*0.5,
+        packColor([0.96,0.97,0.99,1]), ptxt)
+    UI.dummy(pw, ph + 14)
+
+    secHeader("Toast notification",
+        "slides in from the edge, holds, and the same tween reverses it out")
+    if (UI.button(aToastOpen ? "Dismiss toast##af" : "Show toast##af")) {
+        aToastOpen = !aToastOpen
+    }
+    UI.dummy(0, 6)
+
+    var to = UI.getCursorPos()
+    var tw = 300.0; var thh = 56.0
+    var tTgt = 0.0
+    if (aToastOpen) { tTgt = 1.0 }
+    var slide = UI.animTweenFloat("a/toast", 1, tTgt,
+        0.34, UI.ANIM_EASE_OUT_BACK, UI.ANIM_POLICY_CROSSFADE, dt)
+    if (slide > 0.004) {
+        var sv = slide
+        if (sv > 1.0) { sv = 1.0 }
+        var a8 = floor(sv*255)
+        var ac = accent[0]
+        // travels in from 60px below its resting spot
+        var ty = to.y + (1.0 - slide)*60.0
+        dl.addRectFilled(to.x, ty, tw, thh, UI.color(24,28,38,a8), 8.0, aROUND)
+        dl.addRect(to.x, ty, tw, thh, UI.color(255,255,255, floor(sv*26)),
+            8.0, 1.0, aROUND)
+        // accent stripe + status dot
+        dl.addRectFilled(to.x, ty, 4, thh,
+            aPack01([ac[0],ac[1],ac[2], sv]), 0.0, UI.DRAW_NONE)
+        dl.addCircleFilled(to.x+24, ty+thh*0.5, 7.0,
+            aPack01([0.36,0.86,0.52, sv]), 0)
+        dl.addText(to.x+42, ty+12, UI.color(236,239,245,a8), "Build succeeded")
+        dl.addText(to.x+42, ty+32, UI.color(150,158,174,a8),
+            "zym  .  Release  .  4.2s  .  0 warnings")
+    }
+    UI.dummy(tw, thh + 70)
+
+    secHeader("Value-change pulse",
+        "when a number updates, a quick shake + flash draws the eye to it")
+    if (UI.button("Bump value##af")) {
+        aPulseValue = aPulseValue + floor(rng.randfRange(40, 240))
+        UI.animTriggerShake("a/pulse-shake")
+        UI.animTriggerShake("a/pulse-flash")
+    }
+    UI.dummy(0, 8)
+
+    var vo = UI.getCursorPos()
+    var shx   = UI.animShake("a/pulse-shake", 5.0, 26.0, 0.35, dt)
+    var flash = UI.animShake("a/pulse-flash", 1.0, 6.0, 0.45, dt)
+    var fa = flash
+    if (fa < 0) { fa = 0 - fa }
+    if (fa > 1) { fa = 1 }
+
+    var boxW = 200.0; var boxH = 64.0
+    var ac   = accent[0]
+    dl.addRectFilled(vo.x, vo.y, boxW, boxH, packColor([0.05,0.06,0.09,1]), 8.0, aROUND)
+    if (fa > 0.01) {
+        dl.addRectFilled(vo.x, vo.y, boxW, boxH,
+            aPack01([ac[0],ac[1],ac[2], fa*0.35]), 8.0, aROUND)
+    }
+    dl.addRect(vo.x, vo.y, boxW, boxH, packColor([1,1,1,0.08]), 8.0, 1.0, aROUND)
+    dl.addText(vo.x+16, vo.y+12, packColor([0.55,0.60,0.68,1]), "ACTIVE SESSIONS")
+    dl.addText(vo.x+16+shx, vo.y+30, packColor([0.96,0.97,0.99,1]), str(aPulseValue))
+    UI.dummy(boxW, boxH + 8)
+    UI.textDisabled("animShake powers both the position kick and the decaying colour flash")
+}
+
+// ---------------------------------------------------------------------------
+// Page: Anim  -  top-level wrapper
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Sub-tab 7: Morphing  (micro-interaction)
+// ---------------------------------------------------------------------------
+//
+// Practical shape-morph transitions that make real UI elements feel alive:
+//   A. Button -> Spinner     click to submit, the button morphs into a loader
+//   B. Hamburger <-> X        classic nav-menu icon morph
+//   C. Plus -> Check         FAB-style action confirm
+//   D. Card collapse/expand a card outline morphs between compact and full
+//
+// All morphs use the path builder + animTweenFloat to drive a blend factor,
+// then animPathMorph to sample the blended shape each frame.  The blend
+// factor is a plain float tween (0 = shape A, 1 = shape B); the path morph
+// interpolates the geometry.
+
+// ---- morph state ----------------------------------------------------------
+
+var mBtnState  = 0    // 0 = idle, 1 = loading, 2 = done
+var mBtnTimer  = 0.0
+var mHamOpen   = false
+var mPlusCheck = false
+var mCardOpen  = false
+
+// ---- path building (called once) ------------------------------------------
+
+var mPathsBuilt = false
+
+var mBuildPaths = func() {
+    // --- A: Button pill -> Spinner ring ---
+    // Button pill: a rounded rectangle approximated as a closed path
+    // 160x44 pill, centered at origin
+    var pw = 160.0; var ph = 44.0; var pr = ph/2.0
+    UI.animPathBegin("m/btn-pill", [-pw/2.0 + pr, -ph/2.0])
+    UI.animPathLineTo([pw/2.0 - pr, -ph/2.0])
+    UI.animPathCubicTo([pw/2.0, -ph/2.0], [pw/2.0, ph/2.0], [pw/2.0 - pr, ph/2.0])
+    UI.animPathLineTo([-pw/2.0 + pr, ph/2.0])
+    UI.animPathCubicTo([-pw/2.0, ph/2.0], [-pw/2.0, -ph/2.0], [-pw/2.0 + pr, -ph/2.0])
+    UI.animPathClose()
+    UI.animPathEnd()
+
+    // Spinner circle: same segment count, ~radius 20 circle
+    var sr = 20.0
+    UI.animPathBegin("m/btn-ring", [sr, 0.0])
+    UI.animPathCubicTo([sr, sr*0.55], [sr*0.55, sr], [0.0, sr])
+    UI.animPathCubicTo([-sr*0.55, sr], [-sr, sr*0.55], [-sr, 0.0])
+    UI.animPathCubicTo([-sr, -sr*0.55], [-sr*0.55, -sr], [0.0, -sr])
+    UI.animPathCubicTo([sr*0.55, -sr], [sr, -sr*0.55], [sr, 0.0])
+    UI.animPathClose()
+    UI.animPathEnd()
+
+    // --- B: Hamburger bars -> X ---
+    // Hamburger: three horizontal bars stacked, drawn as a single path
+    // top bar
+    UI.animPathBegin("m/ham-bars", [-14.0, -8.0])
+    UI.animPathLineTo([14.0, -8.0])
+    UI.animPathLineTo([14.0, -6.0])
+    UI.animPathLineTo([-14.0, -6.0])
+    UI.animPathLineTo([-14.0, -8.0])
+    // middle bar (pen jump via line)
+    UI.animPathLineTo([-14.0, -1.0])
+    UI.animPathLineTo([14.0, -1.0])
+    UI.animPathLineTo([14.0, 1.0])
+    UI.animPathLineTo([-14.0, 1.0])
+    UI.animPathLineTo([-14.0, -1.0])
+    // bottom bar
+    UI.animPathLineTo([-14.0, 6.0])
+    UI.animPathLineTo([14.0, 6.0])
+    UI.animPathLineTo([14.0, 8.0])
+    UI.animPathLineTo([-14.0, 8.0])
+    UI.animPathLineTo([-14.0, 6.0])
+    UI.animPathClose()
+    UI.animPathEnd()
+
+    // X shape: two crossing strokes
+    UI.animPathBegin("m/ham-x", [-10.0, -10.0])
+    UI.animPathLineTo([-8.0, -10.0])
+    UI.animPathLineTo([0.0, -2.0])
+    UI.animPathLineTo([8.0, -10.0])
+    UI.animPathLineTo([10.0, -10.0])
+    UI.animPathLineTo([10.0, -8.0])
+    UI.animPathLineTo([2.0, 0.0])
+    UI.animPathLineTo([10.0, 8.0])
+    UI.animPathLineTo([10.0, 10.0])
+    UI.animPathLineTo([8.0, 10.0])
+    UI.animPathLineTo([0.0, 2.0])
+    UI.animPathLineTo([-8.0, 10.0])
+    UI.animPathLineTo([-10.0, 10.0])
+    UI.animPathLineTo([-10.0, 8.0])
+    UI.animPathLineTo([-2.0, 0.0])
+    UI.animPathLineTo([-10.0, -8.0])
+    UI.animPathClose()
+    UI.animPathEnd()
+
+    // --- C: Plus -> Checkmark ---
+    // Plus sign
+    UI.animPathBegin("m/plus", [-3.0, -10.0])
+    UI.animPathLineTo([3.0, -10.0])
+    UI.animPathLineTo([3.0, -3.0])
+    UI.animPathLineTo([10.0, -3.0])
+    UI.animPathLineTo([10.0, 3.0])
+    UI.animPathLineTo([3.0, 3.0])
+    UI.animPathLineTo([3.0, 10.0])
+    UI.animPathLineTo([-3.0, 10.0])
+    UI.animPathLineTo([-3.0, 3.0])
+    UI.animPathLineTo([-10.0, 3.0])
+    UI.animPathLineTo([-10.0, -3.0])
+    UI.animPathLineTo([-3.0, -3.0])
+    UI.animPathClose()
+    UI.animPathEnd()
+
+    // Checkmark
+    UI.animPathBegin("m/check", [-10.0, -1.0])
+    UI.animPathLineTo([-8.0, -3.0])
+    UI.animPathLineTo([-3.0, 2.0])
+    UI.animPathLineTo([8.0, -9.0])
+    UI.animPathLineTo([10.0, -7.0])
+    UI.animPathLineTo([-3.0, 8.0])
+    UI.animPathLineTo([-3.0, 8.0])
+    UI.animPathLineTo([-3.0, 8.0])
+    UI.animPathLineTo([-3.0, 8.0])
+    UI.animPathLineTo([-3.0, 8.0])
+    UI.animPathLineTo([-3.0, 8.0])
+    UI.animPathLineTo([-3.0, 8.0])
+    UI.animPathClose()
+    UI.animPathEnd()
+
+    // --- D: Card compact -> Card expanded ---
+    // Compact: 200x50 rounded rect
+    var cw = 200.0; var ch1 = 50.0; var cr = 8.0
+    UI.animPathBegin("m/card-small", [cr, 0.0])
+    UI.animPathLineTo([cw - cr, 0.0])
+    UI.animPathCubicTo([cw, 0.0], [cw, ch1], [cw - cr, ch1])
+    UI.animPathLineTo([cr, ch1])
+    UI.animPathCubicTo([0.0, ch1], [0.0, 0.0], [cr, 0.0])
+    UI.animPathClose()
+    UI.animPathEnd()
+
+    // Expanded: 200x140 rounded rect
+    var ch2 = 140.0
+    UI.animPathBegin("m/card-big", [cr, 0.0])
+    UI.animPathLineTo([cw - cr, 0.0])
+    UI.animPathCubicTo([cw, 0.0], [cw, ch2], [cw - cr, ch2])
+    UI.animPathLineTo([cr, ch2])
+    UI.animPathCubicTo([0.0, ch2], [0.0, 0.0], [cr, 0.0])
+    UI.animPathClose()
+    UI.animPathEnd()
+
+    mPathsBuilt = true
+}
+
+// ---- morph drawing helpers ------------------------------------------------
+
+// Sample a morphed path at N points, draw as a closed polygon outline
+var mDrawMorph = func(dl, pathA, pathB, blend, ox, oy, col, thick, steps) {
+    var prev = UI.animPathMorph(pathA, pathB, 0.0, blend, null)
+    var i = 1
+    while (i <= steps) {
+        var u = i / (steps * 1.0)
+        var p = UI.animPathMorph(pathA, pathB, u, blend, null)
+        dl.addLine(ox + prev[0], oy + prev[1], ox + p[0], oy + p[1], col, thick)
+        prev = p
+        i++
+    }
+}
+
+// Same but filled (draw filled lines from center  -  crude but visible)
+var mDrawMorphFilled = func(dl, pathA, pathB, blend, ox, oy, col, steps) {
+    var i = 0
+    while (i <= steps) {
+        var u = i / (steps * 1.0)
+        var p = UI.animPathMorph(pathA, pathB, u, blend, null)
+        dl.addCircleFilled(ox + p[0], oy + p[1], 1.5, col, 0)
+        i++
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The page
+// ---------------------------------------------------------------------------
+
+var aPageMorph = func(dt) {
+    if (!mPathsBuilt) { mBuildPaths() }
+
+    var dl = UI.drawList()
+    var ac = accent[0]
+
+    // ---- A: Button -> Spinner ------------------------------------------------
+
+    secHeader("Button -> Spinner",
+        "click Submit  -  the pill morphs into a ring that spins, then morphs back with a check")
+
+    var bxo = UI.getCursorPos()
+    var bw = 200.0; var bh = 80.0
+    UI.invisibleButton("a/morph/btn", bw, bh)
+    var bmin = UI.getItemRectMin()
+    var bcx = bmin.x + bw*0.5; var bcy = bmin.y + bh*0.5
+
+    dl.addRectFilled(bmin.x, bmin.y, bw, bh, packColor([0.05,0.06,0.09,1]), 8.0, UI.DRAW_ROUND_CORNERS_ALL)
+
+    if (UI.isItemClicked() and mBtnState == 0) {
+        mBtnState = 1; mBtnTimer = 0.0
+    }
+
+    // drive the blend factor: 0 = pill, 1 = ring
+    var bTarget = 0.0
+    if (mBtnState == 1) { bTarget = 1.0 }
+    if (mBtnState == 2) { bTarget = 0.0 }
+    var bBlend = UI.animTweenFloat("a/morph/btn-b", 1, bTarget,
+        0.45, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+    // spinner rotation (continuous while loading)
+    var spinAngle = 0.0
+    if (mBtnState == 1) {
+        mBtnTimer = mBtnTimer + dt
+        spinAngle = mBtnTimer * 5.0
+        // auto-complete after 2.5s
+        if (mBtnTimer > 2.5) { mBtnState = 2 }
+    }
+    if (mBtnState == 2) {
+        mBtnTimer = mBtnTimer + dt
+        if (mBtnTimer > 3.5) { mBtnState = 0; mBtnTimer = 0.0 }
+    }
+
+    // draw the morphed shape
+    var morphCol = packColor(ac)
+    var steps = 64
+    // when blend > 0.5 and loading, spin the ring by rotating draw coords
+    var i = 0
+    var prev = UI.animPathMorph("m/btn-pill", "m/btn-ring", 0.0, bBlend, null)
+    i = 1
+    while (i <= steps) {
+        var u = i / (steps * 1.0)
+        var p = UI.animPathMorph("m/btn-pill", "m/btn-ring", u, bBlend, null)
+        // rotate points around center when spinning
+        var px0 = prev[0]; var py0 = prev[1]
+        var px1 = p[0]; var py1 = p[1]
+        if (bBlend > 0.3) {
+            var cs = cos(spinAngle * bBlend); var sn = sin(spinAngle * bBlend)
+            var rx0 = px0*cs - py0*sn; var ry0 = px0*sn + py0*cs
+            var rx1 = px1*cs - py1*sn; var ry1 = px1*sn + py1*cs
+            px0 = rx0; py0 = ry0; px1 = rx1; py1 = ry1
+        }
+        // draw a gap in the ring (spinner style)  -  skip ~25% of the ring when loading
+        var drawSeg = true
+        if (bBlend > 0.7 and mBtnState == 1) {
+            if (u > 0.0 and u < 0.25) { drawSeg = false }
+        }
+        if (drawSeg) {
+            dl.addLine(bcx + px0, bcy + py0, bcx + px1, bcy + py1, morphCol, 2.5)
+        }
+        prev = p
+        i++
+    }
+
+    // label fades out as morph progresses
+    if (bBlend < 0.7) {
+        var la = floor((1.0 - bBlend / 0.7) * 255)
+        var lbl = "Submit"
+        if (mBtnState == 2) { lbl = "Done" }
+        var ts = UI.calcTextSize(lbl)
+        dl.addText(bcx - ts.x*0.5, bcy - ts.y*0.5, UI.color(240,242,248,la), lbl)
+    }
+
+    UI.dummy(0, 10)
+
+    // ---- B: Hamburger <-> X ---------------------------------------------------
+
+    secHeader("Hamburger <-> X",
+        "classic nav-menu icon morph  -  every vertex interpolates between the two shapes")
+
+    var ho = UI.getCursorPos()
+    var hsz = 48.0
+    UI.invisibleButton("a/morph/ham", hsz, hsz)
+    if (UI.isItemClicked()) { mHamOpen = !mHamOpen }
+    var hmin = UI.getItemRectMin()
+    var hhov = UI.isItemHovered()
+    var hcx = hmin.x + hsz*0.5; var hcy = hmin.y + hsz*0.5
+
+    // hover background
+    var hBg = [0.12,0.14,0.18,1.0]
+    if (hhov) { hBg = [0.18,0.20,0.26,1.0] }
+    dl.addRectFilled(hmin.x, hmin.y, hsz, hsz, aPack01(hBg), 8.0, UI.DRAW_ROUND_CORNERS_ALL)
+
+    var hTarget = 0.0
+    if (mHamOpen) { hTarget = 1.0 }
+    var hBlend = UI.animTweenFloat("a/morph/ham-b", 1, hTarget,
+        0.30, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+    mDrawMorph(dl, "m/ham-bars", "m/ham-x", hBlend, hcx, hcy, packColor(ac), 2.0, 80)
+
+    UI.sameLine(0, 16)
+    UI.text(mHamOpen ? "Menu open" : "Menu closed")
+    UI.dummy(0, 10)
+
+    // ---- C: Plus -> Checkmark ------------------------------------------------
+
+    secHeader("Plus -> Check",
+        "a FAB-style action button  -  the plus icon morphs into a checkmark on confirm")
+
+    var po = UI.getCursorPos()
+    var psz = 56.0
+    UI.invisibleButton("a/morph/plus", psz, psz)
+    if (UI.isItemClicked()) { mPlusCheck = !mPlusCheck }
+    var pmin = UI.getItemRectMin()
+    var phov = UI.isItemHovered()
+    var pcx = pmin.x + psz*0.5; var pcy = pmin.y + psz*0.5
+
+    // background circle
+    var pBgTarget = [0.13,0.15,0.20,1.0]
+    if (phov) { pBgTarget = accent[0] }
+    if (mPlusCheck) { pBgTarget = [0.18,0.75,0.45,1.0] }
+    var pBg = UI.animTweenColor("a/morph/plus-bg", 1, pBgTarget,
+        0.25, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE,
+        UI.ANIM_COL_OKLAB, dt)
+    dl.addCircleFilled(pcx, pcy, psz*0.48, aPack01(pBg), 0)
+
+    var pTarget = 0.0
+    if (mPlusCheck) { pTarget = 1.0 }
+    var pBlend = UI.animTweenFloat("a/morph/plus-b", 1, pTarget,
+        0.30, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+    // slight rotation during morph (plus rotates 90 deg into check)
+    var pRot = pBlend * PI * 0.25
+    var pCos = cos(pRot); var pSin = sin(pRot)
+
+    var pSteps = 48
+    var pPrev = UI.animPathMorph("m/plus", "m/check", 0.0, pBlend, null)
+    var pi = 1
+    while (pi <= pSteps) {
+        var u = pi / (pSteps * 1.0)
+        var pp = UI.animPathMorph("m/plus", "m/check", u, pBlend, null)
+        // apply rotation
+        var x0 = pPrev[0]*pCos - pPrev[1]*pSin
+        var y0 = pPrev[0]*pSin + pPrev[1]*pCos
+        var x1 = pp[0]*pCos - pp[1]*pSin
+        var y1 = pp[0]*pSin + pp[1]*pCos
+        dl.addLine(pcx+x0, pcy+y0, pcx+x1, pcy+y1, packColor([0.96,0.97,0.99,1]), 2.0)
+        pPrev = pp
+        pi++
+    }
+
+    UI.sameLine(0, 16)
+    UI.text(mPlusCheck ? "Confirmed" : "Add item")
+    UI.dummy(0, 10)
+
+    // ---- D: Card collapse/expand --------------------------------------------
+
+    secHeader("Card collapse <-> expand",
+        "the card outline itself morphs between compact and full height  -  content fades in/out")
+
+    var co = UI.getCursorPos()
+    var cArea = 180.0 // vertical space reserved
+    UI.invisibleButton("a/morph/card", 220, 50)
+    if (UI.isItemClicked()) { mCardOpen = !mCardOpen }
+    var cmin = UI.getItemRectMin()
+    var chov = UI.isItemHovered()
+
+    var cTarget = 0.0
+    if (mCardOpen) { cTarget = 1.0 }
+    var cBlend = UI.animTweenFloat("a/morph/card-b", 1, cTarget,
+        0.35, UI.ANIM_EASE_OUT_CUBIC, UI.ANIM_POLICY_CROSSFADE, dt)
+
+    // draw morphed card outline
+    var cardCol = packColor(ac)
+    var cardBg  = packColor([0.06,0.07,0.10,1])
+    // fill: draw rect at interpolated height
+    var ch = 50.0 + cBlend * 90.0
+    dl.addRectFilled(cmin.x, cmin.y, 200, ch, cardBg, 8.0, UI.DRAW_ROUND_CORNERS_ALL)
+
+    mDrawMorph(dl, "m/card-small", "m/card-big", cBlend,
+        cmin.x, cmin.y, cardCol, 1.5, 48)
+
+    // header text (always visible)
+    dl.addText(cmin.x+14, cmin.y+14, packColor([0.94,0.96,0.99,1]), "Project Alpha")
+    dl.addText(cmin.x+14, cmin.y+30, packColor([0.50,0.55,0.65,1]), "3 tasks due today")
+
+    // detail content (fades in with blend)
+    if (cBlend > 0.1) {
+        var da = floor(cBlend * 255)
+        if (da > 255) { da = 255 }
+        dl.addLine(cmin.x+14, cmin.y+52, cmin.x+186, cmin.y+52,
+            UI.color(255,255,255, floor(cBlend*20)), 1.0)
+        dl.addText(cmin.x+14, cmin.y+60, UI.color(200,208,220,da), "Design review  .  due 2pm")
+        dl.addText(cmin.x+14, cmin.y+78, UI.color(200,208,220,da), "API migration  .  due 4pm")
+        dl.addText(cmin.x+14, cmin.y+96, UI.color(200,208,220,da), "Deploy staging  .  due 6pm")
+        // progress bar
+        dl.addRectFilled(cmin.x+14, cmin.y+118, 172, 6,
+            UI.color(255,255,255, floor(cBlend*15)), 3.0, UI.DRAW_ROUND_CORNERS_ALL)
+        dl.addRectFilled(cmin.x+14, cmin.y+118, 172*0.6, 6,
+            aPack01([ac[0],ac[1],ac[2],cBlend]), 3.0, UI.DRAW_ROUND_CORNERS_ALL)
+    }
+
+    UI.dummy(220, cArea)
+    UI.textDisabled("every demo uses animPathMorph(pathA, pathB, t, blend)  -  the blend factor is a plain animTweenFloat")
+}
+
+var pageAnim = func(dt) {
+    UI.child("anim-body", { w:0, h:0, border:false }, func() {
+        UI.tabBar("anim-nav", func() {
+            UI.tabItem("Easings",      func() { aPageEasings(dt)  })
+            UI.tabItem("Tweens",       func() { aPageTweens(dt)   })
+            UI.tabItem("Buttons",      func() { aPageButtons(dt)  })
+            UI.tabItem("Controls",     func() { aPageControls(dt) })
+            UI.tabItem("Lists+Cards",  func() { aPageLists(dt)    })
+            UI.tabItem("Feedback",     func() { aPageFeedback(dt) })
+            UI.tabItem("Morphing",     func() { aPageMorph(dt)    })
+        })
+    })
+}
+
 var done = false
 
 while (!win.shouldClose() and !done) {
@@ -2644,6 +3601,7 @@ while (!win.shouldClose() and !done) {
                         UI.tabItem("Custom",   func() { pageCustom()   })
                         UI.tabItem("Images",   func() { pageImages()   })
                         UI.tabItem("Graphs",   func() { pageGraphs()   })
+                        UI.tabItem("Anim",     func() { pageAnim(dt)   })
                         UI.tabItem("Theme",    func() { pageTheme()    })
                         UI.tabItem("About",    func() { pageAbout()    })
                     })

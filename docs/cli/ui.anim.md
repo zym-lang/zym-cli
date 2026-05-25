@@ -25,14 +25,16 @@ return value is the current sampled value for that channel.
   `iam_update_begin_frame()` and `iam_clip_update(dt)` once per
   frame using `ImGui::GetIO().DeltaTime`. Scripts that want manual
   control (scrub, pause, multi-pass, deterministic replay) call
-  `UI.animSetAutoFrameUpdate(false)` and then drive both
+  `UI.animSetAutoFrameUpdate(enable)` and then drive both
   `UI.animUpdateBeginFrame()` and `UI.animClipUpdate(dt)` themselves
   every frame. The single flag gates both calls — there's no
   realistic scenario where you'd want one auto and the other manual
   since the clip system feeds off the tween system.
-- **Channel IDs.** Every tween / oscillate / shake / wiggle call
-  takes an `id` (the "owner" — typically a widget label or window
-  name) and a `channelId` (which logical animation on that owner).
+- **Channel IDs.** The **tween** family (`animTween*`, `animRebase*`)
+  takes both an `id` (the "owner" — typically a widget label or
+  window name) and a `channelId` (which logical animation on that
+  owner). The **oscillate / shake / wiggle / noise / drag** families
+  do **not** take a `channelId` — they are addressed by `id` alone.
   IDs can be passed as **strings** (hashed via `ImHashStr` to the
   same `ImGuiID` ImGui would assign to a widget with that label) or
   as **raw numbers** if the script has cached an `ImGuiID` from a
@@ -93,7 +95,7 @@ return value is the current sampled value for that channel.
 | `UI.animSetAutoFrameUpdate(enable)` | null | Toggle the auto-driver. Default `true`. When `false`, scripts must call both `animUpdateBeginFrame` and `animClipUpdate` themselves. |
 | `UI.animIsAutoFrameUpdateEnabled()` | bool | Current value of the flag. Safe to call outside `UI.frame`. |
 | `UI.animGc(maxAgeFrames)` | null | Drop stale tween entries older than `maxAgeFrames` (upstream default is 600). |
-| `UI.animReserve(floatCap, vec2Cap, vec4Cap, intCap, colorCap)` | null | Pre-allocate per-channel pool capacity. Zero/negative values are ignored per channel. |
+| `UI.animReserve(float, vec2, vec4, int, color)` | null | Pre-allocate per-channel pool capacity. Zero/negative values are ignored per channel. |
 | `UI.animSetEaseLutSamples(count)` | null | LUT resolution for parametric easings (upstream clamps to >=9; default 256). |
 | `UI.animSetGlobalTimeScale(scale)` | null | Multiplier applied to every channel's `dt`. |
 | `UI.animGetGlobalTimeScale()` | number | Current global time scale. |
@@ -119,7 +121,7 @@ form is interchangeable with a bare preset int.
 | `UI.animEaseSpring(mass, stiffness, damping, v0)` | list | Critically-damped feel ≈ `damping² ≈ 4 * mass * stiffness`. `v0` is initial velocity. |
 | `UI.animEaseCustom(slot)` | list | Reference a function registered via the (currently unbound) `iam_register_custom_ease(slot, fn)`. Slot is `0..15`. Evaluates as no-op until a native registers a function. |
 | `UI.animAnchorSize(space)` | `[w, h]` | Pixel size of the requested anchor (`UI.ANIM_ANCHOR_*`). Requires an active frame. |
-| `UI.animGetBlendedColor(a, b, t, colorSpace)` | `[r, g, b, a]` | Stateless color blend. `a` / `b` are 4-element color lists, `t` in `[0, 1]`. |
+| `UI.animGetBlendedColor(a, b, t, space)` | `[r, g, b, a]` | Stateless color blend. `a` / `b` are 4-element color lists, `t` in `[0, 1]`. |
 
 ---
 
@@ -146,10 +148,10 @@ canonical `(id, channelId, target, dur, ease, policy, dt)` blob.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animTweenFloatRel(id, channelId, percent, pxBias, anchorSpace, axis, dur, ease, policy, dt)` | number | `axis`: `0` = width, `1` = height of the anchor. |
-| `UI.animTweenVec2Rel(id, channelId, percent, pxBias, anchorSpace, dur, ease, policy, dt)` | `[x, y]` | `percent` and `pxBias` are 2-element lists. |
-| `UI.animTweenVec4Rel(id, channelId, percent, pxBias, anchorSpace, dur, ease, policy, dt)` | `[x, y, z, w]` | `percent` and `pxBias` are 4-element lists. |
-| `UI.animTweenColorRel(id, channelId, percent, pxBias, colorSpace, anchorSpace, dur, ease, policy, dt)` | `[r, g, b, a]` | |
+| `UI.animTweenFloatRel(id, channelId, percent, pxBias, dur, ease, policy, anchorSpace, axis, dt)` | number | `axis`: `0` = width, `1` = height of the anchor. |
+| `UI.animTweenVec2Rel(id, channelId, percent, pxBias, dur, ease, policy, anchorSpace, dt)` | `[x, y]` | `percent` and `pxBias` are 2-element lists. |
+| `UI.animTweenVec4Rel(id, channelId, percent, pxBias, dur, ease, policy, anchorSpace, dt)` | `[x, y, z, w]` | `percent` and `pxBias` are 4-element lists. |
+| `UI.animTweenColorRel(id, channelId, percent, pxBias, dur, ease, policy, colorSpace, anchorSpace, dt)` | `[r, g, b, a]` | |
 
 ### Per-axis variants
 
@@ -158,9 +160,9 @@ for vec4 / color), each a preset int OR a 5-list.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animTweenVec2PerAxis(id, channelId, target, dur, easePerAxis, policy, dt)` | `[x, y]` | |
-| `UI.animTweenVec4PerAxis(id, channelId, target, dur, easePerAxis, policy, dt)` | `[x, y, z, w]` | |
-| `UI.animTweenColorPerAxis(id, channelId, target, dur, easePerAxis, policy, colorSpace, dt)` | `[r, g, b, a]` | |
+| `UI.animTweenVec2PerAxis(id, channelId, target, dur, easeXY, policy, dt)` | `[x, y]` | |
+| `UI.animTweenVec4PerAxis(id, channelId, target, dur, easeXYZW, policy, dt)` | `[x, y, z, w]` | |
+| `UI.animTweenColorPerAxis(id, channelId, target, dur, easeRGBA, policy, colorSpace, dt)` | `[r, g, b, a]` | |
 
 ### Rebase
 
@@ -170,40 +172,46 @@ underlying value changes mid-flight.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animRebaseFloat(id, channelId, newTarget)` | null | |
-| `UI.animRebaseInt(id, channelId, newTarget)` | null | |
-| `UI.animRebaseVec2(id, channelId, newTarget)` | null | |
-| `UI.animRebaseVec4(id, channelId, newTarget)` | null | |
-| `UI.animRebaseColor(id, channelId, newTarget)` | null | |
+| `UI.animRebaseFloat(id, channelId, newTarget, dt)` | null | |
+| `UI.animRebaseInt(id, channelId, newTarget, dt)` | null | |
+| `UI.animRebaseVec2(id, channelId, newTarget, dt)` | null | |
+| `UI.animRebaseVec4(id, channelId, newTarget, dt)` | null | |
+| `UI.animRebaseColor(id, channelId, newTarget, dt)` | null | |
 
 ### Scroll helpers
 
-Animated `ImGui` scroll wrappers. Call from inside the target window.
+Animated `ImGui` scroll wrappers. Call from inside the target window —
+they act on the current window's scroll state, so they take no `id`.
+They are driven by the auto frame update, so they take no `dt`.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animScrollToY(id, targetY, dur, ease, dt)` | null | |
-| `UI.animScrollToX(id, targetX, dur, ease, dt)` | null | |
-| `UI.animScrollToTop(id, dur, ease, dt)` | null | |
-| `UI.animScrollToBottom(id, dur, ease, dt)` | null | |
+| `UI.animScrollToY(targetY, dur, ease)` | null | |
+| `UI.animScrollToX(targetX, dur, ease)` | null | |
+| `UI.animScrollToTop(dur, ease)` | null | |
+| `UI.animScrollToBottom(dur, ease)` | null | |
 
 ---
 
 ## Oscillate / shake / wiggle
 
-Continuous waveform generators that overlay a periodic perturbation on
-top of a base value. All five type variants share the same call shape;
-parameters differ by family.
+Continuous waveform generators. Unlike the tween family, these are
+addressed by `id` alone — there is no `channelId` argument. Oscillate /
+shake / wiggle return the **raw perturbation** (offset or value); the
+script adds its own base value. The color variants are the exception:
+they take a `baseColor` and return a color perturbed around it. All
+type variants within a family share the same call shape; parameters
+differ by family.
 
-### Oscillate (sustained waveform around a base)
+### Oscillate (sustained periodic waveform)
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animOscillate(id, channelId, base, amplitude, frequency, phase, waveType, dt)` | number | `waveType` is `UI.ANIM_WAVE_*`. |
-| `UI.animOscillateInt(id, channelId, base, amplitude, frequency, phase, waveType, dt)` | int | |
-| `UI.animOscillateVec2(id, channelId, base, amplitude, frequency, phase, waveType, dt)` | `[x, y]` | |
-| `UI.animOscillateVec4(id, channelId, base, amplitude, frequency, phase, waveType, dt)` | `[x, y, z, w]` | |
-| `UI.animOscillateColor(id, channelId, base, amplitude, frequency, phase, waveType, colorSpace, dt)` | `[r, g, b, a]` | |
+| `UI.animOscillate(id, amplitude, frequency, waveType, phase, dt)` | number | `waveType` is `UI.ANIM_WAVE_*`. |
+| `UI.animOscillateInt(id, amplitude, frequency, waveType, phase, dt)` | int | |
+| `UI.animOscillateVec2(id, amplitude, frequency, waveType, phase, dt)` | `[x, y]` | |
+| `UI.animOscillateVec4(id, amplitude, frequency, waveType, phase, dt)` | `[x, y, z, w]` | |
+| `UI.animOscillateColor(id, baseColor, amplitude, frequency, waveType, phase, colorSpace, dt)` | `[r, g, b, a]` | |
 
 ### Shake (transient burst with decay)
 
@@ -212,31 +220,33 @@ sample the current value every frame.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animTriggerShake(id, channelId, duration, dt)` | null | (Re)start the shake on the channel. |
-| `UI.animShake(id, channelId, base, amplitude, frequency, decay, dt)` | number | |
-| `UI.animShakeInt(id, channelId, base, amplitude, frequency, decay, dt)` | int | |
-| `UI.animShakeVec2(id, channelId, base, amplitude, frequency, decay, dt)` | `[x, y]` | |
-| `UI.animShakeVec4(id, channelId, base, amplitude, frequency, decay, dt)` | `[x, y, z, w]` | |
-| `UI.animShakeColor(id, channelId, base, amplitude, frequency, decay, colorSpace, dt)` | `[r, g, b, a]` | |
+| `UI.animTriggerShake(id)` | null | (Re)start / re-arm the shake on `id`. Takes the id only — intensity / frequency / decay are supplied to `animShake`. |
+| `UI.animShake(id, intensity, frequency, decayTime, dt)` | number | |
+| `UI.animShakeInt(id, intensity, frequency, decayTime, dt)` | int | |
+| `UI.animShakeVec2(id, intensity, frequency, decayTime, dt)` | `[x, y]` | |
+| `UI.animShakeVec4(id, intensity, frequency, decayTime, dt)` | `[x, y, z, w]` | |
+| `UI.animShakeColor(id, baseColor, intensity, frequency, decayTime, colorSpace, dt)` | `[r, g, b, a]` | |
 
 ### Wiggle (smoothed noise)
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animWiggle(id, channelId, base, amplitude, frequency, dt)` | number | |
-| `UI.animWiggleInt(id, channelId, base, amplitude, frequency, dt)` | int | |
-| `UI.animWiggleVec2(id, channelId, base, amplitude, frequency, dt)` | `[x, y]` | |
-| `UI.animWiggleVec4(id, channelId, base, amplitude, frequency, dt)` | `[x, y, z, w]` | |
-| `UI.animWiggleColor(id, channelId, base, amplitude, frequency, colorSpace, dt)` | `[r, g, b, a]` | |
+| `UI.animWiggle(id, amplitude, frequency, dt)` | number | |
+| `UI.animWiggleInt(id, amplitude, frequency, dt)` | int | |
+| `UI.animWiggleVec2(id, amplitude, frequency, dt)` | `[x, y]` | |
+| `UI.animWiggleVec4(id, amplitude, frequency, dt)` | `[x, y, z, w]` | |
+| `UI.animWiggleColor(id, baseColor, amplitude, frequency, colorSpace, dt)` | `[r, g, b, a]` | |
 
 ---
 
 ## Drag feedback
 
-Inertial / snapping drag helpers. `animDragRelease` is the only call
-that takes options; the rest are unconditional state transitions.
+Inertial / snapping drag helpers. Drag channels are addressed by `id`
+alone — there is no `channelId`. `animDragRelease` is the only call
+that takes snap options; the rest are unconditional state transitions.
 
-The drag state returned by `animDragUpdate` is a 6-element list:
+`animDragBegin`, `animDragUpdate` and `animDragRelease` all return the
+same 6-element drag-state list:
 
 ```
 [ [px, py], [ox, oy], [vx, vy], dragging, snapping, progress ]
@@ -248,10 +258,10 @@ are bools, and `progress` is the snap-progress in `[0, 1]`.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animDragBegin(id, channelId, startPos)` | null | `startPos` is `[x, y]`. |
-| `UI.animDragUpdate(id, channelId, currentPos, dt)` | drag-state list | See shape above. |
-| `UI.animDragRelease(id, channelId, releasePos, dampingPerSec, restThreshold, snapPoints, snapRadius, snapTime, snapEase, dt)` | null | `snapPoints` is `null` or a list of `[x, y]` snap targets. `snapEase` is a preset int or 5-list. |
-| `UI.animDragCancel(id, channelId)` | null | |
+| `UI.animDragBegin(id, pos)` | drag-state list | `pos` is `[x, y]`, the press position. |
+| `UI.animDragUpdate(id, pos, dt)` | drag-state list | `pos` is the current pointer position. |
+| `UI.animDragRelease(id, pos, snapGrid, snapPoints, snapDuration, overshoot, easeType, dt)` | drag-state list | `snapGrid` is `[w, h]` grid cell size (`[0, 0]` = no grid). `snapPoints` is `null` or a list of `[x, y]` custom snap targets. `overshoot` controls inertial overshoot; `easeType` is a `UI.ANIM_EASE_*` preset int. |
+| `UI.animDragCancel(id)` | null | |
 
 ---
 
@@ -269,20 +279,20 @@ unfinished builder.
 | --- | --- | --- |
 | `UI.animBezierQuadratic(p0, p1, p2, t)` | `[x, y]` | Points are `[x, y]` lists. |
 | `UI.animBezierCubic(p0, p1, p2, p3, t)` | `[x, y]` | |
-| `UI.animCatmullRom(p0, p1, p2, p3, t)` | `[x, y]` | |
+| `UI.animCatmullRom(p0, p1, p2, p3, t, tension)` | `[x, y]` | |
 | `UI.animBezierQuadraticDeriv(p0, p1, p2, t)` | `[x, y]` | First derivative (tangent vector, unnormalised). |
 | `UI.animBezierCubicDeriv(p0, p1, p2, p3, t)` | `[x, y]` | |
-| `UI.animCatmullRomDeriv(p0, p1, p2, p3, t)` | `[x, y]` | |
+| `UI.animCatmullRomDeriv(p0, p1, p2, p3, t, tension)` | `[x, y]` | |
 
 ### Builder (procedural)
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animPathBegin(id, startPos)` | null | Starts a fresh builder under `id`. Drops any previous unfinished builder. `startPos` is `[x, y]`. |
-| `UI.animPathLineTo(p)` | null | |
-| `UI.animPathQuadraticTo(c, p)` | null | Quadratic bezier: control `c`, endpoint `p`. |
-| `UI.animPathCubicTo(c1, c2, p)` | null | Cubic bezier: control points `c1` / `c2`, endpoint `p`. |
-| `UI.animPathCatmullTo(c0, c1, p)` | null | Catmull-Rom with explicit control points. |
+| `UI.animPathBegin(pathId, start)` | null | Starts a fresh builder under `id`. Drops any previous unfinished builder. `startPos` is `[x, y]`. |
+| `UI.animPathLineTo(end)` | null | |
+| `UI.animPathQuadraticTo(ctrl, end)` | null | Quadratic bezier: control `c`, endpoint `p`. |
+| `UI.animPathCubicTo(ctrl1, ctrl2, end)` | null | Cubic bezier: control points `c1` / `c2`, endpoint `p`. |
+| `UI.animPathCatmullTo(end, tension)` | null | Catmull-Rom with explicit control points. |
 | `UI.animPathClose()` | null | Closes the contour back to the start. |
 | `UI.animPathEnd()` | null | Registers the path under the ID supplied to `animPathBegin`. |
 
@@ -290,11 +300,11 @@ unfinished builder.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animPathExists(id)` | bool | |
-| `UI.animPathLength(id)` | number | Total parametric length (sum of segment count, **not** arc length — see arc helpers). |
-| `UI.animPathEvaluate(id, t)` | `[x, y]` | `t` in `[0, 1]`. Parametric (uneven distribution along long curves). |
-| `UI.animPathTangent(id, t)` | `[x, y]` | Unnormalised tangent vector. |
-| `UI.animPathAngle(id, t)` | number | Radians. |
+| `UI.animPathExists(pathId)` | bool | |
+| `UI.animPathLength(pathId)` | number | Total parametric length (sum of segment count, **not** arc length — see arc helpers). |
+| `UI.animPathEvaluate(pathId, t)` | `[x, y]` | `t` in `[0, 1]`. Parametric (uneven distribution along long curves). |
+| `UI.animPathTangent(pathId, t)` | `[x, y]` | Unnormalised tangent vector. |
+| `UI.animPathAngle(pathId, t)` | number | Radians. |
 
 ### Along-path tweens
 
@@ -310,12 +320,12 @@ Even-distance traversal of curves. Build the LUT once with
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animPathBuildArcLut(id, samples)` | null | Build / rebuild the LUT for the path. |
-| `UI.animPathHasArcLut(id)` | bool | |
-| `UI.animPathDistanceToT(id, distance)` | number | Map distance → parametric `t`. |
-| `UI.animPathEvaluateAtDistance(id, distance)` | `[x, y]` | |
-| `UI.animPathAngleAtDistance(id, distance)` | number | Radians. |
-| `UI.animPathTangentAtDistance(id, distance)` | `[x, y]` | |
+| `UI.animPathBuildArcLut(pathId, subdivisions)` | null | Build / rebuild the LUT for the path. |
+| `UI.animPathHasArcLut(pathId)` | bool | |
+| `UI.animPathDistanceToT(pathId, distance)` | number | Map distance → parametric `t`. |
+| `UI.animPathEvaluateAtDistance(pathId, distance)` | `[x, y]` | |
+| `UI.animPathAngleAtDistance(pathId, distance)` | number | Radians. |
+| `UI.animPathTangentAtDistance(pathId, distance)` | `[x, y]` | |
 
 ---
 
@@ -327,10 +337,10 @@ Blend between two registered paths.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animPathMorph(pathA, pathB, blend, t, opts)` | `[x, y]` | `blend` in `[0, 1]`. `opts` is `null` or a flat options list — see source for slot order. |
-| `UI.animPathMorphTangent(pathA, pathB, blend, t, opts)` | `[x, y]` | |
-| `UI.animPathMorphAngle(pathA, pathB, blend, t, opts)` | number | Radians. |
-| `UI.animTweenPathMorph(id, channelId, pathA, pathB, targetBlend, dur, pathEase, morphEase, policy, dt, opts?)` | `[x, y]` | Animates the blend factor and samples the morphed path. Variadic: `dt` is required, `opts` optional (omit or `null` for defaults). The native closure signature parser caps fixed params at 9 when `...` is used, so `dt` / `opts` ride the variadic tail. |
+| `UI.animPathMorph(pathA, pathB, t, blend, opts)` | `[x, y]` | `t` is the parametric position in `[0, 1]`; `blend` in `[0, 1]` is the A→B morph factor. `opts` is `null` or a 3-element list `[samples, matchEndpoints, useArcLength]` (int, bool, bool). |
+| `UI.animPathMorphTangent(pathA, pathB, t, blend, opts)` | `[x, y]` | |
+| `UI.animPathMorphAngle(pathA, pathB, t, blend, opts)` | number | Radians. |
+| `UI.animTweenPathMorph(id, channelId, pathA, pathB, targetBlend, dur, pathEase, morphEase, policy, dt, opts)` | `[x, y]` | Animates the blend factor and samples the morphed path. Variadic: `dt` is required, `opts` optional (omit or `null` for defaults). The native closure signature parser caps fixed params at 9 when `...` is used, so `dt` / `opts` ride the variadic tail. |
 | `UI.animGetMorphBlend(id, channelId)` | number | Current blend factor for an in-progress morph. |
 
 ### Text along path
@@ -339,62 +349,83 @@ Draw text along a registered path. Colors are 4-element color lists
 internally packed to `ImU32`. The active font is whatever ImGui has
 pushed at call time (use `UI.withFont` to override).
 
+**Text-path opts.** The `opts` argument is `null` or a 4-element list
+`[offset, letterSpacing, align, flipY]`, where `offset` is the start
+position along the path in `[0, 1]`, `letterSpacing` is extra pixel
+spacing per glyph, `align` is a `UI.ANIM_TEXT_ALIGN_*` constant, and
+`flipY` is a bool.
+
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animTextPath(text, pathId, t0, t1, color, align, opts)` | null | `align` is `UI.ANIM_TEXT_ALIGN_*`. |
-| `UI.animTextPathAnimated(text, pathId, t0, t1, color, align, fx, fxProgress, opts)` | null | `fx` is `UI.ANIM_TEXT_FX_*`; `fxProgress` in `[0, 1]`. |
-| `UI.animTextPathWidth(text)` | number | Pixel width of the given text in the active font. |
+| `UI.animTextPath(pathId, text, opts)` | null | Draws `text` along the registered path `pathId`. |
+| `UI.animTextPathAnimated(pathId, text, progress, opts)` | null | `progress` in `[0, 1]` drives a reveal / effect sweep. |
+| `UI.animTextPathWidth(text, opts)` | number | Pixel width of `text` in the active font with the opts' letter spacing applied. |
 
 ### Quad transforms
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animTransformQuad(quad, transform)` | quad | `quad` is a 4-list of `[x, y]` vertices; `transform` is `[posX, posY, scaleX, scaleY, rotRad]`. |
-| `UI.animMakeGlyphQuad(pos, size)` | quad | Convenience: build a 4-vertex axis-aligned quad. |
+| `UI.animTransformQuad(quad, center, angleRad, translation)` | quad | `quad` is a 4-list of `[x, y]` vertices. Rotates the quad by `angleRad` around `center` (`[x, y]`), then adds `translation` (`[x, y]`). No scale — bake scale into the quad's vertices. |
+| `UI.animMakeGlyphQuad(pos, angleRad, glyphW, glyphH, baselineOffset)` | quad | Build a 4-vertex quad of size `glyphW` × `glyphH` at `pos` (`[x, y]`), rotated by `angleRad`, with `baselineOffset` shifting it along the baseline. |
 
 ### Text stagger
 
 Animated per-glyph entrance effects without a path.
 
+**Text-stagger opts.** The `opts` argument is `null` or a 9-element
+list `[pos, effect, charDelay, charDuration, effectIntensity, ease,
+color, fontScale, letterSpacing]`: `pos` is `[x, y]`, `effect` is a
+`UI.ANIM_TEXT_FX_*` constant, `charDelay` is the per-glyph stagger
+offset, `charDuration` is each glyph's effect duration, `ease` is an
+ease descriptor (preset int or 5-list), `color` is `[r, g, b, a]`.
+
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animTextStagger(text, pos, color, fx, progress, opts)` | null | `fx` is `UI.ANIM_TEXT_FX_*`. |
-| `UI.animTextStaggerWidth(text, opts)` | number | Pixel width with stagger spacing applied. |
+| `UI.animTextStagger(id, text, progress, opts)` | null | `progress` in `[0, 1]` advances the per-glyph sequence. |
+| `UI.animTextStaggerWidth(text, opts)` | number | Pixel width with stagger letter spacing applied. |
 | `UI.animTextStaggerDuration(text, opts)` | number | Total duration of the stagger sequence (seconds). |
 
 ---
 
 ## Noise
 
-Smooth pseudorandom channels backed by Perlin / simplex / value /
-worley noise (`UI.ANIM_NOISE_*`). `animNoise*` returns the raw noise
-value at a point; `animNoiseChannel*` / `animSmoothNoise*` animate a
-channel-bound value.
+Pseudorandom channels backed by Perlin / simplex / value / worley
+noise. `animNoise*` returns the raw noise value at a point;
+`animNoiseChannel*` / `animSmoothNoise*` advance a channel-bound
+value (addressed by `id` — no `channelId`).
+
+**Noise opts.** The `opts` argument is `null` (defaults) or a
+5-element list `[type, octaves, persistence, lacunarity, seed]`:
+`type` is a `UI.ANIM_NOISE_*` constant, `octaves` is the fractal
+layer count, `persistence` / `lacunarity` are the per-octave
+amplitude / frequency multipliers, and `seed` is an int for
+reproducible output. `animSmoothNoise*` does not take an `opts`
+list — it is a fixed low-pass-filtered noise channel.
 
 ### Stateless noise
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animNoise2d(noiseType, x, y, seed)` | number | Value in `[-1, 1]`. |
-| `UI.animNoise3d(noiseType, x, y, z, seed)` | number | |
+| `UI.animNoise2d(x, y, opts)` | number | Value in `[-1, 1]`. `opts` is the noise-opts list (see above). |
+| `UI.animNoise3d(x, y, z, opts)` | number | |
 
-### Noise channel (raw noise scaled to an amplitude around a base)
+### Noise channel (fractal noise around a base)
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animNoiseChannelFloat(id, channelId, base, amplitude, frequency, noiseType, seed, dt)` | number | |
-| `UI.animNoiseChannelVec2(id, channelId, base, amplitude, frequency, noiseType, seed, dt)` | `[x, y]` | |
-| `UI.animNoiseChannelVec4(id, channelId, base, amplitude, frequency, noiseType, seed, dt)` | `[x, y, z, w]` | |
-| `UI.animNoiseChannelColor(id, channelId, base, amplitude, frequency, noiseType, seed, colorSpace, dt)` | `[r, g, b, a]` | |
+| `UI.animNoiseChannelFloat(id, freq, amp, opts, dt)` | number | `freq` scales the sample rate, `amp` scales the output. |
+| `UI.animNoiseChannelVec2(id, freq, amp, opts, dt)` | `[x, y]` | |
+| `UI.animNoiseChannelVec4(id, freq, amp, opts, dt)` | `[x, y, z, w]` | |
+| `UI.animNoiseChannelColor(id, baseColor, amp, freq, opts, space, dt)` | `[r, g, b, a]` | Note the `amp` / `freq` order differs from the non-color variants. `space` is a `UI.ANIM_COL_*` constant. |
 
 ### Smooth noise (low-pass filtered)
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animSmoothNoiseFloat(id, channelId, base, amplitude, frequency, smoothing, noiseType, seed, dt)` | number | `smoothing` in `[0, 1]`. |
-| `UI.animSmoothNoiseVec2(id, channelId, base, amplitude, frequency, smoothing, noiseType, seed, dt)` | `[x, y]` | |
-| `UI.animSmoothNoiseVec4(id, channelId, base, amplitude, frequency, smoothing, noiseType, seed, dt)` | `[x, y, z, w]` | |
-| `UI.animSmoothNoiseColor(id, channelId, base, amplitude, frequency, smoothing, noiseType, seed, colorSpace, dt)` | `[r, g, b, a]` | |
+| `UI.animSmoothNoiseFloat(id, amp, speed, dt)` | number | `speed` advances the noise field over time. |
+| `UI.animSmoothNoiseVec2(id, amp, speed, dt)` | `[x, y]` | |
+| `UI.animSmoothNoiseVec4(id, amp, speed, dt)` | `[x, y, z, w]` | |
+| `UI.animSmoothNoiseColor(id, baseColor, amp, speed, space, dt)` | `[r, g, b, a]` | `space` is a `UI.ANIM_COL_*` constant. |
 
 ---
 
@@ -406,11 +437,11 @@ the user registered via `animStyleRegisterCurrent`.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animStyleRegisterCurrent(id)` | null | Snapshot the current `ImGuiStyle` under `id`. |
-| `UI.animStyleBlend(idA, idB, t)` | null | Apply a blend of two registered styles to the live `ImGuiStyle`. |
-| `UI.animStyleTween(channelId, idA, idB, dur, ease, policy, dt)` | null | Animated style blend; mutates the live `ImGuiStyle` each frame. |
-| `UI.animStyleExists(id)` | bool | |
-| `UI.animStyleUnregister(id)` | null | |
+| `UI.animStyleRegisterCurrent(styleId)` | null | Snapshot the current `ImGuiStyle` under `id`. |
+| `UI.animStyleBlend(styleA, styleB, t, colorSpace)` | null | Apply a blend of two registered styles to the live `ImGuiStyle`. |
+| `UI.animStyleTween(id, targetStyle, dur, ease, colorSpace, dt)` | null | Animated style blend; mutates the live `ImGuiStyle` each frame. |
+| `UI.animStyleExists(styleId)` | bool | |
+| `UI.animStyleUnregister(styleId)` | null | |
 
 ---
 
@@ -423,19 +454,19 @@ the path builder) and persisted under an `ImGuiID`.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animGradientBegin(id, colorSpace)` | null | Starts a fresh builder; drops any previous unfinished builder. |
-| `UI.animGradientAddStop(t, color)` | null | `t` in `[0, 1]`; `color` is `[r, g, b, a]`. |
+| `UI.animGradientBegin(gradientId)` | null | Starts a fresh builder; drops any previous unfinished builder. |
+| `UI.animGradientAddStop(position, color)` | null | `position` in `[0, 1]`; `color` is `[r, g, b, a]`. |
 | `UI.animGradientEnd()` | null | Registers the gradient under the ID supplied to `animGradientBegin`. |
 
 ### Queries / interpolation
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `UI.animGradientExists(id)` | bool | |
-| `UI.animGradientStopCount(id)` | int | |
-| `UI.animGradientSample(id, t)` | `[r, g, b, a]` | Sample a gradient at `t`. |
-| `UI.animGradientLerp(idA, idB, blend, t)` | `[r, g, b, a]` | Blend two gradients then sample at `t`. |
-| `UI.animTweenGradient(id, channelId, idA, idB, t, dur, ease, policy, dt)` | `[r, g, b, a]` | Animates the blend factor between two gradients. |
+| `UI.animGradientExists(gradientId)` | bool | |
+| `UI.animGradientStopCount(gradientId)` | int | |
+| `UI.animGradientSample(gradientId, t, colorSpace)` | `[r, g, b, a]` | Sample a gradient at `t`. |
+| `UI.animGradientLerp(gradientA, gradientB, t, colorSpace, outGradientId)` | `[r, g, b, a]` | Blend two gradients then sample at `t`. |
+| `UI.animTweenGradient(id, channelId, targetGradientId, dur, ease, policy, colorSpace, dt, outGradientId)` | `[r, g, b, a]` | Animates the blend factor between two gradients. |
 
 ---
 
@@ -504,12 +535,12 @@ with `animClipEnd()`.
 | `UI.animClipSeqEnd()` | null | |
 | `UI.animClipParBegin()` | null | Open a parallel block (next siblings run together). |
 | `UI.animClipParEnd()` | null | |
-| `UI.animClipSetLoop(loopCount, direction)` | null | `loopCount`: `0` = infinite. `direction` is `UI.ANIM_DIR_*`. |
+| `UI.animClipSetLoop(loop, direction, loopCount)` | null | `loop` is a bool (enable looping); `direction` is `UI.ANIM_DIR_*`; `loopCount` is the repeat count (`0` = infinite). |
 | `UI.animClipSetDelay(delaySeconds)` | null | Pre-roll before the first key fires. |
-| `UI.animClipSetStagger(perChildDelay)` | null | Stagger child blocks by this many seconds each. |
-| `UI.animClipSetDurationVar(varDesc)` | null | Per-iteration duration variation. |
-| `UI.animClipSetDelayVar(varDesc)` | null | Per-iteration delay variation. |
-| `UI.animClipSetTimescaleVar(varDesc)` | null | Per-iteration timescale variation. |
+| `UI.animClipSetStagger(count, eachDelay, fromCenterBias)` | null | `count` child blocks staggered by `eachDelay` seconds each. `fromCenterBias` biases the stagger origin toward the center of the set. |
+| `UI.animClipSetDurationVar(varFloat)` | null | Per-iteration duration variation. |
+| `UI.animClipSetDelayVar(varFloat)` | null | Per-iteration delay variation. |
+| `UI.animClipSetTimescaleVar(varFloat)` | null | Per-iteration timescale variation. |
 
 ### Keyframes
 

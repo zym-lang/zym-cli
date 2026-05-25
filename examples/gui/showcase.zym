@@ -541,8 +541,8 @@ var pageData = func() {
         })
         UI.sameLine()
         UI.child("s3", { w:0, h:180, border:true }, func() {
-            secHeader("Signal C", "histogram")
-            UI.plotHistogram("##sc", signal3, "", 0, 3)
+            secHeader("Signal C", "abs sine + noise")
+            UI.plotLines("##sc", signal3, "", 0, 2.5)
         })
     })
 

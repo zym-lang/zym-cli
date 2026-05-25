@@ -25,7 +25,7 @@ set(CMAKE_BUILD_TYPE Tiny)
 set(USE_COMPRESSION ON)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
-set(RUNTIME_ONLY OFF)
+set(RUNTIME_ONLY ON)
 # USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
 # on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
 # binary so engine-level error and warning output is suppressed at startup
@@ -88,22 +88,8 @@ else()
     set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
 endif()
 
-# PE/COFF (mingw-w64) doesn't honor ELF visibility — Windows uses
-# dllexport/dllimport — so `-fvisibility=hidden` is effectively a no-op
-# there, but it interacts badly with `-Oz -flto` on mingw-gcc and
-# triggers an ICE in `binds_to_current_def_p` (symtab.cc:2497) across
-# the GIMPLE DSE/alias passes. Strip visibility flags on Windows for
-# both Release and Tiny; they buy nothing on PE/COFF.
-if(WIN32)
-    set(_ZYM_VIS_CXX "")
-    set(_ZYM_VIS_C   "")
-else()
-    set(_ZYM_VIS_CXX "-fvisibility=hidden -fvisibility-inlines-hidden")
-    set(_ZYM_VIS_C   "-fvisibility=hidden")
-endif()
-
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions ${_ZYM_VIS_CXX} -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG ${_ZYM_VIS_C} -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
 set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
 
 # mingw-w64 GCC has a known LTO ICE in `binds_to_current_def_p`
@@ -124,8 +110,8 @@ else()
     set(_ZYM_TINY_LTO_WORKAROUND "")
 endif()
 
-set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions ${_ZYM_VIS_CXX} -fno-asynchronous-unwind-tables -fno-unwind-tables ${_ZYM_TINY_LTO_WORKAROUND}")
-set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions ${_ZYM_VIS_C} -fno-asynchronous-unwind-tables -fno-unwind-tables ${_ZYM_TINY_LTO_WORKAROUND}")
+set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables ${_ZYM_TINY_LTO_WORKAROUND}")
+set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables ${_ZYM_TINY_LTO_WORKAROUND}")
 set(CMAKE_EXE_LINKER_FLAGS_TINY "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s -Wl,-Map,zym_cli.map ${_ZYM_TINY_LTO_WORKAROUND}")
 
 set(CMAKE_C_STANDARD 11)

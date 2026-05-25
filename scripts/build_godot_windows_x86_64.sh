@@ -96,14 +96,8 @@ ZYM_VARIANT_STRIP_SHIM="${ZYM_SHIM_DIR}/zym_variant_strip.h"
 # of those calls round-trips through wineserver. Defined for both C and
 # C++ TUs so the platform compilation unit picks it up regardless of
 # language.
-# PE/COFF doesn't honor ELF visibility — Windows uses dllexport/dllimport —
-# so `-fvisibility=hidden` / `-fvisibility-inlines-hidden` are effectively
-# no-ops on mingw, but combining them with `optimize=size_extra` (-Oz) and
-# `lto=full` trips an ICE in mingw-w64 gcc's `binds_to_current_def_p`
-# (symtab.cc:2497) across the GIMPLE DSE/alias passes. Dropped here for
-# the same reason the top-level CMakeLists.txt strips them on WIN32.
-ZYM_CCFLAGS="-ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -DWINDOWS_SUBSYSTEM_CONSOLE"
-ZYM_CXXFLAGS="-I${ZYM_SHIM_DIR} -include ${ZYM_VARIANT_STRIP_SHIM} -fno-asynchronous-unwind-tables -fno-unwind-tables -DWINDOWS_SUBSYSTEM_CONSOLE"
+ZYM_CCFLAGS="-fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -DWINDOWS_SUBSYSTEM_CONSOLE"
+ZYM_CXXFLAGS="-fvisibility-inlines-hidden -I${ZYM_SHIM_DIR} -include ${ZYM_VARIANT_STRIP_SHIM} -fno-asynchronous-unwind-tables -fno-unwind-tables -DWINDOWS_SUBSYSTEM_CONSOLE"
 
 exec scons \
     platform=windows \

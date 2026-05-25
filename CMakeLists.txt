@@ -162,6 +162,7 @@ set(ZYM_NATIVE_SOURCES
         src/natives/websocket.cpp
         src/natives/aes.cpp
         src/natives/pack.cpp
+        src/natives/sqlite.cpp
 )
 
 # Slice 1: optional `sdl` native sources. Linked into zym when ZYM_SDL=ON.
@@ -202,6 +203,76 @@ if(ZYM_LTO_OK)
 endif()
 
 target_link_libraries(zym PRIVATE zym_core)
+
+# --- SQLite (vendored amalgamation) -------------------------------------
+# Vendored under third_party/sqlite as the canonical amalgamation
+# (sqlite3.c + sqlite3.h, version 3.50.2 — fetched from sqlite.org).
+# Built as a small static lib `zym_sqlite` so SQLite's compile flags
+# don't leak into the rest of the zym TUs, and so warnings inside
+# sqlite3.c are silenced locally.
+#
+# Compile-flag selection (size + zym fit):
+#   * SQLITE_THREADSAFE=0          — every ZymVM is single-threaded and
+#                                    each Database handle stays bound to
+#                                    its owning VM. No mutex overhead.
+#   * SQLITE_OMIT_LOAD_EXTENSION   — `loadExtension` deferred; trims a
+#                                    real chunk of code + the libdl dep.
+#   * SQLITE_OMIT_DEPRECATED       — drop legacy v1 APIs we don't bind.
+#   * SQLITE_OMIT_SHARED_CACHE     — shared-cache is single-process-only,
+#                                    irrelevant here, ~adds size.
+#   * SQLITE_OMIT_PROGRESS_CALLBACK — not bound on the zym side.
+#   * SQLITE_OMIT_DECLTYPE         — column-decltype reflection not bound.
+#   * SQLITE_DEFAULT_MEMSTATUS=0   — skip per-allocation tracking; zym
+#                                    natives don't expose memstat anyway.
+#   * SQLITE_DEFAULT_WAL_SYNCHRONOUS=1 — match better-sqlite3's default.
+#   * SQLITE_LIKE_DOESNT_MATCH_BLOBS — small perf win, no behaviour zym
+#                                      scripts depend on.
+#   * SQLITE_MAX_EXPR_DEPTH=0      — trim expr-depth bookkeeping.
+#   * SQLITE_USE_ALLOCA            — small wins on Linux/x86_64.
+#   * SQLITE_ENABLE_DESERIALIZE    — required for sqlite3_serialize /
+#                                    sqlite3_deserialize, which power the
+#                                    Buffer-backed `SQLite.open(buffer)` /
+#                                    `db.serialize()` round-trip.
+add_library(zym_sqlite STATIC
+        "${CMAKE_SOURCE_DIR}/third_party/sqlite/sqlite3.c"
+)
+target_include_directories(zym_sqlite PUBLIC
+        "${CMAKE_SOURCE_DIR}/third_party/sqlite"
+)
+target_compile_definitions(zym_sqlite PRIVATE
+        SQLITE_THREADSAFE=0
+        SQLITE_OMIT_LOAD_EXTENSION
+        SQLITE_OMIT_DEPRECATED
+        SQLITE_OMIT_SHARED_CACHE
+        SQLITE_OMIT_PROGRESS_CALLBACK
+        SQLITE_DEFAULT_MEMSTATUS=0
+        SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+        SQLITE_LIKE_DOESNT_MATCH_BLOBS
+        SQLITE_MAX_EXPR_DEPTH=0
+        SQLITE_USE_ALLOCA
+        SQLITE_ENABLE_DESERIALIZE
+        # Column-metadata APIs (sqlite3_column_table_name /
+        # _origin_name / _database_name) and decltype are used by
+        # `stmt.columns()` and the `expand` row-shape. They're cheap
+        # but not on by default in the amalgamation.
+        SQLITE_ENABLE_COLUMN_METADATA
+)
+# sqlite3.c emits a handful of -Wunused warnings under -Wall and the
+# zym TUs are fussier. Silence inside the SQLite TU only.
+target_compile_options(zym_sqlite PRIVATE -w)
+# Match zym's LTO + -fno-pie posture so the final link is consistent
+# with libgodot.a (non-PIC, GCC-LTO).
+if(ZYM_LTO_OK)
+    set_property(TARGET zym_sqlite PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET zym_sqlite PROPERTY INTERPROCEDURAL_OPTIMIZATION_TINY TRUE)
+endif()
+target_compile_options(zym_sqlite PRIVATE
+        $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+if(NOT WIN32)
+    target_compile_options(zym_sqlite PRIVATE -fno-pie)
+endif()
+target_link_libraries(zym PRIVATE zym_sqlite)
+message(STATUS ">> SQLite: vendored amalgamation 3.50.2 linked into zym via zym_sqlite")
 
 # --- SDL3 (Slice 1) ------------------------------------------------------
 # Vendored under third_party/sdl3 (git submodule, pinned to release-3.4.8).

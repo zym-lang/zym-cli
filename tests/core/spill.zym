@@ -1,0 +1,265 @@
+// =============================================================================
+// REGISTER SPILL TESTS
+//
+// Designed to run BOTH with and without ZYM_FORCE_SPILL_AT=8:
+//   - normal mode: every local fits in 8-bit reg window (256), no SPILL_* emit
+//   - ZYM_FORCE_SPILL_AT=8: locals beyond 8 are routed through the spill area
+//
+// Every test asserts a deterministic expected value so the answer is identical
+// in either mode — if spilling reads/writes are buggy, results diverge.
+//
+// To run with forced spilling:
+//   ZYM_FORCE_SPILL_AT=8 zym tests/core/spill.zym
+// =============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+    }
+}
+
+print("=== STARTING REGISTER SPILL TESTS ===")
+
+// -----------------------------------------------------------------------------
+// [1] Spilled locals round-trip plain reads
+// -----------------------------------------------------------------------------
+print("--- [1] Spilled locals read through SPILL_LOAD ---")
+
+func read_spilled() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8   // first to spill at cap=8 (R0=self uses one slot too)
+    var i = 9
+    var j = 10
+    return h + i + j  // exercises 3 SPILL_LOADs in one expression
+}
+assert_wrap(read_spilled() == 27, "1.1: read sum of three spilled locals")
+
+// -----------------------------------------------------------------------------
+// [2] Mixed reads of physical + spilled locals
+// -----------------------------------------------------------------------------
+print("--- [2] Mixed physical/spilled reads ---")
+
+func mixed_reads() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var x = 100  // spilled
+    var y = 200  // spilled
+    return a + x + b + y + c
+    // = 1 + 100 + 2 + 200 + 3 = 306
+}
+assert_wrap(mixed_reads() == 306, "2.1: interleaved physical and spilled reads")
+
+// -----------------------------------------------------------------------------
+// [3] Plain assignment to a spilled local persists across reads
+// -----------------------------------------------------------------------------
+print("--- [3] Plain assignment to spilled local ---")
+
+func assign_spilled() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var i = 9     // spilled
+    i = 42        // SPILL_STORE
+    return i
+}
+assert_wrap(assign_spilled() == 42, "3.1: plain assign to spilled local")
+
+func assign_spilled_from_expr() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var i = 9     // spilled
+    var j = 10    // spilled
+    i = j * 5     // RHS reads spilled j, result stored to spilled i
+    return i
+}
+assert_wrap(assign_spilled_from_expr() == 50, "3.2: spilled = spilled * 5")
+
+// -----------------------------------------------------------------------------
+// [4] Compound assignment on spilled local
+// -----------------------------------------------------------------------------
+print("--- [4] Compound assignment ---")
+
+func compound_spilled() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var k = 100   // spilled
+    k += 1000     // load-add-store dance on spilled local
+    return k
+}
+assert_wrap(compound_spilled() == 1100, "4.1: spilled += 1000")
+
+func compound_spilled_multiple() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var k = 10    // spilled
+    var m = 20    // spilled
+    k += 5
+    m -= 3
+    k += m        // k = 15, m = 17, k = 32
+    return k
+}
+assert_wrap(compound_spilled_multiple() == 32, "4.2: multiple compound assigns on spills")
+
+// -----------------------------------------------------------------------------
+// [5] Increment / decrement on spilled local
+// -----------------------------------------------------------------------------
+print("--- [5] Inc/Dec on spilled locals ---")
+
+func inc_dec_spilled() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var l = 12    // spilled
+    l++           // l = 13
+    var pre = ++l // pre = 14, l = 14
+    var post = l-- // post = 14, l = 13
+    return l + pre + post  // 13 + 14 + 14 = 41
+}
+assert_wrap(inc_dec_spilled() == 41, "5.1: post-inc + pre-inc + post-dec on spilled")
+
+// -----------------------------------------------------------------------------
+// [6] Reading spilled local in nested expression
+// -----------------------------------------------------------------------------
+print("--- [6] Spilled locals inside nested expressions ---")
+
+func nested() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var x = 100   // spilled
+    var y = 200   // spilled
+    // Build an expression that re-reads spilled locals several times.
+    // Kept flat (no parenthesised sub-binaries) so the v1 scratch budget
+    // (4 simultaneous SPILL_LOADs at ZYM_FORCE_SPILL_AT=8) is sufficient.
+    var r = x + y + x + y + x
+    // = 100 + 200 + 100 + 200 + 100 = 700
+    return r
+}
+assert_wrap(nested() == 700, "6.1: long expression with repeated spilled reads")
+
+// -----------------------------------------------------------------------------
+// [7] Spilled local used as loop body variable (read-modify-write each iter)
+// -----------------------------------------------------------------------------
+print("--- [7] Spilled local inside a loop ---")
+
+func loop_with_spill() {
+    // Iterator i is declared first so it lands in a *physical* register
+    // (R1, with R0=self). The accumulator gets pushed past the cap when
+    // ZYM_FORCE_SPILL_AT=8 is set, exercising read-modify-write of a
+    // spilled local across every loop iteration.
+    var i = 0
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var acc = 0   // spilled at cap=8
+    while (i < 10) {
+        acc = acc + i
+        i = i + 1
+    }
+    return acc  // 0+1+...+9 = 45
+}
+assert_wrap(loop_with_spill() == 45, "7.1: accumulator-in-spill over a loop")
+
+// -----------------------------------------------------------------------------
+// [8] Comprehensive: many spilled, every flavor of access
+// -----------------------------------------------------------------------------
+print("--- [8] Comprehensive integration ---")
+
+func comprehensive() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8   // spilled (first one to spill at cap=8)
+    var i = 9   // spilled
+    var j = 10  // spilled
+    var k = 11  // spilled
+    var l = 12  // spilled
+    // Sum accumulated incrementally so each binary expression has a
+    // small temp footprint (2 scratches max). The single chained-add
+    // form below would build a too-deep expression for the v1
+    // 4-scratch budget under ZYM_FORCE_SPILL_AT=8.
+    var sum = a + b
+    sum = sum + c
+    sum = sum + d
+    sum = sum + e
+    sum = sum + f
+    sum = sum + g
+    sum = sum + h
+    sum = sum + i
+    sum = sum + j
+    sum = sum + k
+    sum = sum + l
+    i = i + 100
+    k += 1000
+    l++
+    return sum + i + k + l
+    // sum = 78, i = 109, k = 1011, l = 13 → 1211
+}
+assert_wrap(comprehensive() == 1211, "8.1: full integration test")
+
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed:")
+print(testsPassed)
+print("Tests Failed:")
+print(testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED")
+}
+print("==========================================================")

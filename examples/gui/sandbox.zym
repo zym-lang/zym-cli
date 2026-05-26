@@ -241,74 +241,15 @@ var rebuildSurf = func() {
 // Simulation rules
 // ---------------------------------------------------------------------------
 
-// Shared "liquid fall/spread" body used by WATER, LAVA, and ACID. Factored
-// out solely to keep simStep under zym's 256-local-variable per-function
-// limit — inlining all three copies pushed simStep over the budget. The
-// per-call overhead is paid only by liquid cells and is dwarfed by the
-// 5+ inlined getCell/setCell that this body would otherwise need.
-var liquidSpread = func(x, i2, i_row, i_below, can_below, ra, mat) {
-    var bcell = can_below ? matGrid[i_below + x] : MAT_OOB
-    if (bcell == MAT_EMPTY) {
-        var ni = i_below + x
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-        return
-    }
-    var dl = (ra & 1) == 0
-    var ax = dl ? -1 : 1
-    var bx = dl ? 1 : -1
-    var xa = x + ax; var xa_ok = xa >= 0 and xa < GRID_W
-    var xb = x + bx; var xb_ok = xb >= 0 and xb < GRID_W
-    var ba = (can_below and xa_ok) ? matGrid[i_below + xa] : MAT_OOB
-    var bb = (can_below and xb_ok) ? matGrid[i_below + xb] : MAT_OOB
-    if (ba == MAT_EMPTY) {
-        var ni = i_below + xa
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-        return
-    } else if (bb == MAT_EMPTY) {
-        var ni = i_below + xb
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-        return
-    }
-    var sa = xa_ok ? matGrid[i_row + xa] : MAT_OOB
-    var sb = xb_ok ? matGrid[i_row + xb] : MAT_OOB
-    if (sa == MAT_EMPTY) {
-        var ni = i_row + xa
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    } else if (sb == MAT_EMPTY) {
-        var ni = i_row + xb
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    }
-}
-
-// Shared "rise" body for SMOKE and STEAM — same reasoning as liquidSpread.
-var gasRise = func(x, i2, i_row, i_above, can_above, ra, mat) {
-    var dl = (ra & 1) == 0
-    var ax = dl ? -1 : 1
-    var xa = x + ax; var xa_ok = xa >= 0 and xa < GRID_W
-    if (can_above and matGrid[i_above + x] == MAT_EMPTY) {
-        var ni = i_above + x
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    } else if (can_above and xa_ok and matGrid[i_above + xa] == MAT_EMPTY) {
-        var ni = i_above + xa
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    } else if (xa_ok and matGrid[i_row + xa] == MAT_EMPTY) {
-        var ni = i_row + xa
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    }
-}
-
-// PERF-WAR simStep: inlined getCell/setCell/idx, class bitmasks instead of
-// OR-chains, and a per-step RNG cache so per-cell randomness is bit ops on
-// pre-rolled bytes instead of dispatched rng.randfRange calls. See sandbox_old.zym
-// for the readable equivalent — semantically the same sim, just verbose.
+// PERF-WAR simStep: every getCell/setCell/idx is inlined at the call site,
+// the liquid-spread and gas-rise patterns are inlined per material rather
+// than extracted to helpers, class bitmasks replace OR-chained `==` checks,
+// and per-cell randomness is bit-extracted from a pre-rolled `randBuf` so
+// the only RNG-related work in the hot loop is byte reads + bit ops. See
+// sandbox_old.zym for the readable equivalent — semantically the same sim,
+// just verbose. Fitting all of this in one function relies on zym's
+// register spill (without it, the inlined liquid bodies overflowed the
+// 256-physical-register budget at compile time).
 var simStep = func() {
     fill(updGrid, false)            // bulk native: replaces 120k list writes
     randBuf.fillRandom(0, 255)      // bulk native: pre-rolls per-step entropy
@@ -401,7 +342,43 @@ var simStep = func() {
                         wi++
                     }
                     if (matGrid[i2] != MAT_WATER) { break }
-                    liquidSpread(x, i2, i_row, i_below, can_below, ra, MAT_WATER)
+                    // Inlined liquidSpread(MAT_WATER) — register spill enables
+                    // this; previously had to be a helper call.
+                    var w_bcell = can_below ? matGrid[i_below + x] : MAT_OOB
+                    if (w_bcell == MAT_EMPTY) {
+                        var ni = i_below + x
+                        matGrid[ni] = MAT_WATER; updGrid[ni] = true
+                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                    } else {
+                        var w_dl = (ra & 1) == 0
+                        var w_ax = w_dl ? -1 : 1
+                        var w_bx = w_dl ? 1 : -1
+                        var w_xa = x + w_ax; var w_xa_ok = w_xa >= 0 and w_xa < GRID_W
+                        var w_xb = x + w_bx; var w_xb_ok = w_xb >= 0 and w_xb < GRID_W
+                        var w_ba = (can_below and w_xa_ok) ? matGrid[i_below + w_xa] : MAT_OOB
+                        var w_bb = (can_below and w_xb_ok) ? matGrid[i_below + w_xb] : MAT_OOB
+                        if (w_ba == MAT_EMPTY) {
+                            var ni = i_below + w_xa
+                            matGrid[ni] = MAT_WATER; updGrid[ni] = true
+                            matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                        } else if (w_bb == MAT_EMPTY) {
+                            var ni = i_below + w_xb
+                            matGrid[ni] = MAT_WATER; updGrid[ni] = true
+                            matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                        } else {
+                            var w_sa = w_xa_ok ? matGrid[i_row + w_xa] : MAT_OOB
+                            var w_sb = w_xb_ok ? matGrid[i_row + w_xb] : MAT_OOB
+                            if (w_sa == MAT_EMPTY) {
+                                var ni = i_row + w_xa
+                                matGrid[ni] = MAT_WATER; updGrid[ni] = true
+                                matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                            } else if (w_sb == MAT_EMPTY) {
+                                var ni = i_row + w_xb
+                                matGrid[ni] = MAT_WATER; updGrid[ni] = true
+                                matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                            }
+                        }
+                    }
                     break
                 }
 
@@ -500,7 +477,42 @@ var simStep = func() {
                         li++
                     }
                     if (matGrid[i2] != MAT_LAVA) { break }
-                    liquidSpread(x, i2, i_row, i_below, can_below, ra, MAT_LAVA)
+                    // Inlined liquidSpread(MAT_LAVA)
+                    var l_bcell = can_below ? matGrid[i_below + x] : MAT_OOB
+                    if (l_bcell == MAT_EMPTY) {
+                        var ni = i_below + x
+                        matGrid[ni] = MAT_LAVA;  updGrid[ni] = true
+                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                    } else {
+                        var l_dl = (ra & 1) == 0
+                        var l_ax = l_dl ? -1 : 1
+                        var l_bx = l_dl ? 1 : -1
+                        var l_xa = x + l_ax; var l_xa_ok = l_xa >= 0 and l_xa < GRID_W
+                        var l_xb = x + l_bx; var l_xb_ok = l_xb >= 0 and l_xb < GRID_W
+                        var l_ba = (can_below and l_xa_ok) ? matGrid[i_below + l_xa] : MAT_OOB
+                        var l_bb = (can_below and l_xb_ok) ? matGrid[i_below + l_xb] : MAT_OOB
+                        if (l_ba == MAT_EMPTY) {
+                            var ni = i_below + l_xa
+                            matGrid[ni] = MAT_LAVA;  updGrid[ni] = true
+                            matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                        } else if (l_bb == MAT_EMPTY) {
+                            var ni = i_below + l_xb
+                            matGrid[ni] = MAT_LAVA;  updGrid[ni] = true
+                            matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                        } else {
+                            var l_sa = l_xa_ok ? matGrid[i_row + l_xa] : MAT_OOB
+                            var l_sb = l_xb_ok ? matGrid[i_row + l_xb] : MAT_OOB
+                            if (l_sa == MAT_EMPTY) {
+                                var ni = i_row + l_xa
+                                matGrid[ni] = MAT_LAVA;  updGrid[ni] = true
+                                matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                            } else if (l_sb == MAT_EMPTY) {
+                                var ni = i_row + l_xb
+                                matGrid[ni] = MAT_LAVA;  updGrid[ni] = true
+                                matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                            }
+                        }
+                    }
                     break
                 }
 
@@ -553,7 +565,42 @@ var simStep = func() {
                         ai++
                     }
                     if (matGrid[i2] != MAT_ACID) { break }
-                    liquidSpread(x, i2, i_row, i_below, can_below, ra, MAT_ACID)
+                    // Inlined liquidSpread(MAT_ACID)
+                    var a_bcell = can_below ? matGrid[i_below + x] : MAT_OOB
+                    if (a_bcell == MAT_EMPTY) {
+                        var ni = i_below + x
+                        matGrid[ni] = MAT_ACID;  updGrid[ni] = true
+                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                    } else {
+                        var a_dl = (ra & 1) == 0
+                        var a_ax = a_dl ? -1 : 1
+                        var a_bx = a_dl ? 1 : -1
+                        var a_xa = x + a_ax; var a_xa_ok = a_xa >= 0 and a_xa < GRID_W
+                        var a_xb = x + a_bx; var a_xb_ok = a_xb >= 0 and a_xb < GRID_W
+                        var a_ba = (can_below and a_xa_ok) ? matGrid[i_below + a_xa] : MAT_OOB
+                        var a_bb = (can_below and a_xb_ok) ? matGrid[i_below + a_xb] : MAT_OOB
+                        if (a_ba == MAT_EMPTY) {
+                            var ni = i_below + a_xa
+                            matGrid[ni] = MAT_ACID;  updGrid[ni] = true
+                            matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                        } else if (a_bb == MAT_EMPTY) {
+                            var ni = i_below + a_xb
+                            matGrid[ni] = MAT_ACID;  updGrid[ni] = true
+                            matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                        } else {
+                            var a_sa = a_xa_ok ? matGrid[i_row + a_xa] : MAT_OOB
+                            var a_sb = a_xb_ok ? matGrid[i_row + a_xb] : MAT_OOB
+                            if (a_sa == MAT_EMPTY) {
+                                var ni = i_row + a_xa
+                                matGrid[ni] = MAT_ACID;  updGrid[ni] = true
+                                matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                            } else if (a_sb == MAT_EMPTY) {
+                                var ni = i_row + a_xb
+                                matGrid[ni] = MAT_ACID;  updGrid[ni] = true
+                                matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                            }
+                        }
+                    }
                     break
                 }
 

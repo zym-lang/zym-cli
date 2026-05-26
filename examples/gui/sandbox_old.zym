@@ -40,7 +40,10 @@ var setCell = func(x, y, mat) {
     updGrid[idx(x, y)] = true
 }
 
-var clearUpdated = func() { fill(updGrid, false) }
+var clearUpdated = func() {
+    var i = 0
+    while (i < GRID_W * GRID_H) { updGrid[i] = false; i++ }
+}
 
 // ---------------------------------------------------------------------------
 // Materials
@@ -95,12 +98,6 @@ var matBtnColors = [
 
 var rng = Random.create()
 
-// Neighbour-offset constants. Hoisted to module scope so simStep doesn't
-// reallocate these per cell on every tick — at ~30k active cells × 30 Hz
-// the per-case `var dirs = [...]` versions churned 1M+ small lists/sec.
-var DIRS4 = [[-1,0],[1,0],[0,-1],[0,1]]
-var DIRS8 = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]
-
 // ---------------------------------------------------------------------------
 // Simulation surface + texture
 // ---------------------------------------------------------------------------
@@ -108,102 +105,48 @@ var DIRS8 = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]
 var simSurf = SDL.Surface.new(GRID_W, GRID_H, null)
 var simTex  = win.textureFromSurface(simSurf, { link: true })
 
-// ---------------------------------------------------------------------------
-// Vectorized color buffers (one-time setup)
-// ---------------------------------------------------------------------------
-// rebuildSurf needs to apply per-material noise + clamp to every cell. The
-// original per-cell `if (m == MAT_X) { random+arith }` chain costs ~120k cells
-// × 7 branches + random math + 3 clamps every frame. With the bulk/mask
-// Buffer ops we replace that whole chain with O(materials) native calls:
-// LUT → R/G/B channel bytes, then `eqScalar` + `maskedAddNoise` per material
-// that has visual jitter. The surface push at the end still iterates pixel
-// by pixel because SDL doesn't yet expose a `surf.uploadBytes(buf)` path;
-// when that lands the readback loop can go too.
-
-var GRID_CELLS = GRID_W * GRID_H
-
-// One Buffer mirror of matGrid (refreshed once per rebuildSurf — see the
-// per-frame mirror loop below). Kept separate from `matGrid` so simStep's
-// hot per-cell access stays on the faster list-index path.
-var matBuf = Buffer.new(GRID_CELLS)
-
-// R, G, B channel scratch buffers. Each frame: mapU8 from `matBuf` through
-// the corresponding 256-entry LUT, then jittered with maskedAddNoise per
-// material that varies.
-var rChan = Buffer.new(GRID_CELLS)
-var gChan = Buffer.new(GRID_CELLS)
-var bChan = Buffer.new(GRID_CELLS)
-
-// 256-byte LUTs holding the per-material base color (R, G, B). Built once
-// from `matColors` at script load; only indices 0..11 actually carry data
-// but the LUT is sized to 256 so `mapU8` never indexes out of bounds even
-// if a stray byte slips into matBuf.
-var lutR = Buffer.new(256)
-var lutG = Buffer.new(256)
-var lutB = Buffer.new(256)
-var _li = 0
-while (_li < length(matColors)) {
-    var _c = matColors[_li]
-    lutR.set(_li, _c[0])
-    lutG.set(_li, _c[1])
-    lutB.set(_li, _c[2])
-    _li++
-}
-
-// Scratch mask Buffer reused by each noise pass; eqScalar overwrites it so
-// allocating once and reusing is safe.
-var matMask = Buffer.new(GRID_CELLS)
-
 // Rebuild surface from grid
 var rebuildSurf = func() {
-    // 1) Mirror matGrid (list) → matBuf (Buffer). One native call instead
-    //    of ~120k method-dispatched Buffer.set per frame.
-    matBuf.copyFromList(matGrid)
-
-    // 2) Base color channels via LUT — 3 native calls replace 120k×3 lookups.
-    rChan.mapU8(matBuf, lutR)
-    gChan.mapU8(matBuf, lutG)
-    bChan.mapU8(matBuf, lutB)
-
-    // 3) Per-material noise via predicate → maskedAddNoise. Saturation is
-    //    baked into maskedAddNoise so no separate clamp pass is needed.
-    matMask.eqScalar(matBuf, MAT_SAND)
-    rChan.maskedAddNoise(matMask, -8, 8)
-    gChan.maskedAddNoise(matMask, -8, 8)
-    bChan.maskedAddNoise(matMask, -4, 4)
-
-    matMask.eqScalar(matBuf, MAT_FIRE)
-    gChan.maskedAddNoise(matMask, -40, 0)
-
-    matMask.eqScalar(matBuf, MAT_WATER)
-    bChan.maskedAddNoise(matMask, -10, 10)
-
-    matMask.eqScalar(matBuf, MAT_LAVA)
-    gChan.maskedAddNoise(matMask, 0, 16)
-
-    matMask.eqScalar(matBuf, MAT_ACID)
-    gChan.maskedAddNoise(matMask, -15, 15)
-
-    matMask.eqScalar(matBuf, MAT_STEAM)
-    rChan.maskedAddNoise(matMask, -20, 20)
-    gChan.maskedAddNoise(matMask, -20, 20)
-    bChan.maskedAddNoise(matMask, -20, 20)
-
-    matMask.eqScalar(matBuf, MAT_STONE)
-    rChan.maskedAddNoise(matMask, -10, 10)
-    gChan.maskedAddNoise(matMask, -10, 10)
-    bChan.maskedAddNoise(matMask, -10, 10)
-
-    // 4) Push to surface. Use packed 0xAARRGGBB form to avoid a per-pixel
-    //    list allocation; the channel bytes are read straight from the
-    //    pre-clamped Buffer outputs above.
     var x = 0
     while (x < GRID_W) {
         var y = 0
         while (y < GRID_H) {
-            var pi = y * GRID_W + x
-            var packed = 4278190080 + rChan.get(pi) * 65536 + gChan.get(pi) * 256 + bChan.get(pi)
-            simSurf.setPixel(x, y, packed)
+            var m = matGrid[idx(x, y)]
+            var c = matColors[m]
+            // Add slight variation to sand/water/fire for visual interest
+            var r = c[0]; var g = c[1]; var b = c[2]
+            if (m == MAT_SAND) {
+                var v = floor(rng.randfRange(-8, 8))
+                r = r+v; g = g+v; b = b+v/2
+            }
+            if (m == MAT_FIRE) {
+                var v = floor(rng.randfRange(0, 40))
+                r = r; g = g-v; b = b
+            }
+            if (m == MAT_WATER) {
+                var v = floor(rng.randfRange(-10, 10))
+                r = r; g = g; b = b+v
+            }
+            if (m == MAT_LAVA) {
+                var v = floor(rng.randfRange(0, 50))
+                r = r; g = g+v/3; b = b
+            }
+            if (m == MAT_ACID) {
+                var v = floor(rng.randfRange(-15, 15))
+                r = r; g = g+v; b = b
+            }
+            if (m == MAT_STEAM) {
+                var v = floor(rng.randfRange(-20, 20))
+                r = r+v; g = g+v; b = b+v
+            }
+            if (m == MAT_STONE) {
+                var v = floor(rng.randfRange(-10, 10))
+                r = r+v; g = g+v; b = b+v
+            }
+            if (r < 0) { r = 0 } if (r > 255) { r = 255 }
+            if (g < 0) { g = 0 } if (g > 255) { g = 255 }
+            if (b < 0) { b = 0 } if (b > 255) { b = 255 }
+            simSurf.setPixel(x, y, [r/255.0, g/255.0, b/255.0, 1.0])
             y++
         }
         x++
@@ -246,7 +189,7 @@ var simStep = func() {
                     break
                 }
                 case MAT_WATER: {
-                    var dirs = DIRS4
+                    var dirs = [[-1,0],[1,0],[0,-1],[0,1]]
                     var wi = 0
                     while (wi < 4) {
                         var wx = x+dirs[wi][0]; var wy = y+dirs[wi][1]
@@ -279,7 +222,7 @@ var simStep = func() {
                     break
                 }
                 case MAT_FIRE: {
-                    var dirs = DIRS4
+                    var dirs = [[-1,0],[1,0],[0,-1],[0,1]]
                     var fi = 0
                     while (fi < 4) {
                         var nb = getCell(x+dirs[fi][0], y+dirs[fi][1])
@@ -313,7 +256,7 @@ var simStep = func() {
                 }
                 case MAT_LAVA: {
                     if (floor(rng.randfRange(0, 3)) != 0) { break }
-                    var dirs = DIRS4
+                    var dirs = [[-1,0],[1,0],[0,-1],[0,1]]
                     var li = 0
                     while (li < 4) {
                         var lx2 = x+dirs[li][0]; var ly2 = y+dirs[li][1]
@@ -348,7 +291,7 @@ var simStep = func() {
                     break
                 }
                 case MAT_ICE: {
-                    var dirs = DIRS4
+                    var dirs = [[-1,0],[1,0],[0,-1],[0,1]]
                     var ii = 0
                     while (ii < 4) {
                         var nb4 = getCell(x+dirs[ii][0], y+dirs[ii][1])
@@ -360,7 +303,7 @@ var simStep = func() {
                     break
                 }
                 case MAT_ACID: {
-                    var dirs = DIRS8
+                    var dirs = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]
                     var ai = 0
                     while (ai < 8) {
                         var ax2 = x+dirs[ai][0]; var ay2 = y+dirs[ai][1]
@@ -466,7 +409,8 @@ while (!win.shouldClose() and !done) {
         if (e.type == "key.down") {
             if (e.key == 32) { simRunning[0] = !simRunning[0] }
             if (e.key == 99) {
-                fill(matGrid, MAT_EMPTY)
+                var ci2 = 0
+                while (ci2 < GRID_W * GRID_H) { matGrid[ci2] = MAT_EMPTY; ci2++ }
                 rebuildSurf()
             }
             if (e.key == 114) { viewZoom[0] = 2.0; viewPanX[0] = 0.0; viewPanY[0] = 0.0 } // R = reset view
@@ -598,7 +542,8 @@ while (!win.shouldClose() and !done) {
                     Text:          [1.0,1.0,1.0,1.0],
                 }, func() {
                     if (UI.button("🗑 Clear", 80, 34)) {
-                        fill(matGrid, MAT_EMPTY)
+                        var ci2 = 0
+                        while (ci2 < GRID_W * GRID_H) { matGrid[ci2] = MAT_EMPTY; ci2++ }
                         rebuildSurf()
                     }
                 })

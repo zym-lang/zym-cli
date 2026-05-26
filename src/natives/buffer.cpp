@@ -4,6 +4,7 @@
 // CoW value-semantics: mutation methods detach via ptrw() when shared.
 #include "core/io/compression.h"
 #include "core/io/marshalls.h"
+#include "core/math/math_funcs.h"
 #include "core/string/ustring.h"
 #include "core/templates/vector.h"
 #include "core/variant/variant.h"
@@ -105,6 +106,30 @@ static bool reqBuffer(ZymVM* vm, ZymValue v, const char* where, PackedByteArray*
     }
     zym_runtimeError(vm, "%s expects a Buffer", where);
     return false;
+}
+
+// Bulk/mask helpers: every elementwise op requires operand buffers to match
+// the receiver's length exactly. Silent zero-pad or truncate would mask bugs.
+static bool reqSameSize(ZymVM* vm, PackedByteArray* dst, PackedByteArray* op,
+                        const char* where, const char* opname) {
+    if (dst->size() != op->size()) {
+        zym_runtimeError(vm, "%s: %s size %d does not match receiver size %d",
+                         where, opname, (int)op->size(), (int)dst->size());
+        return false;
+    }
+    return true;
+}
+
+// Saturating u8 arithmetic: clamp to [0, 255] after a wider add/sub so that
+// chained ops match the "byte values masked to 8 bits" doc contract without
+// silently wrapping past the edges.
+static inline uint8_t sat_add_u8(int a, int b) {
+    int r = a + b;
+    return (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
+}
+static inline uint8_t sat_sub_u8(int a, int b) {
+    int r = a - b;
+    return (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
 }
 
 // ---- instance methods ----
@@ -237,6 +262,514 @@ static ZymValue b_toAscii(ZymVM* vm, ZymValue ctx) {
         if (n > 0) s.append_ascii(Span<char>((const char*)p->ptr(), (int)n));
     }
     return stringToZym(vm, s);
+}
+
+// ---- bulk / mask operations ----
+//
+// Convention: a "mask" is a Buffer where byte == 0 means OFF and any non-zero
+// byte means ON. Predicates produce strict 0/1 so they compose cleanly with
+// the bitwise ops; the read convention stays permissive so masks built from
+// other sources (network frames, parser output) still work without a manual
+// normalisation pass.
+//
+// Arithmetic ops saturate at [0, 255] — wrap is recoverable via the bitwise
+// scalar ops. Comparisons are unsigned (bytes are u8). All elementwise
+// methods require operand buffers to match the receiver's size exactly.
+// Receiver may alias an operand for every per-byte op (each write is local
+// to its index); the one exception is mapU8's LUT, which is checked.
+
+// ---- predicates (mask construction) ----
+
+#define BUF_PREDICATE_SCALAR(name, op) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue srcV, ZymValue vV) { \
+        PackedByteArray* src; if (!reqBuffer(vm, srcV, "Buffer." #name "(src, v)", &src)) return ZYM_ERROR; \
+        int64_t v; if (!reqInt(vm, vV, "Buffer." #name "(src, v)", &v)) return ZYM_ERROR; \
+        auto* dst = unwrap(ctx); \
+        if (!reqSameSize(vm, dst, src, "Buffer." #name "(src, v)", "src")) return ZYM_ERROR; \
+        uint8_t t = (uint8_t)v; \
+        int64_t n = dst->size(); \
+        const uint8_t* s = src->ptr(); \
+        uint8_t* d = dst->ptrw(); \
+        for (int64_t i = 0; i < n; ++i) d[i] = (s[i] op t) ? 1 : 0; \
+        return zym_newNull(); \
+    }
+
+BUF_PREDICATE_SCALAR(eqScalar,  ==)
+BUF_PREDICATE_SCALAR(neqScalar, !=)
+BUF_PREDICATE_SCALAR(ltScalar,  <)
+BUF_PREDICATE_SCALAR(leScalar,  <=)
+BUF_PREDICATE_SCALAR(gtScalar,  >)
+BUF_PREDICATE_SCALAR(geScalar,  >=)
+
+#undef BUF_PREDICATE_SCALAR
+
+static ZymValue b_inRange(ZymVM* vm, ZymValue ctx, ZymValue srcV, ZymValue loV, ZymValue hiV) {
+    PackedByteArray* src; if (!reqBuffer(vm, srcV, "Buffer.inRange(src, lo, hi)", &src)) return ZYM_ERROR;
+    int64_t lo, hi;
+    if (!reqInt(vm, loV, "Buffer.inRange(src, lo, hi)", &lo)) return ZYM_ERROR;
+    if (!reqInt(vm, hiV, "Buffer.inRange(src, lo, hi)", &hi)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, src, "Buffer.inRange(src, lo, hi)", "src")) return ZYM_ERROR;
+    uint8_t l = (uint8_t)lo, h = (uint8_t)hi;
+    int64_t n = dst->size();
+    const uint8_t* s = src->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = (s[i] >= l && s[i] <= h) ? 1 : 0;
+    return zym_newNull();
+}
+
+#define BUF_PREDICATE_BUFFER(name, op) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue aV, ZymValue bV) { \
+        PackedByteArray* sa; if (!reqBuffer(vm, aV, "Buffer." #name "(srcA, srcB)", &sa)) return ZYM_ERROR; \
+        PackedByteArray* sb; if (!reqBuffer(vm, bV, "Buffer." #name "(srcA, srcB)", &sb)) return ZYM_ERROR; \
+        auto* dst = unwrap(ctx); \
+        if (!reqSameSize(vm, dst, sa, "Buffer." #name "(srcA, srcB)", "srcA")) return ZYM_ERROR; \
+        if (!reqSameSize(vm, dst, sb, "Buffer." #name "(srcA, srcB)", "srcB")) return ZYM_ERROR; \
+        int64_t n = dst->size(); \
+        const uint8_t* a = sa->ptr(); \
+        const uint8_t* b = sb->ptr(); \
+        uint8_t* d = dst->ptrw(); \
+        for (int64_t i = 0; i < n; ++i) d[i] = (a[i] op b[i]) ? 1 : 0; \
+        return zym_newNull(); \
+    }
+
+BUF_PREDICATE_BUFFER(eqBuffer,  ==)
+BUF_PREDICATE_BUFFER(neqBuffer, !=)
+BUF_PREDICATE_BUFFER(ltBuffer,  <)
+BUF_PREDICATE_BUFFER(leBuffer,  <=)
+BUF_PREDICATE_BUFFER(gtBuffer,  >)
+BUF_PREDICATE_BUFFER(geBuffer,  >=)
+
+#undef BUF_PREDICATE_BUFFER
+
+// ---- bitwise (per-byte; also serve as mask combinators on strict 0/1) ----
+
+#define BUF_BITWISE_BUFFER(name, op) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue otherV) { \
+        PackedByteArray* o; if (!reqBuffer(vm, otherV, "Buffer." #name "(other)", &o)) return ZYM_ERROR; \
+        auto* dst = unwrap(ctx); \
+        if (!reqSameSize(vm, dst, o, "Buffer." #name "(other)", "other")) return ZYM_ERROR; \
+        int64_t n = dst->size(); \
+        const uint8_t* s = o->ptr(); \
+        uint8_t* d = dst->ptrw(); \
+        for (int64_t i = 0; i < n; ++i) d[i] = (uint8_t)(d[i] op s[i]); \
+        return zym_newNull(); \
+    }
+
+BUF_BITWISE_BUFFER(bitAnd, &)
+BUF_BITWISE_BUFFER(bitOr,  |)
+BUF_BITWISE_BUFFER(bitXor, ^)
+
+#undef BUF_BITWISE_BUFFER
+
+static ZymValue b_bitNot(ZymVM*, ZymValue ctx) {
+    auto* dst = unwrap(ctx);
+    int64_t n = dst->size();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = (uint8_t)(~d[i]);
+    return zym_newNull();
+}
+
+#define BUF_BITWISE_SCALAR(name, op) \
+    static ZymValue b_##name(ZymVM* vm, ZymValue ctx, ZymValue vV) { \
+        int64_t v; if (!reqInt(vm, vV, "Buffer." #name "(v)", &v)) return ZYM_ERROR; \
+        auto* dst = unwrap(ctx); \
+        uint8_t t = (uint8_t)v; \
+        int64_t n = dst->size(); \
+        uint8_t* d = dst->ptrw(); \
+        for (int64_t i = 0; i < n; ++i) d[i] = (uint8_t)(d[i] op t); \
+        return zym_newNull(); \
+    }
+
+BUF_BITWISE_SCALAR(bitAndScalar, &)
+BUF_BITWISE_SCALAR(bitOrScalar,  |)
+BUF_BITWISE_SCALAR(bitXorScalar, ^)
+
+#undef BUF_BITWISE_SCALAR
+
+// ---- reductions ----
+
+static ZymValue b_countNonZero(ZymVM*, ZymValue ctx) {
+    auto* p = unwrap(ctx);
+    int64_t n = p->size();
+    const uint8_t* s = p->ptr();
+    int64_t c = 0;
+    for (int64_t i = 0; i < n; ++i) if (s[i] != 0) c++;
+    return zym_newNumber((double)c);
+}
+
+static ZymValue b_any(ZymVM*, ZymValue ctx) {
+    auto* p = unwrap(ctx);
+    int64_t n = p->size();
+    const uint8_t* s = p->ptr();
+    for (int64_t i = 0; i < n; ++i) if (s[i] != 0) return zym_newBool(true);
+    return zym_newBool(false);
+}
+
+static ZymValue b_all(ZymVM*, ZymValue ctx) {
+    auto* p = unwrap(ctx);
+    int64_t n = p->size();
+    if (n == 0) return zym_newBool(true);
+    const uint8_t* s = p->ptr();
+    for (int64_t i = 0; i < n; ++i) if (s[i] == 0) return zym_newBool(false);
+    return zym_newBool(true);
+}
+
+// ---- masked writes ----
+
+static ZymValue b_maskedFill(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue vV) {
+    PackedByteArray* m; if (!reqBuffer(vm, maskV, "Buffer.maskedFill(mask, v)", &m)) return ZYM_ERROR;
+    int64_t v; if (!reqInt(vm, vV, "Buffer.maskedFill(mask, v)", &v)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, m, "Buffer.maskedFill(mask, v)", "mask")) return ZYM_ERROR;
+    uint8_t t = (uint8_t)v;
+    int64_t n = dst->size();
+    const uint8_t* mp = m->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) if (mp[i]) d[i] = t;
+    return zym_newNull();
+}
+
+static ZymValue b_maskedCopy(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue srcV) {
+    PackedByteArray* m; if (!reqBuffer(vm, maskV, "Buffer.maskedCopy(mask, src)", &m)) return ZYM_ERROR;
+    PackedByteArray* s; if (!reqBuffer(vm, srcV,  "Buffer.maskedCopy(mask, src)", &s)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, m, "Buffer.maskedCopy(mask, src)", "mask")) return ZYM_ERROR;
+    if (!reqSameSize(vm, dst, s, "Buffer.maskedCopy(mask, src)", "src"))  return ZYM_ERROR;
+    int64_t n = dst->size();
+    const uint8_t* mp = m->ptr();
+    const uint8_t* sp = s->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) if (mp[i]) d[i] = sp[i];
+    return zym_newNull();
+}
+
+static ZymValue b_select(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue aV, ZymValue bV) {
+    PackedByteArray* m;  if (!reqBuffer(vm, maskV, "Buffer.select(mask, srcA, srcB)", &m))  return ZYM_ERROR;
+    PackedByteArray* sa; if (!reqBuffer(vm, aV,    "Buffer.select(mask, srcA, srcB)", &sa)) return ZYM_ERROR;
+    PackedByteArray* sb; if (!reqBuffer(vm, bV,    "Buffer.select(mask, srcA, srcB)", &sb)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, m,  "Buffer.select(mask, srcA, srcB)", "mask")) return ZYM_ERROR;
+    if (!reqSameSize(vm, dst, sa, "Buffer.select(mask, srcA, srcB)", "srcA")) return ZYM_ERROR;
+    if (!reqSameSize(vm, dst, sb, "Buffer.select(mask, srcA, srcB)", "srcB")) return ZYM_ERROR;
+    int64_t n = dst->size();
+    const uint8_t* mp = m->ptr();
+    const uint8_t* ap = sa->ptr();
+    const uint8_t* bp = sb->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = mp[i] ? ap[i] : bp[i];
+    return zym_newNull();
+}
+
+// ---- masked arithmetic (saturating) ----
+
+static ZymValue b_maskedAddScalar(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue vV) {
+    PackedByteArray* m; if (!reqBuffer(vm, maskV, "Buffer.maskedAddScalar(mask, v)", &m)) return ZYM_ERROR;
+    int64_t v; if (!reqInt(vm, vV, "Buffer.maskedAddScalar(mask, v)", &v)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, m, "Buffer.maskedAddScalar(mask, v)", "mask")) return ZYM_ERROR;
+    int dv = (int)v;
+    int64_t n = dst->size();
+    const uint8_t* mp = m->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) if (mp[i]) d[i] = sat_add_u8(d[i], dv);
+    return zym_newNull();
+}
+
+static ZymValue b_maskedSubScalar(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue vV) {
+    PackedByteArray* m; if (!reqBuffer(vm, maskV, "Buffer.maskedSubScalar(mask, v)", &m)) return ZYM_ERROR;
+    int64_t v; if (!reqInt(vm, vV, "Buffer.maskedSubScalar(mask, v)", &v)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, m, "Buffer.maskedSubScalar(mask, v)", "mask")) return ZYM_ERROR;
+    int dv = (int)v;
+    int64_t n = dst->size();
+    const uint8_t* mp = m->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) if (mp[i]) d[i] = sat_sub_u8(d[i], dv);
+    return zym_newNull();
+}
+
+static ZymValue b_maskedAddBuffer(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue srcV) {
+    PackedByteArray* m; if (!reqBuffer(vm, maskV, "Buffer.maskedAddBuffer(mask, src)", &m)) return ZYM_ERROR;
+    PackedByteArray* s; if (!reqBuffer(vm, srcV,  "Buffer.maskedAddBuffer(mask, src)", &s)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, m, "Buffer.maskedAddBuffer(mask, src)", "mask")) return ZYM_ERROR;
+    if (!reqSameSize(vm, dst, s, "Buffer.maskedAddBuffer(mask, src)", "src"))  return ZYM_ERROR;
+    int64_t n = dst->size();
+    const uint8_t* mp = m->ptr();
+    const uint8_t* sp = s->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) if (mp[i]) d[i] = sat_add_u8(d[i], sp[i]);
+    return zym_newNull();
+}
+
+static ZymValue b_maskedSubBuffer(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue srcV) {
+    PackedByteArray* m; if (!reqBuffer(vm, maskV, "Buffer.maskedSubBuffer(mask, src)", &m)) return ZYM_ERROR;
+    PackedByteArray* s; if (!reqBuffer(vm, srcV,  "Buffer.maskedSubBuffer(mask, src)", &s)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, m, "Buffer.maskedSubBuffer(mask, src)", "mask")) return ZYM_ERROR;
+    if (!reqSameSize(vm, dst, s, "Buffer.maskedSubBuffer(mask, src)", "src"))  return ZYM_ERROR;
+    int64_t n = dst->size();
+    const uint8_t* mp = m->ptr();
+    const uint8_t* sp = s->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) if (mp[i]) d[i] = sat_sub_u8(d[i], sp[i]);
+    return zym_newNull();
+}
+
+static ZymValue b_maskedAddNoise(ZymVM* vm, ZymValue ctx, ZymValue maskV, ZymValue loV, ZymValue hiV) {
+    PackedByteArray* m; if (!reqBuffer(vm, maskV, "Buffer.maskedAddNoise(mask, lo, hi)", &m)) return ZYM_ERROR;
+    int64_t lo, hi;
+    if (!reqInt(vm, loV, "Buffer.maskedAddNoise(mask, lo, hi)", &lo)) return ZYM_ERROR;
+    if (!reqInt(vm, hiV, "Buffer.maskedAddNoise(mask, lo, hi)", &hi)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, m, "Buffer.maskedAddNoise(mask, lo, hi)", "mask")) return ZYM_ERROR;
+    if (lo > hi) {
+        zym_runtimeError(vm, "Buffer.maskedAddNoise(mask, lo, hi): lo (%lld) must be <= hi (%lld)",
+                         (long long)lo, (long long)hi);
+        return ZYM_ERROR;
+    }
+    int ilo = (int)lo, ihi = (int)hi;
+    int64_t n = dst->size();
+    const uint8_t* mp = m->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) {
+        if (mp[i]) {
+            int r = Math::random(ilo, ihi);
+            d[i] = sat_add_u8(d[i], r);
+        }
+    }
+    return zym_newNull();
+}
+
+// ---- bulk arithmetic (saturating) ----
+
+static ZymValue b_addScalar(ZymVM* vm, ZymValue ctx, ZymValue vV) {
+    int64_t v; if (!reqInt(vm, vV, "Buffer.addScalar(v)", &v)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    int dv = (int)v;
+    int64_t n = dst->size();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = sat_add_u8(d[i], dv);
+    return zym_newNull();
+}
+
+static ZymValue b_subScalar(ZymVM* vm, ZymValue ctx, ZymValue vV) {
+    int64_t v; if (!reqInt(vm, vV, "Buffer.subScalar(v)", &v)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    int dv = (int)v;
+    int64_t n = dst->size();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = sat_sub_u8(d[i], dv);
+    return zym_newNull();
+}
+
+static ZymValue b_addBuffer(ZymVM* vm, ZymValue ctx, ZymValue otherV) {
+    PackedByteArray* o; if (!reqBuffer(vm, otherV, "Buffer.addBuffer(other)", &o)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, o, "Buffer.addBuffer(other)", "other")) return ZYM_ERROR;
+    int64_t n = dst->size();
+    const uint8_t* s = o->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = sat_add_u8(d[i], s[i]);
+    return zym_newNull();
+}
+
+static ZymValue b_subBuffer(ZymVM* vm, ZymValue ctx, ZymValue otherV) {
+    PackedByteArray* o; if (!reqBuffer(vm, otherV, "Buffer.subBuffer(other)", &o)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, o, "Buffer.subBuffer(other)", "other")) return ZYM_ERROR;
+    int64_t n = dst->size();
+    const uint8_t* s = o->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = sat_sub_u8(d[i], s[i]);
+    return zym_newNull();
+}
+
+static ZymValue b_clampRange(ZymVM* vm, ZymValue ctx, ZymValue loV, ZymValue hiV) {
+    int64_t lo, hi;
+    if (!reqInt(vm, loV, "Buffer.clampRange(lo, hi)", &lo)) return ZYM_ERROR;
+    if (!reqInt(vm, hiV, "Buffer.clampRange(lo, hi)", &hi)) return ZYM_ERROR;
+    if (lo > hi) {
+        zym_runtimeError(vm, "Buffer.clampRange(lo, hi): lo (%lld) must be <= hi (%lld)",
+                         (long long)lo, (long long)hi);
+        return ZYM_ERROR;
+    }
+    auto* dst = unwrap(ctx);
+    uint8_t l = (uint8_t)(lo < 0 ? 0 : lo > 255 ? 255 : lo);
+    uint8_t h = (uint8_t)(hi < 0 ? 0 : hi > 255 ? 255 : hi);
+    int64_t n = dst->size();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) {
+        if (d[i] < l) d[i] = l;
+        else if (d[i] > h) d[i] = h;
+    }
+    return zym_newNull();
+}
+
+// ---- bulk fill / copy ----
+
+static ZymValue b_fillRandom(ZymVM* vm, ZymValue ctx, ZymValue loV, ZymValue hiV) {
+    int64_t lo, hi;
+    if (!reqInt(vm, loV, "Buffer.fillRandom(lo, hi)", &lo)) return ZYM_ERROR;
+    if (!reqInt(vm, hiV, "Buffer.fillRandom(lo, hi)", &hi)) return ZYM_ERROR;
+    if (lo < 0 || hi > 255 || lo > hi) {
+        zym_runtimeError(vm, "Buffer.fillRandom(lo, hi): require 0 <= lo <= hi <= 255 (got lo=%lld, hi=%lld)",
+                         (long long)lo, (long long)hi);
+        return ZYM_ERROR;
+    }
+    auto* dst = unwrap(ctx);
+    int ilo = (int)lo, ihi = (int)hi;
+    int64_t n = dst->size();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = (uint8_t)Math::random(ilo, ihi);
+    return zym_newNull();
+}
+
+static ZymValue b_copyFrom(ZymVM* vm, ZymValue ctx, ZymValue srcV) {
+    PackedByteArray* s; if (!reqBuffer(vm, srcV, "Buffer.copyFrom(src)", &s)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, s, "Buffer.copyFrom(src)", "src")) return ZYM_ERROR;
+    if (dst != s && dst->size() > 0) memcpy(dst->ptrw(), s->ptr(), (size_t)dst->size());
+    return zym_newNull();
+}
+
+// Intra-buffer block move. Uses memmove so overlapping ranges are well-defined.
+static ZymValue b_copyRange(ZymVM* vm, ZymValue ctx, ZymValue srcOffV, ZymValue dstOffV, ZymValue lenV) {
+    int64_t srcOff, dstOff, len;
+    if (!reqInt(vm, srcOffV, "Buffer.copyRange(srcOffset, dstOffset, len)", &srcOff)) return ZYM_ERROR;
+    if (!reqInt(vm, dstOffV, "Buffer.copyRange(srcOffset, dstOffset, len)", &dstOff)) return ZYM_ERROR;
+    if (!reqInt(vm, lenV,    "Buffer.copyRange(srcOffset, dstOffset, len)", &len))    return ZYM_ERROR;
+    if (len < 0) {
+        zym_runtimeError(vm, "Buffer.copyRange: len must be >= 0 (got %lld)", (long long)len);
+        return ZYM_ERROR;
+    }
+    auto* dst = unwrap(ctx);
+    int64_t n = dst->size();
+    if (srcOff < 0 || dstOff < 0 || srcOff + len > n || dstOff + len > n) {
+        zym_runtimeError(vm, "Buffer.copyRange: range out of bounds (size=%lld, srcOff=%lld, dstOff=%lld, len=%lld)",
+                         (long long)n, (long long)srcOff, (long long)dstOff, (long long)len);
+        return ZYM_ERROR;
+    }
+    if (len > 0) memmove(dst->ptrw() + dstOff, dst->ptr() + srcOff, (size_t)len);
+    return zym_newNull();
+}
+
+// Inter-buffer block copy.
+static ZymValue b_blitFrom(ZymVM* vm, ZymValue ctx, ZymValue srcV, ZymValue srcOffV, ZymValue dstOffV, ZymValue lenV) {
+    PackedByteArray* s; if (!reqBuffer(vm, srcV, "Buffer.blitFrom(src, srcOffset, dstOffset, len)", &s)) return ZYM_ERROR;
+    int64_t srcOff, dstOff, len;
+    if (!reqInt(vm, srcOffV, "Buffer.blitFrom(src, srcOffset, dstOffset, len)", &srcOff)) return ZYM_ERROR;
+    if (!reqInt(vm, dstOffV, "Buffer.blitFrom(src, srcOffset, dstOffset, len)", &dstOff)) return ZYM_ERROR;
+    if (!reqInt(vm, lenV,    "Buffer.blitFrom(src, srcOffset, dstOffset, len)", &len))    return ZYM_ERROR;
+    if (len < 0) {
+        zym_runtimeError(vm, "Buffer.blitFrom: len must be >= 0 (got %lld)", (long long)len);
+        return ZYM_ERROR;
+    }
+    auto* dst = unwrap(ctx);
+    int64_t dn = dst->size();
+    int64_t sn = s->size();
+    if (srcOff < 0 || dstOff < 0 || srcOff + len > sn || dstOff + len > dn) {
+        zym_runtimeError(vm, "Buffer.blitFrom: range out of bounds (srcSize=%lld, dstSize=%lld, srcOff=%lld, dstOff=%lld, len=%lld)",
+                         (long long)sn, (long long)dn, (long long)srcOff, (long long)dstOff, (long long)len);
+        return ZYM_ERROR;
+    }
+    // memmove handles src == dst overlap correctly as well.
+    if (len > 0) memmove(dst->ptrw() + dstOff, s->ptr() + srcOff, (size_t)len);
+    return zym_newNull();
+}
+
+// Bulk copy from a Zym list of numbers into the receiver. Each list element
+// is coerced to a byte (masked to 8 bits, matching `set`/`fill`/`fromList`).
+// The fast path for "I have script-managed data and want to feed it into the
+// bulk Buffer pipeline" — avoids the per-element `b.set(i, list[i])` loop
+// that otherwise eats ~N method-dispatch costs per call site.
+static ZymValue b_copyFromList(ZymVM* vm, ZymValue ctx, ZymValue listV) {
+    if (!zym_isList(listV)) {
+        zym_runtimeError(vm, "Buffer.copyFromList(list): expects a list");
+        return ZYM_ERROR;
+    }
+    auto* dst = unwrap(ctx);
+    int64_t n_dst  = dst->size();
+    int64_t n_list = (int64_t)zym_listLength(listV);
+    if (n_dst != n_list) {
+        zym_runtimeError(vm, "Buffer.copyFromList(list): list length %lld does not match receiver size %lld",
+                         (long long)n_list, (long long)n_dst);
+        return ZYM_ERROR;
+    }
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n_list; i++) {
+        ZymValue e = zym_listGet(vm, listV, (int)i);
+        if (!zym_isNumber(e)) {
+            zym_runtimeError(vm, "Buffer.copyFromList(list): element %lld is not a number", (long long)i);
+            return ZYM_ERROR;
+        }
+        d[i] = (uint8_t)(int64_t)zym_asNumber(e);
+    }
+    return zym_newNull();
+}
+
+// Partial form: copy `len` elements from `list[listOffset..]` into
+// `this[dstOffset..]`. Symmetric with `blitFrom` / `copyRange`. Out-of-bounds
+// is a runtime error (never silent truncation).
+static ZymValue b_copyFromListRange(ZymVM* vm, ZymValue ctx, ZymValue listV, ZymValue listOffV, ZymValue dstOffV, ZymValue lenV) {
+    if (!zym_isList(listV)) {
+        zym_runtimeError(vm, "Buffer.copyFromListRange(list, listOffset, dstOffset, len): expects a list");
+        return ZYM_ERROR;
+    }
+    int64_t listOff, dstOff, len;
+    if (!reqInt(vm, listOffV, "Buffer.copyFromListRange(list, listOffset, dstOffset, len)", &listOff)) return ZYM_ERROR;
+    if (!reqInt(vm, dstOffV,  "Buffer.copyFromListRange(list, listOffset, dstOffset, len)", &dstOff))  return ZYM_ERROR;
+    if (!reqInt(vm, lenV,     "Buffer.copyFromListRange(list, listOffset, dstOffset, len)", &len))     return ZYM_ERROR;
+    if (len < 0) {
+        zym_runtimeError(vm, "Buffer.copyFromListRange: len must be >= 0 (got %lld)", (long long)len);
+        return ZYM_ERROR;
+    }
+    auto* dst = unwrap(ctx);
+    int64_t n_dst  = dst->size();
+    int64_t n_list = (int64_t)zym_listLength(listV);
+    if (listOff < 0 || dstOff < 0 || listOff + len > n_list || dstOff + len > n_dst) {
+        zym_runtimeError(vm, "Buffer.copyFromListRange: range out of bounds (listLen=%lld, dstSize=%lld, listOff=%lld, dstOff=%lld, len=%lld)",
+                         (long long)n_list, (long long)n_dst, (long long)listOff, (long long)dstOff, (long long)len);
+        return ZYM_ERROR;
+    }
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < len; i++) {
+        ZymValue e = zym_listGet(vm, listV, (int)(listOff + i));
+        if (!zym_isNumber(e)) {
+            zym_runtimeError(vm, "Buffer.copyFromListRange: list element %lld is not a number", (long long)(listOff + i));
+            return ZYM_ERROR;
+        }
+        d[dstOff + i] = (uint8_t)(int64_t)zym_asNumber(e);
+    }
+    return zym_newNull();
+}
+
+// ---- LUT mapping ----
+
+static ZymValue b_mapU8(ZymVM* vm, ZymValue ctx, ZymValue srcV, ZymValue lutV) {
+    PackedByteArray* s; if (!reqBuffer(vm, srcV, "Buffer.mapU8(src, lut)", &s)) return ZYM_ERROR;
+    PackedByteArray* l; if (!reqBuffer(vm, lutV, "Buffer.mapU8(src, lut)", &l)) return ZYM_ERROR;
+    auto* dst = unwrap(ctx);
+    if (!reqSameSize(vm, dst, s, "Buffer.mapU8(src, lut)", "src")) return ZYM_ERROR;
+    if (l->size() < 256) {
+        zym_runtimeError(vm, "Buffer.mapU8(src, lut): lut size %d must be >= 256",
+                         (int)l->size());
+        return ZYM_ERROR;
+    }
+    // src may alias dst (each read happens before the corresponding write),
+    // but lut must not alias dst — writing dst[i] would mutate the LUT and
+    // poison later reads.
+    if (l == dst) {
+        zym_runtimeError(vm, "Buffer.mapU8(src, lut): lut and receiver must not be the same Buffer");
+        return ZYM_ERROR;
+    }
+    int64_t n = dst->size();
+    const uint8_t* sp = s->ptr();
+    const uint8_t* lp = l->ptr();
+    uint8_t* d = dst->ptrw();
+    for (int64_t i = 0; i < n; ++i) d[i] = lp[sp[i]];
+    return zym_newNull();
 }
 
 // ---- decode/encode ----
@@ -673,6 +1206,65 @@ static ZymValue makeInstance(ZymVM* vm, const PackedByteArray& src) {
     M("hex",       "hex()",               b_hex);
     M("toUtf8",    "toUtf8()",            b_toUtf8);
     M("toAscii",   "toAscii()",           b_toAscii);
+
+    // ---- predicates (mask construction) ----
+    M("eqScalar",  "eqScalar(src, v)",          b_eqScalar);
+    M("neqScalar", "neqScalar(src, v)",         b_neqScalar);
+    M("ltScalar",  "ltScalar(src, v)",          b_ltScalar);
+    M("leScalar",  "leScalar(src, v)",          b_leScalar);
+    M("gtScalar",  "gtScalar(src, v)",          b_gtScalar);
+    M("geScalar",  "geScalar(src, v)",          b_geScalar);
+    M("inRange",   "inRange(src, lo, hi)",      b_inRange);
+    M("eqBuffer",  "eqBuffer(srcA, srcB)",      b_eqBuffer);
+    M("neqBuffer", "neqBuffer(srcA, srcB)",     b_neqBuffer);
+    M("ltBuffer",  "ltBuffer(srcA, srcB)",      b_ltBuffer);
+    M("leBuffer",  "leBuffer(srcA, srcB)",      b_leBuffer);
+    M("gtBuffer",  "gtBuffer(srcA, srcB)",      b_gtBuffer);
+    M("geBuffer",  "geBuffer(srcA, srcB)",      b_geBuffer);
+
+    // ---- bitwise (per-byte) ----
+    M("bitAnd",       "bitAnd(other)",        b_bitAnd);
+    M("bitOr",        "bitOr(other)",         b_bitOr);
+    M("bitXor",       "bitXor(other)",        b_bitXor);
+    M("bitNot",       "bitNot()",             b_bitNot);
+    M("bitAndScalar", "bitAndScalar(v)",      b_bitAndScalar);
+    M("bitOrScalar",  "bitOrScalar(v)",       b_bitOrScalar);
+    M("bitXorScalar", "bitXorScalar(v)",      b_bitXorScalar);
+
+    // ---- reductions ----
+    M("countNonZero", "countNonZero()",       b_countNonZero);
+    M("any",          "any()",                b_any);
+    M("all",          "all()",                b_all);
+
+    // ---- masked writes ----
+    M("maskedFill", "maskedFill(mask, v)",          b_maskedFill);
+    M("maskedCopy", "maskedCopy(mask, src)",        b_maskedCopy);
+    M("select",     "select(mask, srcA, srcB)",     b_select);
+
+    // ---- masked arithmetic (saturating) ----
+    M("maskedAddScalar", "maskedAddScalar(mask, v)",      b_maskedAddScalar);
+    M("maskedSubScalar", "maskedSubScalar(mask, v)",      b_maskedSubScalar);
+    M("maskedAddBuffer", "maskedAddBuffer(mask, src)",    b_maskedAddBuffer);
+    M("maskedSubBuffer", "maskedSubBuffer(mask, src)",    b_maskedSubBuffer);
+    M("maskedAddNoise",  "maskedAddNoise(mask, lo, hi)",  b_maskedAddNoise);
+
+    // ---- bulk arithmetic (saturating) ----
+    M("addScalar",  "addScalar(v)",         b_addScalar);
+    M("subScalar",  "subScalar(v)",         b_subScalar);
+    M("addBuffer",  "addBuffer(other)",     b_addBuffer);
+    M("subBuffer",  "subBuffer(other)",     b_subBuffer);
+    M("clampRange", "clampRange(lo, hi)",   b_clampRange);
+
+    // ---- bulk fill / copy ----
+    M("fillRandom", "fillRandom(lo, hi)",                          b_fillRandom);
+    M("copyFrom",          "copyFrom(src)",                                              b_copyFrom);
+    M("copyRange",         "copyRange(srcOffset, dstOffset, len)",                       b_copyRange);
+    M("blitFrom",          "blitFrom(src, srcOffset, dstOffset, len)",                   b_blitFrom);
+    M("copyFromList",      "copyFromList(list)",                                         b_copyFromList);
+    M("copyFromListRange", "copyFromListRange(list, listOffset, dstOffset, len)",        b_copyFromListRange);
+
+    // ---- LUT mapping ----
+    M("mapU8", "mapU8(src, lut)", b_mapU8);
 
     MV("compress",         "compress(algo, ...)",                         b_compress);
     M ("decompress",       "decompress(algo, maxOutputSize)",             b_decompress);

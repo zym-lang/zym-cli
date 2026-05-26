@@ -56,6 +56,7 @@ void install_websocket(ZymVM* vm) { zym_defineGlobal(vm, "WebSocket", nativeWebS
 void install_aes    (ZymVM* vm) { zym_defineGlobal(vm, "AES",     nativeAes_create(vm));     }
 void install_sockets(ZymVM* vm) { zym_defineGlobal(vm, "Sockets", nativeSockets_create(vm)); }
 void install_pack   (ZymVM* vm) { zym_defineGlobal(vm, "Pack",    nativePack_create(vm));    }
+void install_sqlite (ZymVM* vm) { zym_defineGlobal(vm, "SQLite",  nativeSqlite_create(vm));  }
 #ifdef ZYM_SDL_ENABLED
 void install_sdl    (ZymVM* vm) { zym_defineGlobal(vm, "SDL",     nativeSdl_create(vm));     }
 #endif
@@ -74,11 +75,11 @@ void install_ui     (ZymVM* vm) { zym_defineGlobal(vm, "UI",      nativeUi_creat
 // (auto-installed). When a new module is added, append it to this
 // table and to the corresponding declaration in natives.hpp.
 #if defined(ZYM_SDL_ENABLED) && defined(ZYM_UI_ENABLED)
-constexpr std::size_t kCatalogSize = 25;
+constexpr std::size_t kCatalogSize = 26;
 #elif defined(ZYM_SDL_ENABLED)
-constexpr std::size_t kCatalogSize = 24;
+constexpr std::size_t kCatalogSize = 25;
 #else
-constexpr std::size_t kCatalogSize = 23;
+constexpr std::size_t kCatalogSize = 24;
 #endif
 constexpr std::array<CatalogEntry, kCatalogSize> kCatalog = {{
     {"print",   install_print},
@@ -104,6 +105,7 @@ constexpr std::array<CatalogEntry, kCatalogSize> kCatalog = {{
     {"AES",     install_aes},
     {"Sockets", install_sockets},
     {"Pack",    install_pack},
+    {"SQLite",  install_sqlite},
 #ifdef ZYM_SDL_ENABLED
     {"SDL",     install_sdl},
 #endif

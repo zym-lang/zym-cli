@@ -27,16 +27,20 @@ while (gi < GRID_W * GRID_H) {
     gi++
 }
 
-// setCell is retained for the brush handler (called from a user-input path,
-// not the simStep hot loop). simStep inlines bounds + index math directly.
-// getCell / clearUpdated / standalone idx were dropped — the perf-war simStep
-// inlines those at every site, and nothing else in this script used them.
+var idx = func(x, y) { return y * GRID_W + x }
+
+var getCell = func(x, y) {
+    if (x < 0 or x >= GRID_W or y < 0 or y >= GRID_H) { return -1 }
+    return matGrid[idx(x, y)]
+}
+
 var setCell = func(x, y, mat) {
     if (x < 0 or x >= GRID_W or y < 0 or y >= GRID_H) { return }
-    var i = y * GRID_W + x
-    matGrid[i] = mat
-    updGrid[i] = true
+    matGrid[idx(x, y)] = mat
+    updGrid[idx(x, y)] = true
 }
+
+var clearUpdated = func() { fill(updGrid, false) }
 
 // ---------------------------------------------------------------------------
 // Materials
@@ -54,21 +58,6 @@ var MAT_ICE    = 8
 var MAT_ACID   = 9
 var MAT_STEAM  = 10
 var MAT_STONE  = 11
-
-// Out-of-bounds sentinel returned by inlined-getCell ternaries. 12 sits
-// outside the 0..11 material range, so no `m == MAT_X` check matches it
-// (same fall-through behaviour the original -1 sentinel had). Also chosen
-// so bit 12 isn't set in any class mask below — `(MASK >> MAT_OOB) & 1`
-// is always 0, so OOB cells naturally fail every class predicate.
-var MAT_OOB = 12
-
-// Class bitmasks: bit `m` is set iff material `m` belongs to the class.
-// `((MASK >> m) & 1) != 0` replaces 2/3-way OR-chained == comparisons —
-// faster than the OR chain in zym, and no need to worry about argument
-// ordering for short-circuit.
-var MASK_FALLABLE         = (1 << MAT_EMPTY) | (1 << MAT_WATER) | (1 << MAT_ACID)
-var MASK_HOT              = (1 << MAT_FIRE)  | (1 << MAT_LAVA)
-var MASK_ACID_DISSOLVABLE = (1 << MAT_SAND)  | (1 << MAT_WOOD)  | (1 << MAT_ICE)
 
 var matNames = ["Empty","Wall","Sand","Water","Fire","Wood","Smoke","Lava","Ice","Acid","Steam","Stone"]
 
@@ -107,25 +96,10 @@ var matBtnColors = [
 var rng = Random.create()
 
 // Neighbour-offset constants. Hoisted to module scope so simStep doesn't
-// reallocate these per cell. Stored as parallel X/Y lists instead of a
-// list-of-pairs so per-direction access is one list-index instead of two.
-var DIRS4_X = [-1, 1,  0, 0]
-var DIRS4_Y = [ 0, 0, -1, 1]
-var DIRS8_X = [-1, 1,  0, 0, -1,  1, -1, 1]
-var DIRS8_Y = [ 0, 0, -1, 1, -1, -1,  1, 1]
-
-// Per-step random byte pool. Each simStep refills via one fillRandom call
-// (bulk native), then each cell reads up to 4 bytes from `randBuf` and
-// derives multiple sub-randoms via bit/mod ops — replacing ~6 method-
-// dispatched rng.randfRange calls per cell with ~2-4 Buffer.get + bit ops.
-// Bit allocation per cell (rBase = i2 * 4):
-//   ra (byte 0): bit 0 = direction coin; bits 1-2 = nx offset (-1..1);
-//                bits 3-4 = ny offset (-1..1)
-//   rb (byte 1): probability checks of small N (% 3, % 8, % 15)
-//   rc (byte 2): probability checks of medium N (% 20, % 25, % 30)
-//   rd (byte 3): probability checks of large N (% 40, % 60)
-// Sub-randoms within a byte are weakly correlated (acceptable for visual sim).
-var randBuf = Buffer.new(GRID_W * GRID_H * 4)
+// reallocate these per cell on every tick — at ~30k active cells × 30 Hz
+// the per-case `var dirs = [...]` versions churned 1M+ small lists/sec.
+var DIRS4 = [[-1,0],[1,0],[0,-1],[0,1]]
+var DIRS8 = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]
 
 // ---------------------------------------------------------------------------
 // Simulation surface + texture
@@ -241,351 +215,201 @@ var rebuildSurf = func() {
 // Simulation rules
 // ---------------------------------------------------------------------------
 
-// Shared "liquid fall/spread" body used by WATER, LAVA, and ACID. Factored
-// out solely to keep simStep under zym's 256-local-variable per-function
-// limit — inlining all three copies pushed simStep over the budget. The
-// per-call overhead is paid only by liquid cells and is dwarfed by the
-// 5+ inlined getCell/setCell that this body would otherwise need.
-var liquidSpread = func(x, i2, i_row, i_below, can_below, ra, mat) {
-    var bcell = can_below ? matGrid[i_below + x] : MAT_OOB
-    if (bcell == MAT_EMPTY) {
-        var ni = i_below + x
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-        return
-    }
-    var dl = (ra & 1) == 0
-    var ax = dl ? -1 : 1
-    var bx = dl ? 1 : -1
-    var xa = x + ax; var xa_ok = xa >= 0 and xa < GRID_W
-    var xb = x + bx; var xb_ok = xb >= 0 and xb < GRID_W
-    var ba = (can_below and xa_ok) ? matGrid[i_below + xa] : MAT_OOB
-    var bb = (can_below and xb_ok) ? matGrid[i_below + xb] : MAT_OOB
-    if (ba == MAT_EMPTY) {
-        var ni = i_below + xa
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-        return
-    } else if (bb == MAT_EMPTY) {
-        var ni = i_below + xb
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-        return
-    }
-    var sa = xa_ok ? matGrid[i_row + xa] : MAT_OOB
-    var sb = xb_ok ? matGrid[i_row + xb] : MAT_OOB
-    if (sa == MAT_EMPTY) {
-        var ni = i_row + xa
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    } else if (sb == MAT_EMPTY) {
-        var ni = i_row + xb
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    }
-}
-
-// Shared "rise" body for SMOKE and STEAM — same reasoning as liquidSpread.
-var gasRise = func(x, i2, i_row, i_above, can_above, ra, mat) {
-    var dl = (ra & 1) == 0
-    var ax = dl ? -1 : 1
-    var xa = x + ax; var xa_ok = xa >= 0 and xa < GRID_W
-    if (can_above and matGrid[i_above + x] == MAT_EMPTY) {
-        var ni = i_above + x
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    } else if (can_above and xa_ok and matGrid[i_above + xa] == MAT_EMPTY) {
-        var ni = i_above + xa
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    } else if (xa_ok and matGrid[i_row + xa] == MAT_EMPTY) {
-        var ni = i_row + xa
-        matGrid[ni] = mat;       updGrid[ni] = true
-        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-    }
-}
-
-// PERF-WAR simStep: inlined getCell/setCell/idx, class bitmasks instead of
-// OR-chains, and a per-step RNG cache so per-cell randomness is bit ops on
-// pre-rolled bytes instead of dispatched rng.randfRange calls. See sandbox_old.zym
-// for the readable equivalent — semantically the same sim, just verbose.
 var simStep = func() {
-    fill(updGrid, false)            // bulk native: replaces 120k list writes
-    randBuf.fillRandom(0, 255)      // bulk native: pre-rolls per-step entropy
+    clearUpdated()
     activeParts = 0
 
     var y = GRID_H - 1
     while (y >= 0) {
-        // Per-row constants. y is loop-invariant for the inner x loop so
-        // the row-stride math is hoisted out of every cell.
-        var i_row     = y * GRID_W
-        var i_above   = i_row - GRID_W
-        var i_below   = i_row + GRID_W
-        var can_above = y > 0
-        var can_below = y < GRID_H - 1
-
         var x = 0
         while (x < GRID_W) {
-            var i2 = i_row + x
+            var i2 = idx(x, y)
             if (updGrid[i2]) { x++; continue }
             var m = matGrid[i2]
-            // EARLY EXIT for the dominant case (most cells are empty). This
-            // is the load-bearing change vs. the first perf-war pass — without
-            // it, every empty cell paid 4 Buffer.get's to fetch random bytes
-            // it would never use, which dwarfed the inlining savings.
-            if (m == MAT_EMPTY) { x++; continue }
-            activeParts = activeParts + 1
-            // WALL and WOOD have no rule body; skip the RNG fetch for them too.
-            if (m == MAT_WALL or m == MAT_WOOD) { x++; continue }
-
-            // Now that we know the cell has a rule, pull its random bytes.
-            var ra = randBuf.get(i2 * 4)
-            var rb = randBuf.get(i2 * 4 + 1)
-            var rc = randBuf.get(i2 * 4 + 2)
-            var rd = randBuf.get(i2 * 4 + 3)
+            if (m != MAT_EMPTY) { activeParts = activeParts + 1 }
 
             switch (m) {
                 case MAT_SAND: {
-                    // Inlined: below = getCell(x, y+1)
-                    var below = can_below ? matGrid[i_below + x] : MAT_OOB
-                    if (((MASK_FALLABLE >> below) & 1) != 0) {
-                        // Both writes target known-in-bounds cells (i_below+x via
-                        // can_below; i2 by construction).
-                        var ni = i_below + x
-                        matGrid[ni] = MAT_SAND;  updGrid[ni] = true
-                        matGrid[i2] = below;     updGrid[i2] = true
+                    var below = getCell(x, y+1)
+                    if (below == MAT_EMPTY or below == MAT_WATER or below == MAT_ACID) {
+                        setCell(x, y+1, MAT_SAND); setCell(x, y, below)
                     } else {
-                        var dl = (ra & 1) == 0
-                        var ax = dl ? -1 : 1
-                        var bx = dl ? 1 : -1
-                        var xa = x + ax
-                        var xb = x + bx
-                        var xa_ok = xa >= 0 and xa < GRID_W
-                        var xb_ok = xb >= 0 and xb < GRID_W
-                        var ba = (can_below and xa_ok) ? matGrid[i_below + xa] : MAT_OOB
-                        var bb = (can_below and xb_ok) ? matGrid[i_below + xb] : MAT_OOB
-                        if (((MASK_FALLABLE >> ba) & 1) != 0) {
-                            var ni = i_below + xa
-                            matGrid[ni] = MAT_SAND; updGrid[ni] = true
-                            matGrid[i2] = ba;       updGrid[i2] = true
-                        } else if (((MASK_FALLABLE >> bb) & 1) != 0) {
-                            var ni = i_below + xb
-                            matGrid[ni] = MAT_SAND; updGrid[ni] = true
-                            matGrid[i2] = bb;       updGrid[i2] = true
+                        var dl = floor(rng.randfRange(0, 2)) == 0
+                        var ax = dl ? -1 : 1; var bx = dl ? 1 : -1
+                        var ba = getCell(x+ax, y+1); var bb = getCell(x+bx, y+1)
+                        if (ba == MAT_EMPTY or ba == MAT_WATER or ba == MAT_ACID) {
+                            setCell(x+ax, y+1, MAT_SAND); setCell(x, y, ba)
+                        } else if (bb == MAT_EMPTY or bb == MAT_WATER or bb == MAT_ACID) {
+                            setCell(x+bx, y+1, MAT_SAND); setCell(x, y, bb)
                         }
                     }
                     break
                 }
-
                 case MAT_WATER: {
-                    // 4-direction reactive scan (lava→steam/stone, acid→water, fire→empty)
+                    var dirs = DIRS4
                     var wi = 0
                     while (wi < 4) {
-                        var wx = x + DIRS4_X[wi]
-                        var wy = y + DIRS4_Y[wi]
-                        if (wx >= 0 and wx < GRID_W and wy >= 0 and wy < GRID_H) {
-                            var ni = wy * GRID_W + wx
-                            var nb = matGrid[ni]
-                            if (nb == MAT_LAVA) {
-                                matGrid[i2] = MAT_STEAM; updGrid[i2] = true
-                                matGrid[ni] = MAT_STONE; updGrid[ni] = true
-                                wi = 99
-                            } else if (nb == MAT_ACID) {
-                                matGrid[ni] = MAT_WATER; updGrid[ni] = true
-                                wi = 99
-                            } else if (nb == MAT_FIRE) {
-                                matGrid[ni] = MAT_EMPTY; updGrid[ni] = true
-                                wi = 99
-                            }
+                        var wx = x+dirs[wi][0]; var wy = y+dirs[wi][1]
+                        var nb = getCell(wx, wy)
+                        if (nb == MAT_LAVA) {
+                            setCell(x, y, MAT_STEAM); setCell(wx, wy, MAT_STONE); wi = 99
+                        } else if (nb == MAT_ACID) {
+                            setCell(wx, wy, MAT_WATER); wi = 99
+                        } else if (nb == MAT_FIRE) {
+                            setCell(wx, wy, MAT_EMPTY); wi = 99
                         }
                         wi++
                     }
-                    if (matGrid[i2] != MAT_WATER) { break }
-                    liquidSpread(x, i2, i_row, i_below, can_below, ra, MAT_WATER)
+                    if (matGrid[idx(x,y)] != MAT_WATER) { break }
+                    if (getCell(x, y+1) == MAT_EMPTY) {
+                        setCell(x, y+1, MAT_WATER); setCell(x, y, MAT_EMPTY)
+                    } else {
+                        var dl = floor(rng.randfRange(0, 2)) == 0
+                        var ax = dl ? -1 : 1; var bx = dl ? 1 : -1
+                        if (getCell(x+ax, y+1) == MAT_EMPTY) {
+                            setCell(x+ax, y+1, MAT_WATER); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+bx, y+1) == MAT_EMPTY) {
+                            setCell(x+bx, y+1, MAT_WATER); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+ax, y) == MAT_EMPTY) {
+                            setCell(x+ax, y, MAT_WATER); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+bx, y) == MAT_EMPTY) {
+                            setCell(x+bx, y, MAT_WATER); setCell(x, y, MAT_EMPTY)
+                        }
+                    }
                     break
                 }
-
                 case MAT_FIRE: {
-                    // Adjacent water -> smoke
+                    var dirs = DIRS4
                     var fi = 0
                     while (fi < 4) {
-                        var fx = x + DIRS4_X[fi]
-                        var fy = y + DIRS4_Y[fi]
-                        if (fx >= 0 and fx < GRID_W and fy >= 0 and fy < GRID_H) {
-                            if (matGrid[fy * GRID_W + fx] == MAT_WATER) {
-                                matGrid[i2] = MAT_SMOKE; updGrid[i2] = true
-                                fi = 99
-                            }
-                        }
+                        var nb = getCell(x+dirs[fi][0], y+dirs[fi][1])
+                        if (nb == MAT_WATER) { setCell(x, y, MAT_SMOKE); fi = 99 }
                         fi++
                     }
-                    if (matGrid[i2] != MAT_FIRE) { break }
-                    // 1/30 -> smoke
-                    if ((rc % 30) == 0) {
-                        matGrid[i2] = MAT_SMOKE; updGrid[i2] = true
-                        break
-                    }
-                    // Random ±1 offset to spread to wood/ice
-                    var nxo = ((ra >> 1) % 3) - 1
-                    var nyo = ((ra >> 3) % 3) - 1
-                    var nx = x + nxo
-                    var ny = y + nyo
-                    if (nx >= 0 and nx < GRID_W and ny >= 0 and ny < GRID_H) {
-                        var ni = ny * GRID_W + nx
-                        var nb2 = matGrid[ni]
-                        if (nb2 == MAT_WOOD) { matGrid[ni] = MAT_FIRE;  updGrid[ni] = true }
-                        if (nb2 == MAT_ICE)  { matGrid[ni] = MAT_WATER; updGrid[ni] = true }
-                    }
-                    // 1/3 climb upward if empty above
-                    if (can_above) {
-                        var ai = i_above + x
-                        if (matGrid[ai] == MAT_EMPTY and (rb % 3) == 0) {
-                            matGrid[ai] = MAT_FIRE;  updGrid[ai] = true
-                            matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-                        }
+                    if (matGrid[idx(x,y)] != MAT_FIRE) { break }
+                    if (floor(rng.randfRange(0, 30)) == 0) { setCell(x, y, MAT_SMOKE); break }
+                    var nx = x + floor(rng.randfRange(-1, 2))
+                    var ny = y + floor(rng.randfRange(-1, 2))
+                    var nb2 = getCell(nx, ny)
+                    if (nb2 == MAT_WOOD) { setCell(nx, ny, MAT_FIRE) }
+                    if (nb2 == MAT_ICE)  { setCell(nx, ny, MAT_WATER) }
+                    if (getCell(x, y-1) == MAT_EMPTY and floor(rng.randfRange(0, 3)) == 0) {
+                        setCell(x, y-1, MAT_FIRE); setCell(x, y, MAT_EMPTY)
                     }
                     break
                 }
-
                 case MAT_SMOKE: {
-                    if ((rd % 40) == 0) {
-                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-                        break
-                    }
-                    // Inlined gasRise(MAT_SMOKE)
-                    var sm_dl = (ra & 1) == 0
-                    var sm_ax = sm_dl ? -1 : 1
-                    var sm_xa = x + sm_ax; var sm_xa_ok = sm_xa >= 0 and sm_xa < GRID_W
-                    if (can_above and matGrid[i_above + x] == MAT_EMPTY) {
-                        var ni = i_above + x
-                        matGrid[ni] = MAT_SMOKE; updGrid[ni] = true
-                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-                    } else if (can_above and sm_xa_ok and matGrid[i_above + sm_xa] == MAT_EMPTY) {
-                        var ni = i_above + sm_xa
-                        matGrid[ni] = MAT_SMOKE; updGrid[ni] = true
-                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-                    } else if (sm_xa_ok and matGrid[i_row + sm_xa] == MAT_EMPTY) {
-                        var ni = i_row + sm_xa
-                        matGrid[ni] = MAT_SMOKE; updGrid[ni] = true
-                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                    if (floor(rng.randfRange(0, 40)) == 0) { setCell(x, y, MAT_EMPTY); break }
+                    var dl = floor(rng.randfRange(0, 2)) == 0
+                    var ax = dl ? -1 : 1
+                    if (getCell(x, y-1) == MAT_EMPTY) {
+                        setCell(x, y-1, MAT_SMOKE); setCell(x, y, MAT_EMPTY)
+                    } else if (getCell(x+ax, y-1) == MAT_EMPTY) {
+                        setCell(x+ax, y-1, MAT_SMOKE); setCell(x, y, MAT_EMPTY)
+                    } else if (getCell(x+ax, y) == MAT_EMPTY) {
+                        setCell(x+ax, y, MAT_SMOKE); setCell(x, y, MAT_EMPTY)
                     }
                     break
                 }
-
                 case MAT_LAVA: {
-                    // 2/3 skip — lava is sluggish
-                    if ((rb % 3) != 0) { break }
-                    // 4-direction reactive scan
+                    if (floor(rng.randfRange(0, 3)) != 0) { break }
+                    var dirs = DIRS4
                     var li = 0
                     while (li < 4) {
-                        var lx = x + DIRS4_X[li]
-                        var ly = y + DIRS4_Y[li]
-                        if (lx >= 0 and lx < GRID_W and ly >= 0 and ly < GRID_H) {
-                            var ni = ly * GRID_W + lx
-                            var nb3 = matGrid[ni]
-                            if (nb3 == MAT_WATER) {
-                                matGrid[i2] = MAT_STONE; updGrid[i2] = true
-                                matGrid[ni] = MAT_STEAM; updGrid[ni] = true
-                                li = 99
-                            } else if (nb3 == MAT_ICE) {
-                                matGrid[ni] = MAT_WATER; updGrid[ni] = true
-                                matGrid[i2] = MAT_STONE; updGrid[i2] = true
-                                li = 99
-                            } else if (nb3 == MAT_WOOD) {
-                                matGrid[ni] = MAT_FIRE; updGrid[ni] = true
-                            } else if (nb3 == MAT_SAND and (rc % 20) == 0) {
-                                matGrid[ni] = MAT_LAVA; updGrid[ni] = true
-                            }
+                        var lx2 = x+dirs[li][0]; var ly2 = y+dirs[li][1]
+                        var nb3 = getCell(lx2, ly2)
+                        if (nb3 == MAT_WATER) {
+                            setCell(x, y, MAT_STONE); setCell(lx2, ly2, MAT_STEAM); li = 99
+                        } else if (nb3 == MAT_ICE) {
+                            setCell(lx2, ly2, MAT_WATER); setCell(x, y, MAT_STONE); li = 99
+                        } else if (nb3 == MAT_WOOD) {
+                            setCell(lx2, ly2, MAT_FIRE)
+                        } else if (nb3 == MAT_SAND and floor(rng.randfRange(0, 20)) == 0) {
+                            setCell(lx2, ly2, MAT_LAVA)
                         }
                         li++
                     }
-                    if (matGrid[i2] != MAT_LAVA) { break }
-                    liquidSpread(x, i2, i_row, i_below, can_below, ra, MAT_LAVA)
+                    if (matGrid[idx(x,y)] != MAT_LAVA) { break }
+                    if (getCell(x, y+1) == MAT_EMPTY) {
+                        setCell(x, y+1, MAT_LAVA); setCell(x, y, MAT_EMPTY)
+                    } else {
+                        var dl = floor(rng.randfRange(0, 2)) == 0
+                        var ax = dl ? -1 : 1; var bx = dl ? 1 : -1
+                        if (getCell(x+ax, y+1) == MAT_EMPTY) {
+                            setCell(x+ax, y+1, MAT_LAVA); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+bx, y+1) == MAT_EMPTY) {
+                            setCell(x+bx, y+1, MAT_LAVA); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+ax, y) == MAT_EMPTY) {
+                            setCell(x+ax, y, MAT_LAVA); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+bx, y) == MAT_EMPTY) {
+                            setCell(x+bx, y, MAT_LAVA); setCell(x, y, MAT_EMPTY)
+                        }
+                    }
                     break
                 }
-
                 case MAT_ICE: {
-                    // Melt next to hot neighbor (FIRE|LAVA) with 1/8 chance
+                    var dirs = DIRS4
                     var ii = 0
                     while (ii < 4) {
-                        var ix2 = x + DIRS4_X[ii]
-                        var iy2 = y + DIRS4_Y[ii]
-                        if (ix2 >= 0 and ix2 < GRID_W and iy2 >= 0 and iy2 < GRID_H) {
-                            var nb4 = matGrid[iy2 * GRID_W + ix2]
-                            if (((MASK_HOT >> nb4) & 1) != 0 and (rb & 7) == 0) {
-                                matGrid[i2] = MAT_WATER; updGrid[i2] = true
-                                ii = 99
-                            }
+                        var nb4 = getCell(x+dirs[ii][0], y+dirs[ii][1])
+                        if ((nb4 == MAT_FIRE or nb4 == MAT_LAVA) and floor(rng.randfRange(0, 8)) == 0) {
+                            setCell(x, y, MAT_WATER); ii = 99
                         }
                         ii++
                     }
                     break
                 }
-
                 case MAT_ACID: {
-                    // 8-direction reactive scan (water dilute, dissolve solids, stone, lava)
+                    var dirs = DIRS8
                     var ai = 0
                     while (ai < 8) {
-                        var ax2 = x + DIRS8_X[ai]
-                        var ay2 = y + DIRS8_Y[ai]
-                        if (ax2 >= 0 and ax2 < GRID_W and ay2 >= 0 and ay2 < GRID_H) {
-                            var ni = ay2 * GRID_W + ax2
-                            var nb5 = matGrid[ni]
-                            if (nb5 == MAT_WATER) {
-                                if ((rb % 15) == 0) {
-                                    matGrid[i2] = MAT_WATER; updGrid[i2] = true
-                                    ai = 99
-                                }
-                            } else if (((MASK_ACID_DISSOLVABLE >> nb5) & 1) != 0 and ((rb >> 3) & 7) == 0) {
-                                matGrid[ni] = MAT_EMPTY; updGrid[ni] = true
-                                matGrid[i2] = MAT_SMOKE; updGrid[i2] = true
-                                ai = 99
-                            } else if (nb5 == MAT_STONE and (rc % 25) == 0) {
-                                matGrid[ni] = MAT_EMPTY; updGrid[ni] = true
-                                matGrid[i2] = MAT_SMOKE; updGrid[i2] = true
-                                ai = 99
-                            } else if (nb5 == MAT_LAVA) {
-                                matGrid[i2] = MAT_SMOKE; updGrid[i2] = true
-                                matGrid[ni] = MAT_STONE; updGrid[ni] = true
-                                ai = 99
+                        var ax2 = x+dirs[ai][0]; var ay2 = y+dirs[ai][1]
+                        var nb5 = getCell(ax2, ay2)
+                        if (nb5 == MAT_WATER) {
+                            if (floor(rng.randfRange(0, 15)) == 0) {
+                                setCell(x, y, MAT_WATER); ai = 99
                             }
+                        } else if ((nb5 == MAT_SAND or nb5 == MAT_WOOD or nb5 == MAT_ICE) and floor(rng.randfRange(0, 8)) == 0) {
+                            setCell(ax2, ay2, MAT_EMPTY); setCell(x, y, MAT_SMOKE); ai = 99
+                        } else if (nb5 == MAT_STONE and floor(rng.randfRange(0, 25)) == 0) {
+                            setCell(ax2, ay2, MAT_EMPTY); setCell(x, y, MAT_SMOKE); ai = 99
+                        } else if (nb5 == MAT_LAVA) {
+                            setCell(x, y, MAT_SMOKE); setCell(ax2, ay2, MAT_STONE); ai = 99
                         }
                         ai++
                     }
-                    if (matGrid[i2] != MAT_ACID) { break }
-                    liquidSpread(x, i2, i_row, i_below, can_below, ra, MAT_ACID)
+                    if (matGrid[idx(x,y)] != MAT_ACID) { break }
+                    if (getCell(x, y+1) == MAT_EMPTY) {
+                        setCell(x, y+1, MAT_ACID); setCell(x, y, MAT_EMPTY)
+                    } else {
+                        var dl = floor(rng.randfRange(0, 2)) == 0
+                        var ax3 = dl ? -1 : 1; var bx3 = dl ? 1 : -1
+                        if (getCell(x+ax3, y+1) == MAT_EMPTY) {
+                            setCell(x+ax3, y+1, MAT_ACID); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+bx3, y+1) == MAT_EMPTY) {
+                            setCell(x+bx3, y+1, MAT_ACID); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+ax3, y) == MAT_EMPTY) {
+                            setCell(x+ax3, y, MAT_ACID); setCell(x, y, MAT_EMPTY)
+                        } else if (getCell(x+bx3, y) == MAT_EMPTY) {
+                            setCell(x+bx3, y, MAT_ACID); setCell(x, y, MAT_EMPTY)
+                        }
+                    }
                     break
                 }
-
                 case MAT_STEAM: {
-                    if ((rd % 60) == 0) {
-                        matGrid[i2] = MAT_WATER; updGrid[i2] = true
-                        break
-                    }
-                    if ((rc % 30) == 0) {
-                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-                        break
-                    }
-                    // Inlined gasRise(MAT_STEAM)
-                    var st_dl = (ra & 1) == 0
-                    var st_ax = st_dl ? -1 : 1
-                    var st_xa = x + st_ax; var st_xa_ok = st_xa >= 0 and st_xa < GRID_W
-                    if (can_above and matGrid[i_above + x] == MAT_EMPTY) {
-                        var ni = i_above + x
-                        matGrid[ni] = MAT_STEAM; updGrid[ni] = true
-                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-                    } else if (can_above and st_xa_ok and matGrid[i_above + st_xa] == MAT_EMPTY) {
-                        var ni = i_above + st_xa
-                        matGrid[ni] = MAT_STEAM; updGrid[ni] = true
-                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
-                    } else if (st_xa_ok and matGrid[i_row + st_xa] == MAT_EMPTY) {
-                        var ni = i_row + st_xa
-                        matGrid[ni] = MAT_STEAM; updGrid[ni] = true
-                        matGrid[i2] = MAT_EMPTY; updGrid[i2] = true
+                    if (floor(rng.randfRange(0, 60)) == 0) { setCell(x, y, MAT_WATER); break }
+                    if (floor(rng.randfRange(0, 30)) == 0) { setCell(x, y, MAT_EMPTY); break }
+                    var dl = floor(rng.randfRange(0, 2)) == 0
+                    var ax = dl ? -1 : 1
+                    if (getCell(x, y-1) == MAT_EMPTY) {
+                        setCell(x, y-1, MAT_STEAM); setCell(x, y, MAT_EMPTY)
+                    } else if (getCell(x+ax, y-1) == MAT_EMPTY) {
+                        setCell(x+ax, y-1, MAT_STEAM); setCell(x, y, MAT_EMPTY)
+                    } else if (getCell(x+ax, y) == MAT_EMPTY) {
+                        setCell(x+ax, y, MAT_STEAM); setCell(x, y, MAT_EMPTY)
                     }
                     break
                 }
-
                 default: { break }
             }
             x++

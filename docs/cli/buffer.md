@@ -96,6 +96,197 @@ invoked as `b.method(...)`.
 
 ---
 
+## Bulk & mask operations
+
+These methods operate over the **whole buffer** in a single native call.
+They are the fast path for anything that would otherwise be a per-byte
+zym loop: image channels, mask-based painting, byte translation tables,
+XOR keystreams (WebSocket frames, stream ciphers), audio gain, delta
+encoding, predicate-driven filtering.
+
+**Conventions for this section.**
+
+- A **mask** is any buffer where `byte == 0` means OFF and any non-zero
+  byte means ON. Predicates produce strict `0`/`1` so masks compose
+  cleanly under the bitwise ops, but masks built from other sources
+  work too without normalisation.
+- **Arithmetic saturates** at `[0, 255]`. Wrap is recoverable via the
+  bitwise scalar ops (`bitAndScalar(0xFF)` etc.).
+- **Comparisons are unsigned** (bytes are u8).
+- **Size match required.** Every elementwise method requires the
+  operand buffer(s) to be the same size as the receiver; mismatches
+  raise a runtime error of the form
+  `Buffer.method(...): <name> size N does not match receiver size M`.
+- **Aliasing.** The receiver may be passed as an operand (each per-byte
+  write is local to its index) **except** for `mapU8`'s `lut` — that
+  case is explicitly rejected.
+- All methods in this section mutate the receiver in place and return
+  `null`; reductions (`countNonZero`, `any`, `all`) return their value.
+
+### Predicates → build a mask from a buffer
+
+| Method | Notes |
+| --- | --- |
+| `m.eqScalar(src, v)`        | `m[i] = (src[i] == v) ? 1 : 0` |
+| `m.neqScalar(src, v)`       | `m[i] = (src[i] != v) ? 1 : 0` |
+| `m.ltScalar(src, v)`        | `m[i] = (src[i] <  v) ? 1 : 0` (unsigned) |
+| `m.leScalar(src, v)`        | `m[i] = (src[i] <= v) ? 1 : 0` |
+| `m.gtScalar(src, v)`        | `m[i] = (src[i] >  v) ? 1 : 0` |
+| `m.geScalar(src, v)`        | `m[i] = (src[i] >= v) ? 1 : 0` |
+| `m.inRange(src, lo, hi)`    | `m[i] = (lo <= src[i] <= hi) ? 1 : 0`, both ends inclusive |
+| `m.eqBuffer(srcA, srcB)`    | per-index comparison of two buffers |
+| `m.neqBuffer(srcA, srcB)`   | |
+| `m.ltBuffer(srcA, srcB)`    | |
+| `m.leBuffer(srcA, srcB)`    | |
+| `m.gtBuffer(srcA, srcB)`    | |
+| `m.geBuffer(srcA, srcB)`    | |
+
+To invert a mask, choose the opposite predicate (`neqScalar` instead of
+`eqScalar`, etc.) rather than a separate not-op.
+
+### Bitwise — per-byte; also serve as mask combinators
+
+| Method | Notes |
+| --- | --- |
+| `b.bitAnd(other)`       | `b[i] = b[i] & other[i]` |
+| `b.bitOr(other)`        | `b[i] = b[i] \| other[i]` |
+| `b.bitXor(other)`       | `b[i] = b[i] ^ other[i]` (e.g. WebSocket frame XOR mask, XOR keystream) |
+| `b.bitNot()`            | `b[i] = ~b[i]` (full per-byte bitwise NOT, not a mask logical-not) |
+| `b.bitAndScalar(v)`     | `b[i] = b[i] & (v & 0xFF)` |
+| `b.bitOrScalar(v)`      | `b[i] = b[i] \| (v & 0xFF)` |
+| `b.bitXorScalar(v)`     | `b[i] = b[i] ^ (v & 0xFF)` |
+
+When both inputs are strict 0/1 masks, `bitAnd` / `bitOr` / `bitXor`
+double as mask intersection / union / symmetric-difference.
+
+### Reductions — answer questions about a buffer
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `b.countNonZero()` | number | Number of bytes `!= 0`. |
+| `b.any()`          | bool   | `true` if any byte is non-zero. |
+| `b.all()`          | bool   | `true` if every byte is non-zero (vacuously `true` for empty). |
+
+`count(v)`, `has(v)`, `find(v, from)`, `rfind(v, from)` (above) cover
+the equality-based queries.
+
+### Masked writes — apply value/buffer where mask is set
+
+| Method | Notes |
+| --- | --- |
+| `b.maskedFill(mask, v)`         | `b[i] = v` where `mask[i] != 0` |
+| `b.maskedCopy(mask, src)`       | `b[i] = src[i]` where `mask[i] != 0` |
+| `b.select(mask, srcA, srcB)`    | `b[i] = mask[i] != 0 ? srcA[i] : srcB[i]` (numpy-style `where`) |
+
+### Masked arithmetic — saturating, gated by mask
+
+| Method | Notes |
+| --- | --- |
+| `b.maskedAddScalar(mask, v)`        | `v` may be negative; clamps to `[0, 255]` |
+| `b.maskedSubScalar(mask, v)`        | |
+| `b.maskedAddBuffer(mask, src)`      | per-index saturating add of `src` where mask is set |
+| `b.maskedSubBuffer(mask, src)`      | |
+| `b.maskedAddNoise(mask, lo, hi)`    | adds a fresh random integer in `[lo, hi]` (inclusive) per masked byte, saturating |
+
+### Bulk arithmetic — saturating, whole buffer
+
+| Method | Notes |
+| --- | --- |
+| `b.addScalar(v)`           | `v` may be negative |
+| `b.subScalar(v)`           | |
+| `b.addBuffer(other)`       | per-index saturating add |
+| `b.subBuffer(other)`       | per-index saturating sub |
+| `b.clampRange(lo, hi)`     | clamp every byte to `[lo, hi]`; `lo`/`hi` are themselves clamped to `0..255` |
+
+### Bulk fill / copy
+
+| Method | Notes |
+| --- | --- |
+| `b.fillRandom(lo, hi)`                          | Fill every byte with a fresh random integer in `[lo, hi]` (inclusive). Requires `0 <= lo <= hi <= 255`. |
+| `b.copyFrom(src)`                               | `memcpy` of a same-sized buffer into the receiver. |
+| `b.copyRange(srcOffset, dstOffset, len)`        | Intra-buffer block move (`memmove` semantics — overlapping ranges are well-defined). |
+| `b.blitFrom(src, srcOffset, dstOffset, len)`    | Inter-buffer block copy: copy `len` bytes from `src[srcOffset..]` to `this[dstOffset..]`. |
+| `b.copyFromList(list)`                          | Bulk-copy a Zym list of numbers into the receiver in one native pass; each element is masked to a byte. List length must equal receiver size. Use this — not `Buffer.fromList(list)` — when you have a pre-allocated scratch Buffer to reuse (e.g. per-frame mirror of script-managed grid state). |
+| `b.copyFromListRange(list, listOffset, dstOffset, len)` | Partial form: copy `len` elements from `list[listOffset..]` into `this[dstOffset..]`. Out-of-bounds is a runtime error. |
+
+### LUT mapping
+
+| Method | Notes |
+| --- | --- |
+| `b.mapU8(src, lut)` | `b[i] = lut[src[i]]`. `lut` must be a buffer of size ≥ 256. `src` may alias `b`; `lut` may not. |
+
+The 256-byte LUT is the workhorse primitive for palette indexing,
+byte translation tables (Latin-1 → ASCII fold, case folding, EBCDIC),
+and producing a colour channel from a material/tile id buffer.
+
+### Examples
+
+XOR-mask a WebSocket payload with a 4-byte key:
+
+```zym
+var payload = Buffer.fromBytes(frameBody)
+var key4    = Buffer.fromList([0xAA, 0xBB, 0xCC, 0xDD])
+// Tile the 4-byte key across the payload length:
+var keyFull = Buffer.new(payload.size())
+var i = 0
+while (i < payload.size()) {
+    keyFull.set(i, key4.get(i % 4))
+    i++
+}
+payload.bitXor(keyFull)   // in-place unmask
+```
+
+Build a colour channel from a tile-id buffer via a palette LUT:
+
+```zym
+var palR = Buffer.new(256)
+palR.set(1, 200); palR.set(2, 80); palR.set(3, 30)   // R for tile ids 1..3
+var rChan = Buffer.new(tileIds.size())
+rChan.mapU8(tileIds, palR)
+```
+
+Mask-based recolour with per-region noise:
+
+```zym
+var sandMask = Buffer.new(grid.size())
+sandMask.eqScalar(grid, MAT_SAND)              // strict 0/1 mask
+rChan.maskedAddNoise(sandMask, -8, 8)          // jitter only sand pixels
+gChan.maskedAddNoise(sandMask, -8, 8)
+bChan.maskedAddNoise(sandMask, -4, 4)
+```
+
+Compose two buffers under a mask (`select` / `np.where` shape):
+
+```zym
+var winnerHP = Buffer.new(n)
+var aliveMask = Buffer.new(n)
+aliveMask.gtScalar(hp, 0)                      // strict 0/1
+winnerHP.select(aliveMask, hp, defaultHP)      // alive → hp, else default
+```
+
+Saturating audio gain on a u8 sample buffer:
+
+```zym
+samples.addScalar(20)         // brighten / +20 gain, clipped at 255
+samples.clampRange(40, 220)   // soft-limit
+```
+
+Per-frame mirror of script-managed state into a pre-allocated bulk-op
+scratch (the pattern that makes the LUT / mask pipeline above usable on
+data that originates in a Zym list):
+
+```zym
+// At setup — allocate once
+var grid   = []                       // your script-managed state, list of bytes
+var matBuf = Buffer.new(N)            // pre-allocated scratch
+
+// Every frame — single native call, no per-element method dispatch
+matBuf.copyFromList(grid)
+rChan.mapU8(matBuf, lutR)             // then run the bulk pipeline...
+```
+
+---
+
 ## Text conversion
 
 | Method | Returns | Notes |
@@ -285,4 +476,5 @@ print("combined size: %n", d.size())
   sequences with `\uFFFD`; `toAscii` treats bytes ≥ 0x80 as Latin-1 rather
   than erroring.
 - **Typed views** (packed `i32` / `f32` arrays sharing storage) are not
-  exposed yet.
+  provided. For byte-level work use the bulk/mask methods above; for
+  individual multi-byte values use `encode*` / `decode*` at an offset.

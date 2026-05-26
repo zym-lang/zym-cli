@@ -28,6 +28,12 @@ struct WindowHandle {
     // BEFORE SDL_DestroyRenderer / SDL_DestroyWindow run, because
     // ImGui's SDL3 backend holds pointers into both.
     void*         imguiContext = nullptr;
+    // ImPlot per-window context, created lazily alongside the ImGui
+    // context the first time `ui.frame(win, ...)` runs (see ui.cpp
+    // `ensureWindowContext`). Owned by ui.cpp; torn down by
+    // `destroyUiContext` BEFORE the ImGui context goes away, since
+    // ImPlot keeps a pointer to the owning ImGui context internally.
+    void*         implotContext = nullptr;
 };
 
 // Optional hook so `ui.cpp` can register a destructor for the ImGui

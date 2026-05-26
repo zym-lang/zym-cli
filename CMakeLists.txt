@@ -1,26 +1,12 @@
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Tiny")
-
-if(WIN32)
-    # MinGW-w64 GCC doesn't ship the asan/ubsan runtimes, so Debug drops the
-    # sanitizer flags on Windows. Everything else (-g -O0, -fno-exceptions,
-    # frame pointers) stays the same.
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fno-omit-frame-pointer -fno-exceptions")
-    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fno-omit-frame-pointer")
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "")
-else()
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-exceptions")
-    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer")
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
-endif()
-
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
-#set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections")
-
-set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables")
-set(CMAKE_EXE_LINKER_FLAGS_TINY "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s -Wl,-Map,zym_cli.map")
+# NOTE: per-config compile/link flag setup is intentionally below
+# `project()` (further down in this file). The mingw toolchain file
+# (cmake/toolchains/mingw64.cmake) is loaded as part of project()'s
+# compiler-detection step, so `WIN32` and `CMAKE_SYSTEM_NAME` are not
+# reliably populated above `project()`. Doing the flag conditionals
+# pre-project() caused the Windows branch to silently take the Linux
+# path, which re-added `-fvisibility=hidden` under `-Oz -flto` and
+# tripped a mingw-gcc ICE in `binds_to_current_def_p`.
 
 set(PGO_MODE "OFF")
 if(PGO_MODE STREQUAL "GEN")
@@ -35,7 +21,7 @@ elseif(PGO_MODE STREQUAL "USE")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use -fprofile-correction")
 endif()
 
-set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_BUILD_TYPE Tiny)
 set(USE_COMPRESSION OFF)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
@@ -84,6 +70,49 @@ cmake_minimum_required(VERSION 4.0)
 project(zym_cli C CXX)
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ZYM_LTO_OK OUTPUT ZYM_LTO_ERR)
+
+# --- Per-config compile/link flags --------------------------------------
+# Deferred until after `project()` so `WIN32` / `CMAKE_SYSTEM_NAME` are
+# populated (the mingw toolchain is loaded during project()'s
+# compiler-detection, not before CMakeLists.txt starts).
+if(WIN32)
+    # MinGW-w64 GCC doesn't ship the asan/ubsan runtimes, so Debug drops the
+    # sanitizer flags on Windows. Everything else (-g -O0, -fno-exceptions,
+    # frame pointers) stays the same.
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fno-omit-frame-pointer -fno-exceptions")
+    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "")
+else()
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-exceptions")
+    set(CMAKE_C_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
+endif()
+
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s")
+
+# mingw-w64 GCC has a known LTO ICE in `binds_to_current_def_p`
+# (symtab.cc:2497) on this codebase under `-flto=auto` (parallel
+# LTO partitioning). The ICE wanders across GIMPLE passes
+# (dse, alias, sink, store-merging, ...) as each is disabled —
+# the bug is in symbol resolution itself, not the passes, because
+# `-flto=auto` shards the symbol table across worker processes
+# and resolution mismatches blow up `binds_to_current_def_p`.
+# Forcing `-flto-partition=none` (single partition, no sharding)
+# is the clean escape. Linux gcc-14 doesn't trip the bug, so this
+# is Windows-only. `Release` escapes because its target_compile/
+# link_options use plain `-flto` (single-partition) instead of
+# the IPO-property-injected `-flto=auto`.
+if(WIN32)
+    set(_ZYM_TINY_LTO_WORKAROUND "-flto-partition=none")
+else()
+    set(_ZYM_TINY_LTO_WORKAROUND "")
+endif()
+
+set(CMAKE_CXX_FLAGS_TINY "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables ${_ZYM_TINY_LTO_WORKAROUND}")
+set(CMAKE_C_FLAGS_TINY   "-Oz -DNDEBUG -ffunction-sections -fdata-sections -fno-exceptions -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables ${_ZYM_TINY_LTO_WORKAROUND}")
+set(CMAKE_EXE_LINKER_FLAGS_TINY "-static-libstdc++ -static-libgcc -Wl,--gc-sections -Wl,-s -Wl,-Map,zym_cli.map ${_ZYM_TINY_LTO_WORKAROUND}")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
@@ -135,6 +164,7 @@ endif()
 set(ZYM_NATIVE_SOURCES
         src/natives/natives.hpp
         src/natives/natives.cpp
+        src/natives/root_scope.hpp
         src/natives/cli_catalog.hpp
         src/natives/cli_catalog.cpp
         src/natives/Zym/zym_native.hpp
@@ -161,17 +191,28 @@ set(ZYM_NATIVE_SOURCES
         src/natives/websocket.cpp
         src/natives/aes.cpp
         src/natives/pack.cpp
+        src/natives/sqlite.cpp
 )
 
 # Slice 1: optional `sdl` native sources. Linked into zym when ZYM_SDL=ON.
 if(ZYM_SDL)
-    list(APPEND ZYM_NATIVE_SOURCES src/natives/sdl.cpp)
+    list(APPEND ZYM_NATIVE_SOURCES src/natives/ui/sdl.cpp)
 endif()
 
 # Slice 1 PR 2: optional `ui` native sources. Linked into zym when
 # ZYM_UI=ON (which implies ZYM_SDL=ON; see the soft-dep check above).
+# Split across src/natives/ui/:
+#   * ui.cpp     — thin FFI binder + per-window context lifecycle
+#   * imgui.cpp  — every `u_*` ImGui wrapper + registerImGuiBindings()
+#   * implot.cpp — every `u_plot*` ImPlot wrapper + registerImPlotBindings()
+#                  (placeholder right now; Phase A populates it)
 if(ZYM_UI)
-    list(APPEND ZYM_NATIVE_SOURCES src/natives/ui.cpp)
+    list(APPEND ZYM_NATIVE_SOURCES
+            src/natives/ui/ui_internal.hpp
+            src/natives/ui/ui.cpp
+            src/natives/ui/imgui.cpp
+            src/natives/ui/implot.cpp
+            src/natives/ui/imanim.cpp)
 endif()
 
 # src/boot/register_core.cpp invokes ObjectDB::setup / cleanup and
@@ -191,6 +232,76 @@ if(ZYM_LTO_OK)
 endif()
 
 target_link_libraries(zym PRIVATE zym_core)
+
+# --- SQLite (vendored amalgamation) -------------------------------------
+# Vendored under third_party/sqlite as the canonical amalgamation
+# (sqlite3.c + sqlite3.h, version 3.50.2 — fetched from sqlite.org).
+# Built as a small static lib `zym_sqlite` so SQLite's compile flags
+# don't leak into the rest of the zym TUs, and so warnings inside
+# sqlite3.c are silenced locally.
+#
+# Compile-flag selection (size + zym fit):
+#   * SQLITE_THREADSAFE=0          — every ZymVM is single-threaded and
+#                                    each Database handle stays bound to
+#                                    its owning VM. No mutex overhead.
+#   * SQLITE_OMIT_LOAD_EXTENSION   — `loadExtension` deferred; trims a
+#                                    real chunk of code + the libdl dep.
+#   * SQLITE_OMIT_DEPRECATED       — drop legacy v1 APIs we don't bind.
+#   * SQLITE_OMIT_SHARED_CACHE     — shared-cache is single-process-only,
+#                                    irrelevant here, ~adds size.
+#   * SQLITE_OMIT_PROGRESS_CALLBACK — not bound on the zym side.
+#   * SQLITE_OMIT_DECLTYPE         — column-decltype reflection not bound.
+#   * SQLITE_DEFAULT_MEMSTATUS=0   — skip per-allocation tracking; zym
+#                                    natives don't expose memstat anyway.
+#   * SQLITE_DEFAULT_WAL_SYNCHRONOUS=1 — match better-sqlite3's default.
+#   * SQLITE_LIKE_DOESNT_MATCH_BLOBS — small perf win, no behaviour zym
+#                                      scripts depend on.
+#   * SQLITE_MAX_EXPR_DEPTH=0      — trim expr-depth bookkeeping.
+#   * SQLITE_USE_ALLOCA            — small wins on Linux/x86_64.
+#   * SQLITE_ENABLE_DESERIALIZE    — required for sqlite3_serialize /
+#                                    sqlite3_deserialize, which power the
+#                                    Buffer-backed `SQLite.open(buffer)` /
+#                                    `db.serialize()` round-trip.
+add_library(zym_sqlite STATIC
+        "${CMAKE_SOURCE_DIR}/third_party/sqlite/sqlite3.c"
+)
+target_include_directories(zym_sqlite PUBLIC
+        "${CMAKE_SOURCE_DIR}/third_party/sqlite"
+)
+target_compile_definitions(zym_sqlite PRIVATE
+        SQLITE_THREADSAFE=0
+        SQLITE_OMIT_LOAD_EXTENSION
+        SQLITE_OMIT_DEPRECATED
+        SQLITE_OMIT_SHARED_CACHE
+        SQLITE_OMIT_PROGRESS_CALLBACK
+        SQLITE_DEFAULT_MEMSTATUS=0
+        SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+        SQLITE_LIKE_DOESNT_MATCH_BLOBS
+        SQLITE_MAX_EXPR_DEPTH=0
+        SQLITE_USE_ALLOCA
+        SQLITE_ENABLE_DESERIALIZE
+        # Column-metadata APIs (sqlite3_column_table_name /
+        # _origin_name / _database_name) and decltype are used by
+        # `stmt.columns()` and the `expand` row-shape. They're cheap
+        # but not on by default in the amalgamation.
+        SQLITE_ENABLE_COLUMN_METADATA
+)
+# sqlite3.c emits a handful of -Wunused warnings under -Wall and the
+# zym TUs are fussier. Silence inside the SQLite TU only.
+target_compile_options(zym_sqlite PRIVATE -w)
+# Match zym's LTO + -fno-pie posture so the final link is consistent
+# with libgodot.a (non-PIC, GCC-LTO).
+if(ZYM_LTO_OK)
+    set_property(TARGET zym_sqlite PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET zym_sqlite PROPERTY INTERPROCEDURAL_OPTIMIZATION_TINY TRUE)
+endif()
+target_compile_options(zym_sqlite PRIVATE
+        $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+if(NOT WIN32)
+    target_compile_options(zym_sqlite PRIVATE -fno-pie)
+endif()
+target_link_libraries(zym PRIVATE zym_sqlite)
+message(STATUS ">> SQLite: vendored amalgamation 3.50.2 linked into zym via zym_sqlite")
 
 # --- SDL3 (Slice 1) ------------------------------------------------------
 # Vendored under third_party/sdl3 (git submodule, pinned to release-3.4.8).
@@ -497,6 +608,48 @@ if(ZYM_UI)
     message(STATUS ">> ZYM_UI: ON — vendored ImPlot (v1.0) linked into zym via zym_implot")
     if(ZYM_LTO_OK)
         message(STATUS ">> ZYM_UI: LTO + Release flags propagated to zym_implot")
+    endif()
+endif()
+
+# --- ImAnim (Slice 1 PR 2e) ---------------------------------------------
+# Vendored under third_party/imanim (git submodule, pinned to tag 1.0.0,
+# sha 8a537521ba41b3dfeec5173f2f89a8dc3d6387c8). Built as a small static
+# library `zym_imanim` that links PUBLICLY against `zym_imgui` (ImAnim
+# is a pure ImGui addon — its public header `im_anim.h` includes
+# `imgui.h` directly, so the include path / SDL3 transitive surface
+# already provided by zym_imgui is exactly what it needs).
+#
+# Sources: ImAnim core only (im_anim.cpp). The upstream tag also ships
+# `im_anim_demo.cpp`, `im_anim_doc.cpp`, and `im_anim_usecase.cpp`
+# (~820 KB combined) which are reference/demo TUs — intentionally not
+# compiled here. Zym-side `UI.anim*` bindings are deferred (this PR
+# only ensures the vendor compile and link succeeds).
+if(ZYM_UI)
+    set(ZYM_IMANIM_DIR "${CMAKE_SOURCE_DIR}/third_party/imanim")
+    add_library(zym_imanim STATIC
+            "${ZYM_IMANIM_DIR}/im_anim.cpp"
+    )
+    target_include_directories(zym_imanim PUBLIC "${ZYM_IMANIM_DIR}")
+    # PUBLIC link to zym_imgui propagates ImGui includes to any TU
+    # that pulls in <im_anim.h>.
+    target_link_libraries(zym_imanim PUBLIC zym_imgui)
+    # Same LTO / -fno-pie / -flto-mode propagation as zym_implot.
+    if(ZYM_LTO_OK)
+        set_property(TARGET zym_imanim PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET zym_imanim PROPERTY INTERPROCEDURAL_OPTIMIZATION_TINY TRUE)
+    endif()
+    target_compile_options(zym_imanim PRIVATE
+            $<IF:$<CONFIG:Release>,-flto,-flto=auto>)
+    if(NOT WIN32)
+        target_compile_options(zym_imanim PRIVATE -fno-pie)
+    endif()
+    # Silence ImAnim's own warnings the same way we do for ImGui / ImPlot.
+    target_compile_options(zym_imanim PRIVATE -w)
+    target_link_libraries(zym PRIVATE zym_imanim)
+    target_compile_definitions(zym PRIVATE ZYM_IMANIM_ENABLED=1)
+    message(STATUS ">> ZYM_UI: ON — vendored ImAnim (1.0.0) linked into zym via zym_imanim")
+    if(ZYM_LTO_OK)
+        message(STATUS ">> ZYM_UI: LTO + Release flags propagated to zym_imanim")
     endif()
 endif()
 

@@ -1,0 +1,84 @@
+// Basic SQLite example — file, :memory:, and Buffer round-trip.
+//
+// Mirrors better-sqlite3 usage closely:
+//   * SQLite.open(path) for on-disk
+//   * SQLite.open(":memory:") for in-memory
+//   * SQLite.open(buffer) to load a DB from a Buffer
+//   * db.prepare / stmt.run / stmt.get / stmt.all
+//   * db.transaction(fn) wrapper
+
+print("SQLite version: %v\n", SQLite.version)
+
+// --- in-memory DB ---------------------------------------------------------
+var db = SQLite.open(":memory:")
+print("memory: %v, name: %v, open: %v\n", db.memory(), db.name(), db.open())
+
+db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
+
+var insert = db.prepare("INSERT INTO users (name, age) VALUES (?, ?)")
+var info = insert.run("Alice", 30)
+print("inserted: changes=%v, lastInsertRowid=%v\n", info.changes, info.lastInsertRowid)
+
+insert.run("Bob", 25)
+insert.run("Carol", 42)
+
+// Named binding
+var insertN = db.prepare("INSERT INTO users (name, age) VALUES (@name, @age)")
+insertN.run({ name: "Dave", age: 18 })
+
+// get() — single row
+var byId = db.prepare("SELECT * FROM users WHERE id = ?")
+var row = byId.get(2)
+print("user 2: %v\n", row)
+
+// all() — list of rows
+var sel = db.prepare("SELECT name, age FROM users ORDER BY age")
+var rows = sel.all()
+print("by age: %v\n", rows)
+
+// pluck() — single column
+var names = db.prepare("SELECT name FROM users ORDER BY id")
+names.pluck(true)
+print("names: %v\n", names.all())
+
+// iterate() — streaming
+var iter = db.prepare("SELECT id, name FROM users ORDER BY id").iterate()
+var r = iter.next()
+while (r != null) {
+    print("  iter: id=%v name=%v\n", r.id, r.name)
+    r = iter.next()
+}
+
+// transaction() — auto BEGIN/COMMIT/ROLLBACK
+var bulkInsert = db.transaction(func(rows) {
+    var i = 0
+    while (i < length(rows)) {
+        insert.run(rows[i][0], rows[i][1])
+        i = i + 1
+    }
+})
+bulkInsert([["Eve", 35], ["Frank", 50]])
+print("after txn count: %v\n", db.prepare("SELECT COUNT(*) AS c FROM users").get().c)
+
+// --- buffer round-trip ----------------------------------------------------
+var snapshot = db.serialize()
+print("serialized size: %v bytes\n", snapshot.size())
+db.close()
+
+var db2 = SQLite.open(snapshot)
+var revived = db2.prepare("SELECT COUNT(*) AS c FROM users").get()
+print("revived count: %v\n", revived.c)
+
+// Mutate the revived DB and re-serialize.
+db2.exec("DELETE FROM users WHERE age < 30")
+var snapshot2 = db2.serialize()
+print("after delete -> serialized size: %v bytes\n", snapshot2.size())
+db2.close()
+
+// --- pragma ---------------------------------------------------------------
+var db3 = SQLite.open(":memory:")
+print("journal_mode (simple): %v\n", db3.pragma("journal_mode", { simple: true }))
+print("user_version full:    %v\n", db3.pragma("user_version"))
+db3.close()
+
+print("ok\n")

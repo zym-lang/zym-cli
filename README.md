@@ -175,6 +175,46 @@ cmake --build build --target zym
 
 Flags are build-time, not runtime — turning them off removes tooling surface, not language behavior. See [`zym_core/README.md`](zym_core/README.md#build-options) for the full flag table.
 
+### Packaging the Release CLI
+
+The `zym` binary that comes out of CMake is the **engine** — the VM, the natives, the compiler. The user-facing CLI (`-v` / `-h` / `-o` / `-r`, version string, packaging flow, etc.) is itself written in Zym and lives in [`cli/src/cli.zym`](cli/src/cli.zym). The shipped release artifacts are produced by a separate post-build packaging step that bundles that CLI script together with both platform runtimes — this is what enables cross-platform packing out of a single binary.
+
+There are two distinct build configurations of `zym`:
+
+- **Full build** (`RUNTIME_ONLY=OFF`, the default) — includes `full_executor`, can compile `.zym` source. This is what you use to *drive the packager*. An already-released `cli/bin/zym` from a prior build is equivalent and can be used to bootstrap the next one.
+- **Runtime-only build** (`RUNTIME_ONLY=ON`) — strips `full_executor` and only takes the bytecode/pack loader path in `main`. The output is emitted directly into `cli/runtimes/` under its platform name (`linux` or `windows.exe`). These are the *stubs* that get embedded inside the released binaries.
+
+The release workflow:
+
+1. **Build the runtime-only stubs for each target platform.** On the host that targets that platform:
+
+   ```text
+   # On Linux
+   cmake -B build-runtime -DCMAKE_BUILD_TYPE=Release -DRUNTIME_ONLY=ON
+   cmake --build build-runtime --target zym
+   # Produces cli/runtimes/linux
+
+   # On Windows (or via the mingw toolchain)
+   cmake -B build-runtime-win -DCMAKE_BUILD_TYPE=Release -DRUNTIME_ONLY=ON \
+         -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw64.cmake
+   cmake --build build-runtime-win --target zym
+   # Produces cli/runtimes/windows.exe
+   ```
+
+2. **Run the packager with a full `zym`** once both runtime stubs are in place. The packager is itself a Zym script ([`cli/makeCli.zym`](cli/makeCli.zym)) — it reads `cli/src/cli.zym`, compiles it, and emits the two release binaries:
+
+   ```text
+   cd cli
+   # Use a full build of zym (RUNTIME_ONLY=OFF) — NOT one of the runtime stubs
+   # in runtimes/, since those can't compile .zym source. A previously-released
+   # cli/bin/zym works just as well.
+   path/to/full/zym makeCli.zym
+   # Produces cli/bin/zym     (linux, with the windows runtime bundled inside)
+   # Produces cli/bin/zym.exe (windows, with the linux runtime bundled inside)
+   ```
+
+`cli/bin/zym` and `cli/bin/zym.exe` are the released artifacts. CMake intentionally does not run this step automatically — it has no way to know when both platform runtime stubs are ready, and it can't host a Zym interpreter to run the packager.
+
 ### Running Scripts
 
 Create `hello.zym`:

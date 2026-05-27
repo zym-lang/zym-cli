@@ -39,12 +39,6 @@ ZymValue nativeWebSocket_create(ZymVM* vm);
 ZymValue nativeAes_create(ZymVM* vm);
 ZymValue nativePack_create(ZymVM* vm);
 ZymValue nativeSqlite_create(ZymVM* vm);
-#ifdef ZYM_SDL_ENABLED
-ZymValue nativeSdl_create(ZymVM* vm);
-#endif
-#ifdef ZYM_UI_ENABLED
-ZymValue nativeUi_create(ZymVM* vm);
-#endif
 
 // `Zym` lives in src/natives/Zym/zym_native.hpp and has a different
 // signature (takes a `ZymCliVmCtx*` because it adopts ownership of

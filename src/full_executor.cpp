@@ -744,25 +744,14 @@ static int compile_source_to_bytecode(const char* source_file, char** out_byteco
 }
 
 static int dump_chunk_to_file(ZymChunk* chunk, const char* output_file) {
-    int stdout_fd = _dup(_fileno(stdout));
-    if (stdout_fd == -1) {
-        fprintf(stderr, "Error: Could not duplicate stdout.\n");
-        return 0;
-    }
-
-    FILE* file = freopen(output_file, "w", stdout);
+    FILE* file = fopen(output_file, "w");
     if (file == NULL) {
         fprintf(stderr, "Error: Could not redirect output to \"%s\".\n", output_file);
-        _close(stdout_fd);
         return 0;
     }
 
-    disassembleChunk(chunk, "chunk");
-
-    fflush(stdout);
-    _dup2(stdout_fd, _fileno(stdout));
-    _close(stdout_fd);
-    clearerr(stdout);
+    disassembleChunkToFile(chunk, "chunk", file);
+    fclose(file);
 
     return 1;
 }

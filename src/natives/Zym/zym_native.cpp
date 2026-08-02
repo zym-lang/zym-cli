@@ -34,6 +34,7 @@
 #include "zym/sourcemap.h"
 #include "zym/debug.h"
 
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,16 +42,10 @@
 #include <unordered_map>
 #include <vector>
 
-// Descriptor-level stdout capture for `disassembleChunk` (same shim
-// full_executor.cpp uses for its `--dump <file>` redirection).
-#ifndef _WIN32
-    #include <unistd.h>
-    #define _fileno fileno
-    #define _dup    dup
-    #define _dup2   dup2
-    #define _close  close
-#else
-    #include <io.h>
+// Capture stream support for `disassembleChunk`: POSIX builds render
+// into an in-memory stream; Windows builds go through a temp file in
+// the user temp dir (no memstream in the MS CRT).
+#ifdef _WIN32
     #ifndef WIN32_LEAN_AND_MEAN
         #define WIN32_LEAN_AND_MEAN
     #endif
@@ -520,23 +515,24 @@ ZymValue cv_deserializeChunk(ZymVM* parentVm, ZymValue context,
 //
 // Textual disassembly of a chunk — the same listing the C CLI's
 // `--dump` path emits (`full_executor.cpp` → `disassembleChunk`).
-// zym_core's disassembler only knows how to print to stdout (its
-// helpers and `printValue` are printf-based; even
-// `disassembleChunkToFile` still routes instruction lines through
-// printf), so the listing is captured by temporarily pointing
-// stdout's descriptor at an unnamed temp file — the same redirection
-// `dump_chunk_to_file` uses in full_executor.cpp — and handed to the
-// script as one string. Returning text rather than taking an output
-// path keeps this a single composable primitive: the script picks
-// the sink (Console.write, File.writeText, diffing in tests, ...).
+// Rendered through zym_core's `disassembleChunkToFile`: on POSIX into
+// an in-memory stream, on Windows (no memstream in the MS CRT) into a
+// delete-on-close temp file in the user temp dir. Returning text
+// rather than taking an output path keeps this a single composable
+// primitive: the script picks the sink (Console.write,
+// File.writeText, diffing in tests, ...).
 //
 // Contract: bad argument types raise a runtime error; environmental
-// capture failures (no writable temp dir, fd exhaustion) return null
-// so a script-level dump failure stays non-fatal — full_executor.cpp
+// capture failures (no writable temp dir, stream write errors,
+// listings too large for a script string) return null so a
+// script-level dump failure stays non-fatal — full_executor.cpp
 // likewise never lets a failed dump abort a combined `-o` request.
+// Detection is as good as the platform reports: a glibc memstream
+// drops output on mid-render ENOMEM without flagging the stream, so
+// that one case can slip through as a truncated listing.
 
-FILE* open_disasm_capture() {
 #ifdef _WIN32
+FILE* open_disasm_capture() {
     // tmpfile()/tmpfile_s both create in the volume root, which fails
     // for unprivileged users; build the capture file in the user temp
     // dir instead. CRT mode flag "D" deletes it when the FILE closes.
@@ -548,10 +544,8 @@ FILE* open_disasm_capture() {
     FILE* f = fopen(path, "w+bD");
     if (!f) remove(path);  // GetTempFileNameA pre-creates the file
     return f;
-#else
-    return tmpfile();
-#endif
 }
+#endif
 
 ZymValue cv_disassembleChunk(ZymVM* parentVm, ZymValue context,
                              ZymValue chunkV, ZymValue nameV) {
@@ -569,50 +563,64 @@ ZymValue cv_disassembleChunk(ZymVM* parentVm, ZymValue context,
         return ZYM_ERROR;
     }
 
+#ifndef _WIN32
+    char* mbuf = nullptr;
+    size_t msize = 0;
+    FILE* capture = open_memstream(&mbuf, &msize);
+    if (!capture) return zym_newNull();
+
+    disassembleChunkToFile(cr->chunk, name, capture);
+
+    int had_err = ferror(capture);
+    if (fclose(capture) != 0 || had_err || !mbuf ||
+        msize > (size_t)INT_MAX) {
+        free(mbuf);
+        return zym_newNull();
+    }
+    ZymValue out = zym_newStringN(parentVm, mbuf, (int)msize);
+    free(mbuf);
+    return out;
+#else
     FILE* capture = open_disasm_capture();
-    if (!capture) {
-        return zym_newNull();
-    }
+    if (!capture) return zym_newNull();
 
-    fflush(stdout);
-    int saved_stdout = _dup(_fileno(stdout));
-    if (saved_stdout == -1 ||
-        _dup2(_fileno(capture), _fileno(stdout)) == -1) {
-        if (saved_stdout != -1) _close(saved_stdout);
-        fclose(capture);
-        return zym_newNull();
-    }
+    disassembleChunkToFile(cr->chunk, name, capture);
 
-    disassembleChunk(cr->chunk, name);
-
-    fflush(stdout);
-    _dup2(saved_stdout, _fileno(stdout));
-    _close(saved_stdout);
-    clearerr(stdout);
-
-    // While redirected, stdout and `capture` shared one open file
-    // description, so the shared offset now sits at EOF; measure and
-    // rewind through `capture` itself.
+    fflush(capture);
     long size = -1;
-    if (fseek(capture, 0, SEEK_END) == 0) size = ftell(capture);
-    if (size < 0) {
+    if (!ferror(capture)) size = ftell(capture);
+    if (size < 0 || (unsigned long)size > (unsigned long)INT_MAX) {
         fclose(capture);
         return zym_newNull();
     }
 
-    std::string text;
-    text.resize((size_t)size);
+    // malloc, not std::string: the CLI builds with -fno-exceptions,
+    // so a failed resize() would abort instead of reporting null.
+    char* buf = (char*)malloc(size > 0 ? (size_t)size : 1);
+    if (!buf) {
+        fclose(capture);
+        return zym_newNull();
+    }
     size_t got = 0;
     if (size > 0) {
         if (fseek(capture, 0, SEEK_SET) != 0) {
+            free(buf);
             fclose(capture);
             return zym_newNull();
         }
-        got = fread(&text[0], 1, (size_t)size, capture);
+        got = fread(buf, 1, (size_t)size, capture);
+        if (got != (size_t)size && ferror(capture)) {
+            free(buf);
+            fclose(capture);
+            return zym_newNull();
+        }
     }
     fclose(capture);
 
-    return zym_newStringN(parentVm, text.data(), (int)got);
+    ZymValue out = zym_newStringN(parentVm, buf, (int)got);
+    free(buf);
+    return out;
+#endif
 }
 
 ZymValue cv_runChunk(ZymVM* parentVm, ZymValue context, ZymValue chunkV) {

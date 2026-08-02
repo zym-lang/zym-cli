@@ -214,6 +214,36 @@ func runBytecode(bytecode, scriptArgs)
     return null
 }
 
+func dumpBytecode(bytecode, dumpPath)
+{
+    var vm = Zym.newVM()
+    vm.registerCliNative("ALL")
+
+    var chunk = vm.newChunk()
+    if (vm.deserializeChunk(chunk, bytecode) != Zym.STATUS.OK) {
+        print("Error: failed to deserialize bytecode.")
+        return null
+    }
+
+    var text = vm.disassembleChunk(chunk, "chunk")
+    if (text == null) {
+        print("Error: Failed to capture disassembly.")
+        return null
+    }
+
+    if (dumpPath) {
+        if (!File.writeText(dumpPath, text)) {
+            print("Error: Failed to write dump file: '%v'", dumpPath)
+            return null
+        }
+        print("Disassembly written to: %v", dumpPath)
+    } else {
+        Console.write(text)
+    }
+
+    return true
+}
+
 func packBinary(fileName, outPath, stubPath, bytecode)
 {
     var ok = Pack.build({
@@ -481,19 +511,34 @@ func main(argv)
                             argMap.runtimePath = shift(cliArgs); i++
                             if (!File.exists(argMap.runtimePath)) { print("Error: -r/--runtime file not found: '%v'", argMap.runtimePath); return null }
                         } else { print("Error: Multiple -r/--runtime args not allowed."); return null }
+                    } else if (arg == "--dump") {
+                        if (!argMap.hasDump) {
+                            argMap.hasDump = true
+                            if (length(cliArgs) > 0 && !startsWith(cliArgs[0], "-")) {
+                                argMap.dumpPath = shift(cliArgs); i++
+                            }
+                        } else { print("Error: Multiple --dump args not allowed."); return null }
                     } else {
                         print("Error: unknown argument: '%v'", arg)
                         return null
                     }
                 }
 
-                if (argMap.hasOutput) {
+                if (argMap.hasDump || argMap.hasOutput) {
                     if (source && !bytecode) {
                         bytecode = compileSource(fileName, source)
                         if (!bytecode) { return null }
                         print("ByteCode compiled: %v bytes.", bytecode.size())
                     }
+                }
 
+                if (argMap.hasDump) {
+                    // Parity with the C CLI: a failed dump reports its error but
+                    // does not block a combined -o/--output request.
+                    dumpBytecode(bytecode, argMap.dumpPath)
+                }
+
+                if (argMap.hasOutput) {
                     switch (Path.extension(argMap.outPath)) {
                         case "zbc": {
                             if(!File.writeBytes(argMap.outPath, bytecode)) {
@@ -600,6 +645,11 @@ func printUseage()
     print("  |                                                                                  |")
     print("  |  Cross-Platform Packing (-r, --runtime):                                         |")
     print("  |    zym <file> -o <out> -r <runtime>           Use explicit runtime for output    |")
+    print("  |                                                                                  |")
+    print("  |  Development Tools (--dump):                                                     |")
+    print("  |    zym <file.[zym|zbc|zpk]> --dump            Disassemble bytecode to console    |")
+    print("  |    zym <file.[zym|zbc|zpk]> --dump <out.txt>  Disassemble bytecode to file       |")
+    print("  |    zym <file.zym> --dump <out.txt> -o <out>   Disassemble and pack in one call   |")
     print("  |                                                                                  |")
     print("  ====================================================================================")
 }

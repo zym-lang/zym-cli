@@ -32,12 +32,30 @@
 
 #include "zym/diagnostics.h"
 #include "zym/sourcemap.h"
+#include "zym/debug.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// Descriptor-level stdout capture for `disassembleChunk` (same shim
+// full_executor.cpp uses for its `--dump <file>` redirection).
+#ifndef _WIN32
+    #include <unistd.h>
+    #define _fileno fileno
+    #define _dup    dup
+    #define _dup2   dup2
+    #define _close  close
+#else
+    #include <io.h>
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+#endif
 
 namespace {
 
@@ -494,6 +512,107 @@ ZymValue cv_deserializeChunk(ZymVM* parentVm, ZymValue context,
     ZymStatus st = zym_deserializeChunk(h->child, cr->chunk, data, size);
     freeze(h);
     return zym_newNumber((double)st);
+}
+
+// =============================================================================
+// vm.disassembleChunk(chunk, name) -> string
+// =============================================================================
+//
+// Textual disassembly of a chunk — the same listing the C CLI's
+// `--dump` path emits (`full_executor.cpp` → `disassembleChunk`).
+// zym_core's disassembler only knows how to print to stdout (its
+// helpers and `printValue` are printf-based; even
+// `disassembleChunkToFile` still routes instruction lines through
+// printf), so the listing is captured by temporarily pointing
+// stdout's descriptor at an unnamed temp file — the same redirection
+// `dump_chunk_to_file` uses in full_executor.cpp — and handed to the
+// script as one string. Returning text rather than taking an output
+// path keeps this a single composable primitive: the script picks
+// the sink (Console.write, File.writeText, diffing in tests, ...).
+//
+// Contract: bad argument types raise a runtime error; environmental
+// capture failures (no writable temp dir, fd exhaustion) return null
+// so a script-level dump failure stays non-fatal — full_executor.cpp
+// likewise never lets a failed dump abort a combined `-o` request.
+
+FILE* open_disasm_capture() {
+#ifdef _WIN32
+    // tmpfile()/tmpfile_s both create in the volume root, which fails
+    // for unprivileged users; build the capture file in the user temp
+    // dir instead. CRT mode flag "D" deletes it when the FILE closes.
+    char dir[MAX_PATH + 1];
+    char path[MAX_PATH + 1];
+    DWORD n = GetTempPathA(sizeof(dir), dir);
+    if (n == 0 || n >= sizeof(dir)) return nullptr;
+    if (GetTempFileNameA(dir, "zym", 0, path) == 0) return nullptr;
+    FILE* f = fopen(path, "w+bD");
+    if (!f) remove(path);  // GetTempFileNameA pre-creates the file
+    return f;
+#else
+    return tmpfile();
+#endif
+}
+
+ZymValue cv_disassembleChunk(ZymVM* parentVm, ZymValue context,
+                             ZymValue chunkV, ZymValue nameV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    auto* cr = require_chunk(parentVm, h, chunkV);
+    if (!cr) return ZYM_ERROR;
+
+    const char* name = "chunk";
+    if (zym_isString(nameV)) {
+        name = zym_asCString(nameV);
+    } else if (!zym_isNull(nameV)) {
+        zym_runtimeError(parentVm,
+            "disassembleChunk(chunk, name): name must be a string or null");
+        return ZYM_ERROR;
+    }
+
+    FILE* capture = open_disasm_capture();
+    if (!capture) {
+        return zym_newNull();
+    }
+
+    fflush(stdout);
+    int saved_stdout = _dup(_fileno(stdout));
+    if (saved_stdout == -1 ||
+        _dup2(_fileno(capture), _fileno(stdout)) == -1) {
+        if (saved_stdout != -1) _close(saved_stdout);
+        fclose(capture);
+        return zym_newNull();
+    }
+
+    disassembleChunk(cr->chunk, name);
+
+    fflush(stdout);
+    _dup2(saved_stdout, _fileno(stdout));
+    _close(saved_stdout);
+    clearerr(stdout);
+
+    // While redirected, stdout and `capture` shared one open file
+    // description, so the shared offset now sits at EOF; measure and
+    // rewind through `capture` itself.
+    long size = -1;
+    if (fseek(capture, 0, SEEK_END) == 0) size = ftell(capture);
+    if (size < 0) {
+        fclose(capture);
+        return zym_newNull();
+    }
+
+    std::string text;
+    text.resize((size_t)size);
+    size_t got = 0;
+    if (size > 0) {
+        if (fseek(capture, 0, SEEK_SET) != 0) {
+            fclose(capture);
+            return zym_newNull();
+        }
+        got = fread(&text[0], 1, (size_t)size, capture);
+    }
+    fclose(capture);
+
+    return zym_newStringN(parentVm, text.data(), (int)got);
 }
 
 ZymValue cv_runChunk(ZymVM* parentVm, ZymValue context, ZymValue chunkV) {
@@ -1469,6 +1588,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mComp     = MK_CLOSURE("compile(source, chunk, sourceMap, entryFile, opts)", cv_compile); zym_pushRoot(parentVm, mComp);
     ZymValue mSer      = MK_CLOSURE("serializeChunk(chunk, opts)", cv_serializeChunk);           zym_pushRoot(parentVm, mSer);
     ZymValue mDes      = MK_CLOSURE("deserializeChunk(chunk, bytes)", cv_deserializeChunk);      zym_pushRoot(parentVm, mDes);
+    ZymValue mDisCh    = MK_CLOSURE("disassembleChunk(chunk, name)", cv_disassembleChunk);       zym_pushRoot(parentVm, mDisCh);
     ZymValue mRun      = MK_CLOSURE("runChunk(chunk)", cv_runChunk);                             zym_pushRoot(parentVm, mRun);
     ZymValue mRunSrc   = MK_CLOSURE("run(source)", cv_run);                                      zym_pushRoot(parentVm, mRunSrc);
     ZymValue mRunBc    = MK_CLOSURE("runBytecode(bytes)", cv_runBytecode);                       zym_pushRoot(parentVm, mRunBc);
@@ -1507,6 +1627,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "compile",            mComp);
     zym_mapSet(parentVm, obj, "serializeChunk",     mSer);
     zym_mapSet(parentVm, obj, "deserializeChunk",   mDes);
+    zym_mapSet(parentVm, obj, "disassembleChunk",   mDisCh);
     zym_mapSet(parentVm, obj, "runChunk",           mRun);
     zym_mapSet(parentVm, obj, "run",                mRunSrc);
     zym_mapSet(parentVm, obj, "runBytecode",        mRunBc);
@@ -1529,8 +1650,8 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, mlObj, "getStack",  mMlStack);
     zym_mapSet(parentVm, obj, "moduleLoader", mlObj);
 
-    // ctx + 24 closures + 2 moduleLoader closures + obj + mlObj = 29
-    for (int i = 0; i < 29; i++) zym_popRoot(parentVm);
+    // ctx + 25 closures + 2 moduleLoader closures + obj + mlObj = 30
+    for (int i = 0; i < 30; i++) zym_popRoot(parentVm);
     return obj;
 }
 

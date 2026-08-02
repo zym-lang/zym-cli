@@ -533,8 +533,6 @@ func main(argv)
                 }
 
                 if (argMap.hasDump) {
-                    // Parity with the C CLI: a failed dump reports its error but
-                    // does not block a combined -o/--output request.
                     dumpBytecode(bytecode, argMap.dumpPath)
                 }
 

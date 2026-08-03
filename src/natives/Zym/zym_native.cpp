@@ -442,14 +442,40 @@ ZymValue cv_compile(ZymVM* parentVm, ZymValue context,
     }
 
     ZymCompilerConfig config = { /*include_line_info=*/ true };
+    const char** keep_names = nullptr;
+    int keep_count = 0;
     if (zym_isMap(optsV)) {
         ZymValue v = zym_mapGet(parentVm, optsV, "includeLineInfo");
         if (v != ZYM_ERROR && zym_isBool(v)) config.include_line_info = zym_asBool(v);
+        v = zym_mapGet(parentVm, optsV, "stripSymbols");
+        if (v != ZYM_ERROR && zym_isBool(v)) config.strip_symbols = zym_asBool(v);
+        v = zym_mapGet(parentVm, optsV, "keepNames");
+        if (v != ZYM_ERROR && zym_isList(v)) {
+            int n = zym_listLength(v);
+            if (n > 0) {
+                keep_names = (const char**)std::malloc(sizeof(const char*) * (size_t)n);
+                if (keep_names) {
+                    for (int i = 0; i < n; i++) {
+                        ZymValue e = zym_listGet(parentVm, v, i);
+                        if (e != ZYM_ERROR && zym_isString(e)) {
+                            keep_names[keep_count++] = zym_asCString(e);
+                        }
+                    }
+                } else {
+                    // Fail safe: an unstripped build beats a stripped
+                    // one whose keep list was silently lost.
+                    config.strip_symbols = false;
+                }
+            }
+        }
     }
+    config.keep_names = keep_names;
+    config.keep_name_count = keep_count;
 
     const char* src   = zym_asCString(srcV);
     const char* entry = zym_asCString(entryV);
     ZymStatus st = zym_compile(h->child, src, cr->chunk, sm, entry, config, nullptr);
+    std::free((void*)keep_names);
     freeze(h);
     return zym_newNumber((double)st);
 }

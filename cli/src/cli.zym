@@ -73,7 +73,11 @@ func compileSource(fileName, source, strip)
     if (loaded.status == Zym.STATUS.OK) {
         var chunk = vm.newChunk()
         var entryName = strip ? hashEntryName(fileName) : fileName
-        var status = vm.compile(loaded.combinedSource, chunk, loaded.combinedSourceMap, entryName, { includeLineInfo: !strip })
+        var status = vm.compile(loaded.combinedSource, chunk, loaded.combinedSourceMap, entryName, {
+            includeLineInfo: !strip,
+            stripSymbols: strip == true,
+            keepNames: ["main", "cli"],
+        })
         if (status == Zym.STATUS.OK) {
             //print("COMPILATION SUCCEEDED")
             var zbcBuf = vm.serializeChunk(chunk, { includeLineInfo: !strip }).bytes

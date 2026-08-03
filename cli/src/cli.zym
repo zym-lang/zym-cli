@@ -30,7 +30,31 @@ func readBinaryFile(path)
     return buf
 }
 
-func compileSource(fileName, source)
+// djb2 over the entry name's utf-8 bytes as lowercase hex, matching
+// full_executor.cpp's strip-mode hashing: the serializer always embeds
+// the entry name in bytecode, so stripped output must not leak it.
+func hashEntryName(name)
+{
+    var bytes = Buffer.fromString(name)
+    var count = bytes.size()
+    var h = 0
+    for (var i = 0; i < count; i++) {
+        h = h * 33 + bytes.get(i)
+        h = h - floor(h / 4294967296) * 4294967296
+    }
+    if (h == 0) { return "0" }
+
+    var digits = "0123456789abcdef"
+    var out = ""
+    while (h > 0) {
+        var d = h - floor(h / 16) * 16
+        out = slice(digits, d, d + 1) + out
+        h = floor(h / 16)
+    }
+    return out
+}
+
+func compileSource(fileName, source, strip)
 {
     var vm = Zym.newVM()
     vm.registerCliNative("ALL")
@@ -43,15 +67,16 @@ func compileSource(fileName, source)
     var ps = vm.preprocess(source, sm, fid)
 
     var loaded = vm.loadModules(ps.source, sm, fileName, readAndPreprocessCallback, {
-        debugNames: true,
+        debugNames: !strip,
         resolveCallback,
     })
     if (loaded.status == Zym.STATUS.OK) {
         var chunk = vm.newChunk()
-        var status = vm.compile(loaded.combinedSource, chunk, loaded.combinedSourceMap, fileName, { includeLineInfo: true })
+        var entryName = strip ? hashEntryName(fileName) : fileName
+        var status = vm.compile(loaded.combinedSource, chunk, loaded.combinedSourceMap, entryName, { includeLineInfo: !strip })
         if (status == Zym.STATUS.OK) {
             //print("COMPILATION SUCCEEDED")
-            var zbcBuf = vm.serializeChunk(chunk, { includeLineInfo: true }).bytes
+            var zbcBuf = vm.serializeChunk(chunk, { includeLineInfo: !strip }).bytes
             //print(" > bytecode size: %v bytes", zbcBuf.size())
             return zbcBuf
         } else {
@@ -451,9 +476,9 @@ func main(argv)
                     }
 
                     if (!source) { return null }
-                    bytecode = compileSource(fileName, source)
+                    bytecode = compileSource(fileName, source, false)
                     if (!bytecode) { return null }
-                    
+
                     var vm = Zym.newVM()
                     vm.registerCliNative("ALL")
                     var chunk = vm.newChunk()
@@ -484,7 +509,7 @@ func main(argv)
 
             if (length(cliArgs) == 0) {
                 if (source && !bytecode) {
-                    bytecode = compileSource(fileName, source)
+                    bytecode = compileSource(fileName, source, false)
                     if (!bytecode) { return null }
                 }
                 runBytecode(bytecode, scriptArgs)
@@ -518,6 +543,10 @@ func main(argv)
                                 argMap.dumpPath = shift(cliArgs); i++
                             }
                         } else { print("Error: Multiple --dump args not allowed."); return null }
+                    } else if (arg == "--strip") {
+                        if (!argMap.hasStrip) {
+                            argMap.hasStrip = true
+                        } else { print("Error: Multiple --strip args not allowed."); return null }
                     } else {
                         print("Error: unknown argument: '%v'", arg)
                         return null
@@ -526,10 +555,18 @@ func main(argv)
 
                 if (argMap.hasDump || argMap.hasOutput) {
                     if (source && !bytecode) {
-                        bytecode = compileSource(fileName, source)
+                        bytecode = compileSource(fileName, source, argMap.hasStrip)
                         if (!bytecode) { return null }
                         print("ByteCode compiled: %v bytes.", bytecode.size())
                     }
+                } else {
+                    if (argMap.hasRuntime) { print("Error: -r/--runtime requires -o/--output."); return null }
+                    if (source && !bytecode) {
+                        bytecode = compileSource(fileName, source, argMap.hasStrip)
+                        if (!bytecode) { return null }
+                    }
+                    runBytecode(bytecode, scriptArgs)
+                    return null
                 }
 
                 if (argMap.hasDump) {
@@ -644,9 +681,11 @@ func printUseage()
     print("  |  Cross-Platform Packing (-r, --runtime):                                         |")
     print("  |    zym <file> -o <out> -r <runtime>           Use explicit runtime for output    |")
     print("  |                                                                                  |")
-    print("  |  Development Tools (--dump):                                                     |")
+    print("  |  Development Tools (--dump, --strip):                                            |")
     print("  |    zym <file.[zym|zbc|zpk]> --dump            Disassemble bytecode to console    |")
     print("  |    zym <file.[zym|zbc|zpk]> --dump <out.txt>  Disassemble bytecode to file       |")
+    print("  |    zym <file.zym> --strip                     Run with debug info stripped       |")
+    print("  |    zym <file.zym> --strip -o <out.zbc>        Strip debug info (smaller output)  |")
     print("  |    zym <file.zym> --dump <out.txt> -o <out>   Disassemble and pack in one call   |")
     print("  |                                                                                  |")
     print("  ====================================================================================")

@@ -99,7 +99,7 @@ available when you need finer control.
 | --- | --- | --- |
 | `Zym.cliNatives()` | `[string]` | The list of native names the calling VM is allowed to grant to its children, in grant order (catalog declaration order at the root). `Buffer` is omitted (it is universal, not grantable). |
 | `Zym.newVM()` | `ChildVM` | Allocates a fresh in-process VM. The returned value is a struct of method closures (see below) bound to the new VM. The child's allocator is inherited from the parent (not script-selectable). The child starts with `Buffer` auto-installed and an empty grantable set; the parent must explicitly grant any other natives via `registerCliNative` *before* the child enters the execution phase. |
-| `Zym.STATUS` | `map` | Status code constants returned by pipeline calls: `OK`, `COMPILE_ERROR`, `RUNTIME_ERROR`, `YIELD`. |
+| `Zym.STATUS` | `map` | Status code constants returned by pipeline calls: `OK`, `COMPILE_ERROR`, `RUNTIME_ERROR`, `YIELD`, `ABORTED`. `ABORTED` means the child was stopped by its host (a watchdog expiring or `requestStop()`), and is deliberately distinct from `RUNTIME_ERROR` so a parent can tell "I stopped it" from "it failed on its own". |
 
 ---
 
@@ -140,8 +140,9 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.newChunk()` | `Chunk` | Allocates a fresh chunk on the child. Same lifetime semantics as `SourceMap`. |
 | `cv.registerSourceFile(path, source)` | `int` (fileId) | Registers a buffer with the child's file registry. The returned `fileId` is what `preprocess` and diagnostics use to refer to this source. |
 | `cv.preprocess(source, sourceMap, fileId)` | `{ source, status }` | Runs the preprocessor. On success, `source` is the expanded buffer and `status == Zym.STATUS.OK`; on failure `source` is `null` and the status is non-`OK` (drain via `diagnostics()`). |
-| `cv.compile(source, chunk, sourceMap, entryFile, opts)` | `int` (status) | Compiles `source` into `chunk`. `sourceMap` may be `null` for raw text. `opts.includeLineInfo` (default `true`) controls whether line info is embedded. **Flips the child into execution phase.** |
+| `cv.compile(source, chunk, sourceMap, entryFile, opts)` | `int` (status) | Compiles `source` into `chunk`. `sourceMap` may be `null` for raw text. `opts.includeLineInfo` (default `true`) controls whether line info is embedded. `opts.stripSymbols` (default `false`) renames every global, function, and struct/enum type name the unit defines to compact per-unit symbols in the emitted bytecode; names that resolve to a native, and anything data-bearing (map keys, struct fields, enum variants, string literals), are never touched. `opts.keepNames` (a list of base names, e.g. `["main"]`) opts specific names out of the rename so the host can still reach its entry points. **Flips the child into execution phase.** |
 | `cv.loadModules(source, sourceMap, entryFile, callback, opts)` | `{ status, combinedSource, combinedSourceMap, modulePaths }` or `{ status, error }` | Multi-file compile. The parent `callback(path)` mirrors the C `readAndPreprocessCallback`: it must return `{ source, sourceMap, fileId }` for each imported module (the per-module `sourceMap` is the one produced by `preprocess` for *that module's raw source*), or `null` to signal a missing file. The native trampoline deep-clones the per-module SourceMap into the child VM so the parent wrapper retains ownership safely. On success, returns the combined preprocessed source together with the **combined** `SourceMap` (`combinedSourceMap`) — that's the map that must be passed to `compile`, not the entry-only map. `opts.resolveCallback` (optional closure `func(spec, importer) -> string \| null`) installs a resolver hook that runs **before** any path math (no directory join, no `normalize_path`) and **before** the loader's cycle detector and module cache. It is invoked with the raw import `spec` exactly as it appeared in source (e.g. `"@/foo.zym"`, `"./bar.zym"`, `"std/json"`) and the canonical path of the `importer` (or `null` when resolving the entry module's own deps). Returning a non-null string makes that string the canonical key the loader uses for cycle detection, caching, the subsequent `read_callback(path)` argument, and the `importer` of any transitive imports. Returning `null` (or omitting the option) falls back to the loader's default `resolve_module_path(importer_dir, spec)` for that spec — byte-identical to the no-resolver path. See [Resolve callback](#resolve-callback). |
+| `cv.disassembleChunk(chunk, name)` | `string` | Human-readable disassembly of a compiled or deserialized chunk, the same listing `zym <file> --dump` produces. `name` labels the top-level chunk in the output (pass `null` for the default `"chunk"`). Returns `null` if the listing could not be captured (an environmental failure such as an unwritable temp dir), so a failed dump never aborts a caller mid-pipeline. |
 | `cv.serializeChunk(chunk, opts)` | `{ status, bytes }` | Serializes a compiled chunk to a `Buffer` of `.zbc` bytes. `opts.includeLineInfo` mirrors compile. |
 | `cv.deserializeChunk(chunk, bytes)` | `int` (status) | Loads `.zbc` bytes (a `Buffer`) into a freshly-allocated chunk. **Flips the child into execution phase.** |
 | `cv.runChunk(chunk)` | `int` (status) | Runs a compiled or deserialized chunk on the child. Auto-loops on `YIELD`. **Flips the child into execution phase.** |
@@ -151,6 +152,29 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.callv(name, ...args)` | `int` (status) | Positional-args sibling to `cv.call`. `vm.callv("greet", "ada")` is equivalent to `vm.call("greet", ["ada"])`, just spelled with positional args at the call site rather than an explicit list. Both write to the same backing slot, so `cv.callResult()` reads the result of whichever was used most recently. Mirrors the C `zym_callv` / `zym_call` split. |
 | `cv.callResult()` | `value` | Returns the marshalled return value of the most recent successful `cv.call(...)` / `cv.callv(...)`. Lists, maps, structs, enums, Buffers, and closures (wrapped on the parent side) all round-trip back. |
 | `cv.getFunc(name)` | `callable` or `null` | Returns a parent-side callable that forwards into the child function set named `name` (every fixed overload + any variadic, with overload resolution performed by the child per call). Invoking it returns the marshalled value directly — no `callResult` step needed. Returns `null` if no such name exists on the child. **Identity-stable:** calling `getFunc(name)` twice on the same VM returns the same callable. |
+
+### Sandbox controls
+
+The parent is the **host** of a child VM, and gets the same guarantees a C
+embedder does: a child can always be stopped, no matter what it does. These
+are the resource half of the sandbox; `registerCliNative` is the capability
+half.
+
+Both mechanisms are deliberately **abort-only** — they take no callback. A
+watchdog that called back into the child would be something the child could
+intercept, mishandle, or loop inside. On expiry the child unwinds to
+`Zym.STATUS.ABORTED` with no diagnostic pushed and no script-visible handler
+run, so it cannot observe or block its own termination.
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `cv.setWatchdog(instructions)` | `int` (id) | Aborts the child once it executes `instructions` more instructions, rearming each time. Registered non-maskable, so `Preempt.shield(...)` inside the child does **not** suppress it. Returns an id for `clearWatchdog`, or raises if the child's preemption table is full. |
+| `cv.clearWatchdog(id)` | `bool` | Removes a watchdog previously returned by `setWatchdog`. `false` if the id is unknown. |
+| `cv.requestStop()` | `null` | Asks the child to stop at its next instruction. Sticky and unmaskable: it is checked before any masking, so a shield, an in-flight preempt callback, or an empty preemption table cannot suppress it. Not cleared automatically. |
+| `cv.stopRequested()` | `bool` | Whether a stop is pending on the child. |
+| `cv.clearStop()` | `null` | Clears a pending stop so the child VM can be reused. |
+
+Note that a stop is *per-VM*: stopping a child leaves the parent running.
 
 ### Lifecycle
 
@@ -1038,6 +1062,112 @@ print(bump())                        // 1
 print(bump())                        // 2
 print(bump())                        // 3
 ```
+
+---
+
+### Sandboxing untrusted code
+
+The two halves of the sandbox: `registerCliNative` decides what the child
+*can reach*, `setWatchdog` decides how long it *can run*. The child below
+loops forever and wraps itself in `Preempt.shield(...)`, which suppresses its
+own preemption entries — the watchdog is registered non-maskable, so it
+fires anyway.
+
+```zym
+var vm = Zym.newVM()
+vm.registerCliNative("print")          // capability half: only `print`
+
+var untrusted = "func spin(){ var i = 0\n while(true){ i = i + 1 }\n }\nPreempt.shield(spin)"
+
+var chunk = vm.newChunk()
+vm.compile(untrusted, chunk, null, "untrusted.zym", {})
+
+var wd = vm.setWatchdog(1000000)       // resource half: 1M instructions
+var status = vm.runChunk(chunk)
+
+if (status == Zym.STATUS.ABORTED) {
+    print("child exceeded its budget and was stopped")
+} else if (status != Zym.STATUS.OK) {
+    print("child failed on its own")
+}
+vm.clearWatchdog(wd)
+```
+
+```
+child exceeded its budget and was stopped
+```
+
+The parent keeps running: a stop is per-VM. Testing `ABORTED` separately
+from `RUNTIME_ERROR` is what lets you distinguish "I killed it" from "it
+threw", which matters when you are reporting back to whoever supplied the
+code.
+
+For an open-ended run where the deadline is not known up front, drive it
+from the outside instead:
+
+```zym
+vm.requestStop()                       // sticky, unmaskable
+print("%v", vm.stopRequested())        // true
+vm.clearStop()                         // before reusing the VM
+```
+
+---
+
+### Stripping symbols from child bytecode
+
+`stripSymbols` renames everything the unit defines; `keepNames` carves out
+the entry points the host still needs to call.
+
+```zym
+var vm = Zym.newVM()
+var src = "func helperName(n){ return n * 2 }\nfunc main(){ return helperName(21) }"
+
+var chunk = vm.newChunk()
+vm.compile(src, chunk, null, "app.zym", {
+    includeLineInfo: false,
+    stripSymbols: true,
+    keepNames: ["main"],
+})
+
+vm.runChunk(chunk)
+print("kept name callable: %v", vm.hasFunc("main"))        // true
+print("renamed name gone:  %v", !vm.hasFunc("helperName")) // true
+vm.call("main", [])
+print("still computes:     %v", vm.callResult())           // 42
+```
+
+Renaming is name-only: the instruction stream is byte-for-byte identical to
+an unstripped build, and calls still resolve because both the definition and
+every reference are rewritten together. Anything data-bearing survives, so
+map keys, struct fields, and enum variants read the same as before.
+
+---
+
+### Disassembling a child chunk
+
+Same listing as `zym <file> --dump`, returned as a string so the caller
+picks the destination.
+
+```zym
+var vm = Zym.newVM()
+var chunk = vm.newChunk()
+vm.compile("func f(a){ return a + 1 }", chunk, null, "f.zym", {})
+
+var listing = vm.disassembleChunk(chunk, "f")
+if (listing != null) {
+    print("%v", listing)
+}
+```
+
+```
+== f ==
+0000    1 LOAD_CONST       R0 ,    1 'null'
+...
+```
+
+Pass `null` as the name for the default label. A `null` return means the
+listing could not be captured, which is an environmental failure rather than
+a problem with the chunk.
 
 ---
 

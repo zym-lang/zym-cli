@@ -66,6 +66,10 @@ const StatusEntry kStatusEntries[] = {
     { "COMPILE_ERROR",  ZYM_STATUS_COMPILE_ERROR },
     { "RUNTIME_ERROR",  ZYM_STATUS_RUNTIME_ERROR },
     { "YIELD",          ZYM_STATUS_YIELD },
+    // A child VM stopped by the host (watchdog expiry or requestStop).
+    // Distinct from RUNTIME_ERROR so a parent can tell "I killed it" from
+    // "it failed on its own".
+    { "ABORTED",        ZYM_STATUS_ABORTED },
 };
 
 // =============================================================================
@@ -647,6 +651,70 @@ ZymValue cv_disassembleChunk(ZymVM* parentVm, ZymValue context,
     free(buf);
     return out;
 #endif
+}
+
+// =============================================================================
+// Sandbox controls: the parent is the HOST of the child VM
+// =============================================================================
+//
+// A parent script that runs untrusted code in a child VM needs the same
+// guarantee a C embedder gets: the child can be stopped regardless of what
+// it does. These are deliberately abort-only (no callback): a watchdog that
+// called back into the child would be something the child could intercept
+// or loop inside.
+
+ZymValue cv_setWatchdog(ZymVM* parentVm, ZymValue context, ZymValue sliceV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isNumber(sliceV)) {
+        zym_runtimeError(parentVm,
+            "setWatchdog(instructions): expects a number");
+        return ZYM_ERROR;
+    }
+    int slice = (int)zym_asNumber(sliceV);
+    if (slice < 1) {
+        zym_runtimeError(parentVm,
+            "setWatchdog(instructions): must be at least 1");
+        return ZYM_ERROR;
+    }
+    // No callback and no MASKABLE flag: the child cannot suppress this with
+    // Preempt.shield(), and there is nothing for it to intercept.
+    ZymPreemptId id = zym_preemptRegister(h->child, slice, zym_newNull(), 0);
+    if (id == 0) {
+        zym_runtimeError(parentVm,
+            "setWatchdog: no free preemption slots (max %d)",
+            zym_preemptCapacity());
+        return ZYM_ERROR;
+    }
+    return zym_newNumber((double)id);
+}
+
+ZymValue cv_clearWatchdog(ZymVM* parentVm, ZymValue context, ZymValue idV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isNumber(idV)) return zym_newBool(false);
+    return zym_newBool(
+        zym_preemptUnregister(h->child, (ZymPreemptId)zym_asNumber(idV)));
+}
+
+ZymValue cv_requestStop(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    zym_requestStop(h->child);
+    return zym_newNull();
+}
+
+ZymValue cv_clearStop(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    zym_clearStop(h->child);
+    return zym_newNull();
+}
+
+ZymValue cv_stopRequested(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    return zym_newBool(zym_stopRequested(h->child));
 }
 
 ZymValue cv_runChunk(ZymVM* parentVm, ZymValue context, ZymValue chunkV) {
@@ -1624,6 +1692,11 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mDes      = MK_CLOSURE("deserializeChunk(chunk, bytes)", cv_deserializeChunk);      zym_pushRoot(parentVm, mDes);
     ZymValue mDisCh    = MK_CLOSURE("disassembleChunk(chunk, name)", cv_disassembleChunk);       zym_pushRoot(parentVm, mDisCh);
     ZymValue mRun      = MK_CLOSURE("runChunk(chunk)", cv_runChunk);                             zym_pushRoot(parentVm, mRun);
+    ZymValue mWatch    = MK_CLOSURE("setWatchdog(instructions)", cv_setWatchdog);                 zym_pushRoot(parentVm, mWatch);
+    ZymValue mUnwatch  = MK_CLOSURE("clearWatchdog(id)", cv_clearWatchdog);                       zym_pushRoot(parentVm, mUnwatch);
+    ZymValue mReqStop  = MK_CLOSURE("requestStop()", cv_requestStop);                             zym_pushRoot(parentVm, mReqStop);
+    ZymValue mClrStop  = MK_CLOSURE("clearStop()", cv_clearStop);                                 zym_pushRoot(parentVm, mClrStop);
+    ZymValue mStopped  = MK_CLOSURE("stopRequested()", cv_stopRequested);                         zym_pushRoot(parentVm, mStopped);
     ZymValue mRunSrc   = MK_CLOSURE("run(source)", cv_run);                                      zym_pushRoot(parentVm, mRunSrc);
     ZymValue mRunBc    = MK_CLOSURE("runBytecode(bytes)", cv_runBytecode);                       zym_pushRoot(parentVm, mRunBc);
     ZymValue mCall     = MK_CLOSURE("call(name, args)", cv_call);                                zym_pushRoot(parentVm, mCall);
@@ -1663,6 +1736,11 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "deserializeChunk",   mDes);
     zym_mapSet(parentVm, obj, "disassembleChunk",   mDisCh);
     zym_mapSet(parentVm, obj, "runChunk",           mRun);
+    zym_mapSet(parentVm, obj, "setWatchdog",        mWatch);
+    zym_mapSet(parentVm, obj, "clearWatchdog",      mUnwatch);
+    zym_mapSet(parentVm, obj, "requestStop",        mReqStop);
+    zym_mapSet(parentVm, obj, "clearStop",          mClrStop);
+    zym_mapSet(parentVm, obj, "stopRequested",      mStopped);
     zym_mapSet(parentVm, obj, "run",                mRunSrc);
     zym_mapSet(parentVm, obj, "runBytecode",        mRunBc);
     zym_mapSet(parentVm, obj, "call",               mCall);
@@ -1684,8 +1762,8 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, mlObj, "getStack",  mMlStack);
     zym_mapSet(parentVm, obj, "moduleLoader", mlObj);
 
-    // ctx + 25 closures + 2 moduleLoader closures + obj + mlObj = 30
-    for (int i = 0; i < 30; i++) zym_popRoot(parentVm);
+    // ctx + 30 closures + 2 moduleLoader closures + obj + mlObj = 35
+    for (int i = 0; i < 35; i++) zym_popRoot(parentVm);
     return obj;
 }
 

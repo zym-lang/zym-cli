@@ -165,7 +165,9 @@ static int run_source_entry(const char* source, size_t source_size,
     while (result == ZYM_STATUS_YIELD) {
         result = zym_resume(vm);
     }
-    if (result != ZYM_STATUS_OK) {
+    if (result == ZYM_STATUS_ABORTED) {
+        fprintf(stderr, "Error: Execution stopped by the host.\n");
+    } else if (result != ZYM_STATUS_OK) {
         fprintf(stderr, "Error: Runtime error occurred.\n");
         zym_freeChunk(vm, chunk);
         zym_freeSourceMap(vm, source_map);
@@ -187,7 +189,9 @@ static int run_source_entry(const char* source, size_t source_size,
         while (call_result == ZYM_STATUS_YIELD) {
             call_result = zym_resume(vm);
         }
-        if (call_result != ZYM_STATUS_OK) {
+        if (call_result == ZYM_STATUS_ABORTED) {
+            fprintf(stderr, "Error: Execution stopped by the host.\n");
+        } else if (call_result != ZYM_STATUS_OK) {
             fprintf(stderr, "Error: main(argv) function failed.\n");
             zym_freeChunk(vm, chunk);
             zym_freeSourceMap(vm, source_map);
@@ -288,7 +292,9 @@ int runtime_main(int argc, char** argv, ZymAllocator* allocator) {
     while (result == ZYM_STATUS_YIELD) {
         result = zym_resume(vm);
     }
-    if (result != ZYM_STATUS_OK) {
+    if (result == ZYM_STATUS_ABORTED) {
+        fprintf(stderr, "Error: Execution stopped by the host.\n");
+    } else if (result != ZYM_STATUS_OK) {
         fprintf(stderr, "Error: Runtime error occurred.\n");
         zym_freeChunk(vm, chunk);
         zym_freeVM(vm);
@@ -310,7 +316,9 @@ int runtime_main(int argc, char** argv, ZymAllocator* allocator) {
         while (call_result == ZYM_STATUS_YIELD) {
             call_result = zym_resume(vm);
         }
-        if (call_result != ZYM_STATUS_OK) {
+        if (call_result == ZYM_STATUS_ABORTED) {
+            fprintf(stderr, "Error: Execution stopped by the host.\n");
+        } else if (call_result != ZYM_STATUS_OK) {
             fprintf(stderr, "Error: main(argv) function failed.\n");
             zym_freeChunk(vm, chunk);
             zym_freeVM(vm);

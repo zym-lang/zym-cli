@@ -809,6 +809,12 @@ static int execute_bytecode(char* bytecode, size_t bytecode_size, int script_arg
         result = zym_resume(run_vm);
     }
 
+    if (result == ZYM_STATUS_ABORTED) {
+        fprintf(stderr, "Error: Execution stopped by the host.\n");
+        zym_freeChunk(run_vm, loaded_chunk);
+        zym_freeVM(run_vm);
+        return 2;
+    }
     if (result != ZYM_STATUS_OK) {
         fprintf(stderr, "Error: Runtime error occurred.\n");
         zym_freeChunk(run_vm, loaded_chunk);
@@ -833,6 +839,12 @@ static int execute_bytecode(char* bytecode, size_t bytecode_size, int script_arg
         ZymStatus call_result = zym_call(run_vm, "main", 1, argv_list);
         while (call_result == ZYM_STATUS_YIELD) {
             call_result = zym_resume(run_vm);
+        }
+        if (call_result == ZYM_STATUS_ABORTED) {
+            fprintf(stderr, "Error: Execution stopped by the host.\n");
+            zym_freeChunk(run_vm, loaded_chunk);
+            zym_freeVM(run_vm);
+            return 2;
         }
         if (call_result != ZYM_STATUS_OK) {
             fprintf(stderr, "Error: main(argv) function failed.\n");

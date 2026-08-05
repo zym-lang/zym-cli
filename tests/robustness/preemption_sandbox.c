@@ -221,6 +221,25 @@ int main(void) {
         zym_freeVM(fresh);
     }
 
+    // ---- freeing the chunk a suspended VM is parked in -------------------
+    {
+        // An abort suspends rather than unwinds, so `ip` still points into the
+        // chunk. A host that frees it there -- which the CLI's ChildVM did on
+        // every aborted run -- must not leave the VM resumable: dispatching from
+        // released bytecode killed the process, reachable from ordinary script.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, SPIN_FOREVER);
+        zym_preemptRegister(vm, 200000, zym_newNull(), 0);
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+              "watchdog leaves the VM suspended inside the chunk");
+        zym_freeChunk(vm, c);
+        CHECK(zym_resume(vm) == ZYM_STATUS_RUNTIME_ERROR,
+              "resume after the chunk was freed errors instead of running freed bytecode");
+        CHECK(zym_resume(vm) == ZYM_STATUS_RUNTIME_ERROR,
+              "and stays safe on a second attempt");
+        zym_freeVM(vm);
+    }
+
     printf(failures == 0 ? "ALL PASS\n" : "%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;
 }

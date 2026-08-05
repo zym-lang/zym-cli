@@ -121,7 +121,31 @@ struct ChildVmHandle {
     // finalizer fires (script lost all refs) or when the handle
     // tears down.
     std::unordered_map<std::string, ZymValue> funcCache;
+
+    // Resources belonging to a `run`/`runBytecode` that ended ABORTED. An abort
+    // suspends rather than unwinds, so the child is parked with `ip` pointing
+    // into this chunk and `resume()` needs it to still exist. Freeing it at the
+    // end of the call (as the code originally did) left resume dispatching from
+    // released bytecode. Released once the child leaves the suspended state,
+    // when another run supersedes them, or at teardown.
+    ZymChunk*     pendingChunk     = nullptr;
+    ZymSourceMap* pendingSourceMap = nullptr;
+    const char*   pendingProcessed = nullptr;
 };
+
+// Drop any parked run resources. When the child VM is already gone its teardown
+// collected them, so only the pointers are cleared.
+void release_pending(ChildVmHandle* h) {
+    if (!h) return;
+    if (h->child && !h->freed) {
+        if (h->pendingProcessed) zym_freeProcessedSource(h->child, h->pendingProcessed);
+        if (h->pendingChunk)     zym_freeChunk(h->child, h->pendingChunk);
+        if (h->pendingSourceMap) zym_freeSourceMap(h->child, h->pendingSourceMap);
+    }
+    h->pendingProcessed = nullptr;
+    h->pendingChunk     = nullptr;
+    h->pendingSourceMap = nullptr;
+}
 
 void handle_decref(ChildVmHandle* h);
 
@@ -129,9 +153,11 @@ void handle_decref(ChildVmHandle* h) {
     if (!h) return;
     if (--h->refcount > 0) return;
     if (h->child && !h->freed) {
+        release_pending(h);
         zym_freeVM(h->child);
         h->freed = true;
     }
+    release_pending(h);
     // childCtx is externalOwner=true, so the child's Zym finalizer
     // (if Zym was granted) skipped freeing it. Free it here.
     delete h->childCtx;
@@ -710,6 +736,9 @@ ZymValue cv_resume(ZymVM* parentVm, ZymValue context) {
     if (!h) return ZYM_ERROR;
     ZymStatus s = zym_resume(h->child);
     while (s == ZYM_STATUS_YIELD) s = zym_resume(h->child);
+    // Still ABORTED means still suspended in the parked chunk; anything else
+    // means the run is over and the chunk can go.
+    if (s != ZYM_STATUS_ABORTED) release_pending(h);
     freeze(h);
     return zym_newNumber((double)s);
 }
@@ -759,6 +788,9 @@ bool marshal_to_parent(ZymVM* child, ZymVM* parentVm, ZymValue v, ZymValue* out)
 ZymValue cv_run(ZymVM* parentVm, ZymValue context, ZymValue srcV) {
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
+
+    // Starting a new run abandons any suspended one, so its parked resources go.
+    release_pending(h);
 
     // Accept either a string or a Buffer carrying utf-8 source bytes.
     const char* src = nullptr;
@@ -819,9 +851,16 @@ ZymValue cv_run(ZymVM* parentVm, ZymValue context, ZymValue srcV) {
     }
     zym_mapSet(parentVm, result, "result", marshalled);
 
-    if (processed) zym_freeProcessedSource(h->child, processed);
-    zym_freeChunk(h->child, ch);
-    zym_freeSourceMap(h->child, sm);
+    if (st == ZYM_STATUS_ABORTED) {
+        // Suspended inside `ch`: park it so resume() has bytecode to return to.
+        h->pendingChunk     = ch;
+        h->pendingSourceMap = sm;
+        h->pendingProcessed = processed;
+    } else {
+        if (processed) zym_freeProcessedSource(h->child, processed);
+        zym_freeChunk(h->child, ch);
+        zym_freeSourceMap(h->child, sm);
+    }
     zym_popRoot(parentVm);
     return result;
 }
@@ -829,6 +868,8 @@ ZymValue cv_run(ZymVM* parentVm, ZymValue context, ZymValue srcV) {
 ZymValue cv_runBytecode(ZymVM* parentVm, ZymValue context, ZymValue bufV) {
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
+
+    release_pending(h);   // see cv_run
 
     const char* data = nullptr;
     size_t size = 0;
@@ -866,7 +907,11 @@ ZymValue cv_runBytecode(ZymVM* parentVm, ZymValue context, ZymValue bufV) {
     }
     zym_mapSet(parentVm, result, "result", marshalled);
 
-    zym_freeChunk(h->child, ch);
+    if (st == ZYM_STATUS_ABORTED) {
+        h->pendingChunk = ch;   // see cv_run: suspended inside `ch`
+    } else {
+        zym_freeChunk(h->child, ch);
+    }
     zym_popRoot(parentVm);
     return result;
 }

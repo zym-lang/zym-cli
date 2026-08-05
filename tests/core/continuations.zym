@@ -1,0 +1,328 @@
+// =============================================================================
+// DELIMITED CONTINUATION TESTS
+//
+// Covers Cont.* end to end: prompts, capture/resume, withPrompt, shift, abort.
+//
+// The loops here are deliberately long enough to run the GC while spent
+// continuations are still reachable: a resumed continuation releases its
+// snapshot, and everything it captured has to stay correct afterwards.
+//
+// This file runs in the normal register mode only. Its companion,
+// continuations_spill.zym, covers the same frame-push paths under
+// ZYM_FORCE_SPILL_AT=8; it has to be a separate file because top-level `var`s
+// are locals of the implicit <script> function, and this many of them cannot
+// compile within that mode's register budget.
+// =============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+    }
+}
+
+print("=== STARTING CONTINUATION TESTS ===")
+
+// -----------------------------------------------------------------------------
+// [1] Generator: capture pauses, resume continues after the capture point
+// -----------------------------------------------------------------------------
+print("--- [1] Generator round trip ---")
+
+var FIB_TAG = Cont.newPrompt("fib")
+
+func makeFib() {
+    var state = { a: 0, b: 1, value: null, cont: null }
+
+    func body() {
+        while (true) {
+            state.value = state.a
+            Cont.capture(FIB_TAG)
+            var t = state.a + state.b
+            state.a = state.b
+            state.b = t
+        }
+    }
+
+    func next() {
+        Cont.pushPrompt(FIB_TAG)
+        var result
+        if (state.cont == null)
+            result = body()
+        else
+            result = Cont.resume(state.cont, null)
+
+        if (Cont.isContinuation(result)) {
+            state.cont = result
+            return state.value
+        }
+        return null
+    }
+
+    return { next: next }
+}
+
+var fib = makeFib()
+var got = []
+var i = 0
+while (i < 10) {
+    push(got, fib.next())
+    i = i + 1
+}
+
+assert_wrap(got[0] == 0, "[1] fib[0]")
+assert_wrap(got[1] == 1, "[1] fib[1]")
+assert_wrap(got[6] == 8, "[1] fib[6]")
+assert_wrap(got[9] == 34, "[1] fib[9]")
+
+// -----------------------------------------------------------------------------
+// [2] Continuations are one-shot: isValid flips once resumed
+//
+// After resume the snapshot is released, so this also asserts that a spent
+// continuation is still safe to hand around and query.
+// -----------------------------------------------------------------------------
+print("--- [2] One-shot semantics ---")
+
+var ONCE_TAG = Cont.newPrompt("once")
+var oncePrev = fib.next()
+
+var savedK = null
+func onceBody() {
+    Cont.capture(ONCE_TAG)
+    return 1
+}
+
+Cont.pushPrompt(ONCE_TAG)
+var onceResult = onceBody()
+assert_wrap(Cont.isContinuation(onceResult), "[2] capture yields a continuation")
+savedK = onceResult
+assert_wrap(Cont.isValid(savedK), "[2] fresh continuation is valid")
+
+Cont.pushPrompt(ONCE_TAG)
+var onceResumed = Cont.resume(savedK, null)
+assert_wrap(Cont.isValid(savedK) == false, "[2] resumed continuation is spent")
+assert_wrap(Cont.isContinuation(savedK), "[2] spent continuation is still a continuation")
+
+// -----------------------------------------------------------------------------
+// [3] withPrompt runs its body and returns the body's value
+// -----------------------------------------------------------------------------
+print("--- [3] withPrompt plain return ---")
+
+var WP_TAG = Cont.newPrompt("wp")
+
+func plainBody() {
+    return 42
+}
+
+var wpResult = Cont.withPrompt(WP_TAG, plainBody)
+assert_wrap(wpResult == 42, "[3] withPrompt returns body value")
+
+// -----------------------------------------------------------------------------
+// [4] withPrompt over a body with a wide local window
+//
+// withPrompt pushes the callee frame itself rather than going through the CALL
+// opcodes, so it sizes the stack window with its own arithmetic. Every local
+// here has to survive that push. The spilled variant is in
+// continuations_spill.zym.
+// -----------------------------------------------------------------------------
+print("--- [4] withPrompt with a wide local window ---")
+
+func spillingBody() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8
+    var i2 = 9
+    var j = 10
+    var k2 = 11
+    var l = 12
+    var total = a + b
+    total = total + c
+    total = total + d
+    total = total + e
+    total = total + f
+    total = total + g
+    total = total + h
+    total = total + i2
+    total = total + j
+    total = total + k2
+    total = total + l
+    return total
+}
+
+var spillResult = Cont.withPrompt(WP_TAG, spillingBody)
+assert_wrap(spillResult == 78, "[4] spilling body under withPrompt")
+
+// -----------------------------------------------------------------------------
+// [5] shift: the handler receives the captured continuation
+// -----------------------------------------------------------------------------
+print("--- [5] shift ---")
+
+var SHIFT_TAG = Cont.newPrompt("shift")
+var shiftSaved = null
+
+func shiftHandler(k) {
+    shiftSaved = k
+    return 100
+}
+
+func shiftBody() {
+    var v = Cont.shift(SHIFT_TAG, shiftHandler)
+    return v + 1
+}
+
+var shiftResult = Cont.withPrompt(SHIFT_TAG, shiftBody)
+assert_wrap(shiftResult == 100, "[5] shift returns the handler's value")
+assert_wrap(Cont.isContinuation(shiftSaved), "[5] handler received a continuation")
+
+// -----------------------------------------------------------------------------
+// [6] shift with a wide handler
+//
+// Same sizing question as [4], but on the shift path, where stack_top has
+// already been truncated to the prompt base before the handler frame is pushed.
+// -----------------------------------------------------------------------------
+print("--- [6] shift with a wide handler ---")
+
+var SHIFT2_TAG = Cont.newPrompt("shift2")
+
+func spillingHandler(k) {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8
+    var i4 = 9
+    var j = 10
+    var total = a + b
+    total = total + c
+    total = total + d
+    total = total + e
+    total = total + f
+    total = total + g
+    total = total + h
+    total = total + i4
+    total = total + j
+    return total
+}
+
+func shift2Body() {
+    var v = Cont.shift(SHIFT2_TAG, spillingHandler)
+    return v + 1
+}
+
+var shift2Result = Cont.withPrompt(SHIFT2_TAG, shift2Body)
+assert_wrap(shift2Result == 55, "[6] spilling handler under shift")
+
+// -----------------------------------------------------------------------------
+// [7] abort unwinds to the prompt with a value
+// -----------------------------------------------------------------------------
+print("--- [7] abort ---")
+
+var AB_TAG = Cont.newPrompt("ab")
+
+func abortBody() {
+    Cont.abort(AB_TAG, 7)
+    return 999
+}
+
+var abResult = Cont.withPrompt(AB_TAG, abortBody)
+assert_wrap(abResult == 7, "[7] abort delivers its value to the prompt")
+
+// -----------------------------------------------------------------------------
+// [8] Many captures under GC pressure
+//
+// Each step allocates a fresh continuation and drops the previous one. The
+// snapshot a continuation carries is released once it is resumed, so this loop
+// must neither lose values nor corrupt the heap.
+// -----------------------------------------------------------------------------
+print("--- [8] Sustained capture/resume under allocation ---")
+
+var LOOP_TAG = Cont.newPrompt("loop")
+
+func makeCounter() {
+    var st = { n: 0, cont: null, trash: null }
+
+    func body() {
+        while (true) {
+            // Allocate every step so the collector runs mid-generator.
+            st.trash = { tag: "step" + str(st.n), pad: [st.n, st.n, st.n] }
+            Cont.capture(LOOP_TAG)
+            st.n = st.n + 1
+        }
+    }
+
+    func step() {
+        Cont.pushPrompt(LOOP_TAG)
+        var r
+        if (st.cont == null)
+            r = body()
+        else
+            r = Cont.resume(st.cont, null)
+        if (Cont.isContinuation(r)) {
+            st.cont = r
+            return st.n
+        }
+        return null
+    }
+
+    return { step: step, state: st }
+}
+
+var counter = makeCounter()
+var last = -1
+var c = 0
+while (c < 500) {
+    last = counter.step()
+    c = c + 1
+}
+assert_wrap(last == 499, "[8] counter advanced exactly once per step")
+assert_wrap(counter.state.trash.tag == "step499", "[8] per-step allocation survived")
+
+// -----------------------------------------------------------------------------
+// [9] Nested prompts resolve to the innermost matching tag
+// -----------------------------------------------------------------------------
+print("--- [9] Nested prompts ---")
+
+var OUTER_TAG = Cont.newPrompt("outer")
+var INNER_TAG = Cont.newPrompt("inner")
+
+func innerBody() {
+    Cont.abort(INNER_TAG, "inner-done")
+    return "unreached"
+}
+
+func outerBody() {
+    var innerVal = Cont.withPrompt(INNER_TAG, innerBody)
+    return "outer:" + innerVal
+}
+
+var nestedResult = Cont.withPrompt(OUTER_TAG, outerBody)
+assert_wrap(nestedResult == "outer:inner-done", "[9] inner prompt caught its own abort")
+
+// -----------------------------------------------------------------------------
+
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed:")
+print(testsPassed)
+print("Tests Failed:")
+print(testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED")
+}
+print("==========================================================")

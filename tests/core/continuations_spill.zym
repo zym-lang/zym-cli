@@ -1,0 +1,121 @@
+// =============================================================================
+// CONTINUATIONS x REGISTER SPILL
+//
+// withPrompt and shift push their callee frame directly instead of going
+// through the CALL opcodes, so they size the stack window with their own
+// arithmetic. Every CALL site sizes it as max_regs + spill_count; if these two
+// leave out the spill area, SPILL_STORE writes above stack_top -- past the
+// region markRoots scans, and past what the growth check reserved.
+//
+// This lives apart from continuations.zym because the interesting mode is:
+//
+//   ZYM_FORCE_SPILL_AT=8 zym tests/core/continuations_spill.zym
+//
+// which caps a function at N + SPILL_SCRATCH_COUNT physical registers. That
+// budget is easy to blow from the outside: top-level `var`s are locals of the
+// implicit <script> function, so a file with many of them cannot compile in
+// that mode at all no matter how small its test bodies are. Hence the very
+// short top-level surface here, and no calls inside the spilling functions --
+// a call whose arguments are spilled needs more scratch than is left.
+//
+// Both modes must produce the same totals. They are plain sums, so a wrong
+// answer means a spilled local did not survive the frame push.
+// =============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+    }
+}
+
+print("=== STARTING CONTINUATION SPILL TESTS ===")
+
+var SP_TAG = Cont.newPrompt("spill")
+
+// Twelve locals: past the eighth they live in the spill area under
+// ZYM_FORCE_SPILL_AT=8. Sum is 1..12 = 78.
+func spillingBody() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8
+    var i = 9
+    var j = 10
+    var k = 11
+    var l = 12
+    var total = a + b
+    total = total + c
+    total = total + d
+    total = total + e
+    total = total + f
+    total = total + g
+    total = total + h
+    total = total + i
+    total = total + j
+    total = total + k
+    total = total + l
+    return total
+}
+
+// Ten locals plus the continuation parameter. Sum is 1..10 = 55.
+func spillingHandler(k) {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8
+    var i = 9
+    var j = 10
+    var total = a + b
+    total = total + c
+    total = total + d
+    total = total + e
+    total = total + f
+    total = total + g
+    total = total + h
+    total = total + i
+    total = total + j
+    return total
+}
+
+func shiftBody() {
+    var v = Cont.shift(SP_TAG, spillingHandler)
+    return v + 1
+}
+
+// [1] withPrompt pushes the frame for a body whose locals spill.
+var r1 = Cont.withPrompt(SP_TAG, spillingBody)
+assert_wrap(r1 == 78, "[1] spilled locals survive the withPrompt frame push")
+
+// [2] shift pushes the handler frame after truncating stack_top to the prompt
+//     base, so an undersized window is guaranteed to land outside it.
+var r2 = Cont.withPrompt(SP_TAG, shiftBody)
+assert_wrap(r2 == 55, "[2] spilled locals survive the shift handler frame push")
+
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed:")
+print(testsPassed)
+print("Tests Failed:")
+print(testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED")
+}
+print("==========================================================")

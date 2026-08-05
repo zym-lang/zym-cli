@@ -697,6 +697,23 @@ ZymValue cv_clearWatchdog(ZymVM* parentVm, ZymValue context, ZymValue idV) {
         zym_preemptUnregister(h->child, (ZymPreemptId)zym_asNumber(idV)));
 }
 
+// Continue a child that stopped. After ABORTED the child's frames, ip, and
+// stack are all still intact -- an abort suspends, it does not unwind -- so
+// resuming picks up at the exact instruction that was interrupted.
+//
+// Whatever caused the stop is still in force, so clear it first or the
+// resume aborts again immediately: clearStop() for a requestStop, and for a
+// watchdog either clearWatchdog(id) or accept another slice (a rearming
+// watchdog grants one automatically per resume).
+ZymValue cv_resume(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    ZymStatus s = zym_resume(h->child);
+    while (s == ZYM_STATUS_YIELD) s = zym_resume(h->child);
+    freeze(h);
+    return zym_newNumber((double)s);
+}
+
 ZymValue cv_requestStop(ZymVM* parentVm, ZymValue context) {
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
@@ -1691,6 +1708,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mSer      = MK_CLOSURE("serializeChunk(chunk, opts)", cv_serializeChunk);           zym_pushRoot(parentVm, mSer);
     ZymValue mDes      = MK_CLOSURE("deserializeChunk(chunk, bytes)", cv_deserializeChunk);      zym_pushRoot(parentVm, mDes);
     ZymValue mDisCh    = MK_CLOSURE("disassembleChunk(chunk, name)", cv_disassembleChunk);       zym_pushRoot(parentVm, mDisCh);
+    ZymValue mResume   = MK_CLOSURE("resume()", cv_resume);                                   zym_pushRoot(parentVm, mResume);
     ZymValue mRun      = MK_CLOSURE("runChunk(chunk)", cv_runChunk);                             zym_pushRoot(parentVm, mRun);
     ZymValue mWatch    = MK_CLOSURE("setWatchdog(instructions)", cv_setWatchdog);                 zym_pushRoot(parentVm, mWatch);
     ZymValue mUnwatch  = MK_CLOSURE("clearWatchdog(id)", cv_clearWatchdog);                       zym_pushRoot(parentVm, mUnwatch);
@@ -1735,6 +1753,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "serializeChunk",     mSer);
     zym_mapSet(parentVm, obj, "deserializeChunk",   mDes);
     zym_mapSet(parentVm, obj, "disassembleChunk",   mDisCh);
+    zym_mapSet(parentVm, obj, "resume",             mResume);
     zym_mapSet(parentVm, obj, "runChunk",           mRun);
     zym_mapSet(parentVm, obj, "setWatchdog",        mWatch);
     zym_mapSet(parentVm, obj, "clearWatchdog",      mUnwatch);
@@ -1763,7 +1782,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "moduleLoader", mlObj);
 
     // ctx + 30 closures + 2 moduleLoader closures + obj + mlObj = 35
-    for (int i = 0; i < 35; i++) zym_popRoot(parentVm);
+    for (int i = 0; i < 36; i++) zym_popRoot(parentVm);
     return obj;
 }
 

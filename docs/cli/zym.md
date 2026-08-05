@@ -146,6 +146,7 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.serializeChunk(chunk, opts)` | `{ status, bytes }` | Serializes a compiled chunk to a `Buffer` of `.zbc` bytes. `opts.includeLineInfo` mirrors compile. |
 | `cv.deserializeChunk(chunk, bytes)` | `int` (status) | Loads `.zbc` bytes (a `Buffer`) into a freshly-allocated chunk. **Flips the child into execution phase.** |
 | `cv.runChunk(chunk)` | `int` (status) | Runs a compiled or deserialized chunk on the child. Auto-loops on `YIELD`. **Flips the child into execution phase.** |
+| `cv.resume()` | `int` (status) | Continues a child that stopped. An abort **suspends** rather than unwinds: frames, `ip`, and stack are intact, so the child picks up at the exact instruction that was interrupted. Auto-loops on `YIELD`. Whatever caused the stop is still in force, so clear it first (see [Sandbox controls](#sandbox-controls)) or the resume aborts again immediately. |
 | `cv.run(source)` | `{ status, result }` | One-shot helper: registers a hidden source file, **runs the preprocessor**, compiles, and runs the chunk in a single call. `source` is a `string` or a `Buffer` of utf-8 source bytes (not a `.zbc` Buffer — use `runBytecode` for that). `status` is a `Zym.STATUS` code; `result` is the marshalled top-level return value (or `null` on non-`OK` status). **Flips the child into execution phase.** |
 | `cv.runBytecode(bytes)` | `{ status, result }` | One-shot helper for serialized bytecode: deserializes `bytes` (a `Buffer` produced by `serializeChunk`) into a fresh chunk and runs it. Same return shape as `run`. **Flips the child into execution phase.** |
 | `cv.call(name, args)` | `int` (status) | Calls a top-level function on the child by name with positional `args` (a list). Args are marshalled across the VM boundary (full graph copy). Auto-loops on `YIELD`. **Flips the child into execution phase.** |
@@ -175,6 +176,22 @@ run, so it cannot observe or block its own termination.
 | `cv.clearStop()` | `null` | Clears a pending stop so the child VM can be reused. |
 
 Note that a stop is *per-VM*: stopping a child leaves the parent running.
+
+**Resuming.** A stopped child is not dead. `cv.resume()` continues it from
+the interrupted instruction. What you must clear first depends on what
+stopped it:
+
+| stopped by | to resume |
+| --- | --- |
+| `requestStop()` | `clearStop()` first; the flag is sticky by design |
+| a rearming watchdog | just `resume()`; each resume grants one fresh slice |
+| a watchdog you are done with | `clearWatchdog(id)` |
+| a watchdog needing a different budget | `setWatchdog` a new one, or drop the old and register another |
+
+A watchdog registered normally rearms itself, which is what makes
+"run in slices" work: every `resume()` buys another `instructions` worth of
+execution. Register with a one-shot budget instead if you want a single hard
+ceiling with no second chances.
 
 ### Lifecycle
 
@@ -1109,6 +1126,50 @@ from the outside instead:
 vm.requestStop()                       // sticky, unmaskable
 print("%v", vm.stopRequested())        // true
 vm.clearStop()                         // before reusing the VM
+```
+
+---
+
+### Resuming a stopped child: running in slices
+
+Because an abort suspends rather than unwinds, a watchdog doubles as a
+timeslicer. The child below is stopped every 50,000 instructions, the parent
+gets control back each time, and the work still completes.
+
+```zym
+var vm = Zym.newVM()
+var work = "var total = 0\nfor(var i=0;i<200000;i=i+1){ total = total + 1 }\nfunc get(){ return total }"
+
+var chunk = vm.newChunk()
+vm.compile(work, chunk, null, "work.zym", {})
+
+var wd = vm.setWatchdog(50000)
+var status = vm.runChunk(chunk)
+var slices = 0
+
+while (status == Zym.STATUS.ABORTED) {
+    slices = slices + 1
+    // ... host work between slices ...
+    status = vm.resume()
+}
+
+vm.clearWatchdog(wd)
+vm.call("get", [])
+print("finished after %v slices, total = %v", slices, vm.callResult())
+```
+
+```
+finished after 28 slices, total = 200000
+```
+
+Use this shape when you want cooperative progress. For a hard ceiling, do
+**not** loop: treat the first `ABORTED` as final and tear the child down.
+
+```zym
+if (vm.runChunk(chunk) == Zym.STATUS.ABORTED) {
+    print("child exceeded its budget")
+    vm.free()
+}
 ```
 
 ---

@@ -1,0 +1,226 @@
+// Preemption and the host stop guarantee.
+//
+// Contract under test: a host can ALWAYS stop a running script, and script
+// code cannot escape or suppress that. This is the resource half of the
+// sandbox; capability gating is the other half and is not covered here.
+//
+// The properties that matter:
+//   - a watchdog stops an infinite loop
+//   - `Preempt.shield(...)` inside the script does NOT suppress a
+//     non-maskable host watchdog (a shield masks only the script's own
+//     maskable entries)
+//   - an abort SUSPENDS rather than unwinds, so the host may resume
+//   - whatever caused the stop stays in force until the host clears it
+//   - clearing everything lets the script run free
+//   - misuse (resuming a VM that already finished) reports an error
+//     instead of crashing
+//
+// Every case is bounded, so a hang shows up as a runAll.sh timeout rather
+// than an infinite test run.
+
+#include <stdio.h>
+#include <string.h>
+
+#include "zym/zym.h"
+
+static int failures = 0;
+
+// Evaluate the condition exactly once: several of these have side effects.
+#define CHECK(cond, label)                                                    \
+    do {                                                                      \
+        int _r = (cond);                                                      \
+        printf("%s  %s\n", _r ? "PASS" : "FAIL", (label));                    \
+        if (!_r) failures++;                                                  \
+    } while (0)
+
+// A loop long enough that a small watchdog slice always interrupts it, but
+// finite so a successful resume can actually complete.
+static const char* WORK =
+    "var total = 0\n"
+    "for (var i = 0; i < 200000; i = i + 1) { total = total + 1 }\n"
+    "func get() { return total }\n";
+
+static const char* SPIN_FOREVER =
+    "func spin() { var i = 0\n while (true) { i = i + 1 }\n }\n"
+    "spin()\n";
+
+// A runaway loop that wraps itself in a shield, i.e. a script actively
+// trying to make itself unstoppable.
+static const char* SPIN_SHIELDED =
+    "func spin() { var i = 0\n while (true) { i = i + 1 }\n }\n"
+    "Preempt.shield(spin)\n";
+
+static ZymChunk* compile_or_null(ZymVM* vm, const char* src) {
+    ZymCompilerConfig cfg = { 1 };
+    ZymChunk* chunk = zym_newChunk(vm);
+    if (zym_compile(vm, src, chunk, NULL, "t.zym", cfg, NULL) != ZYM_STATUS_OK) {
+        zym_freeChunk(vm, chunk);
+        return NULL;
+    }
+    return chunk;
+}
+
+int main(void) {
+    // ---- the core guarantee -------------------------------------------
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, SPIN_FOREVER);
+        CHECK(c != NULL, "fixture compiles");
+        ZymPreemptId wd = zym_preemptRegister(vm, 200000, zym_newNull(), 0);
+        CHECK(wd != 0, "watchdog registers");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+              "infinite loop is stopped by the watchdog");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, SPIN_SHIELDED);
+        zym_preemptRegister(vm, 200000, zym_newNull(), 0);
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+              "a script shield cannot suppress a non-maskable watchdog");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        zym_preemptRegister(vm, 100000000, zym_newNull(), 0);
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK,
+              "a generous watchdog leaves normal programs alone");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK,
+              "a VM with no entries at all runs unconstrained");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
+    // ---- explicit stop -------------------------------------------------
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        zym_requestStop(vm);
+        CHECK(zym_stopRequested(vm), "stopRequested reflects a pending stop");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+              "a pending stop aborts the run");
+        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+              "the stop is sticky: resuming without clearing re-aborts");
+        zym_clearStop(vm);
+        CHECK(!zym_stopRequested(vm), "clearStop resets the flag");
+        CHECK(zym_resume(vm) == ZYM_STATUS_OK,
+              "clearStop then resume runs to completion");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
+    // ---- resume: an abort suspends, it does not unwind -----------------
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        ZymPreemptId wd = zym_preemptRegister(vm, 50000, zym_newNull(), 0);
+        ZymStatus st = zym_runChunk(vm, c);
+        CHECK(st == ZYM_STATUS_ABORTED, "watchdog interrupts partway through");
+
+        // A rearming watchdog grants one fresh slice per resume, so the work
+        // completes in slices. Bounded so a regression cannot spin forever.
+        int slices = 0;
+        while (st == ZYM_STATUS_ABORTED && slices < 500) {
+            st = zym_resume(vm);
+            slices++;
+        }
+        CHECK(st == ZYM_STATUS_OK, "repeated resume completes the work");
+        zym_preemptUnregister(vm, wd);
+        zym_call(vm, "get", 0);
+        CHECK(zym_asNumber(zym_getCallResult(vm)) == 200000,
+              "the work actually finished, not just returned OK");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        zym_preemptRegister(vm, 50000, zym_newNull(), ZYM_PREEMPT_ONESHOT);
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "oneshot watchdog fires");
+        CHECK(zym_resume(vm) == ZYM_STATUS_OK,
+              "a oneshot retires after firing, so one resume finishes");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
+    // ---- letting the script run free -----------------------------------
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        ZymPreemptId a = zym_preemptRegister(vm, 50000, zym_newNull(), 0);
+        ZymPreemptId b = zym_preemptRegister(vm, 90000, zym_newNull(), 0);
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+              "the nearest of several watchdogs fires first");
+        zym_preemptUnregister(vm, a);
+        zym_preemptUnregister(vm, b);
+        CHECK(zym_resume(vm) == ZYM_STATUS_OK,
+              "clearing every watchdog lets the script run free in one go");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        // Both mechanisms armed: clearing only one must not be enough.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        ZymPreemptId wd = zym_preemptRegister(vm, 50000, zym_newNull(), 0);
+        zym_requestStop(vm);
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "stopped with both armed");
+        zym_preemptUnregister(vm, wd);
+        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+              "watchdog gone but stop still pending: still aborts");
+        zym_clearStop(vm);
+        CHECK(zym_resume(vm) == ZYM_STATUS_OK, "clearing both lets it run free");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
+    // ---- table bookkeeping ---------------------------------------------
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        int cap = zym_preemptCapacity();
+        CHECK(cap >= 2, "capacity is reported");
+        ZymPreemptId ids[64];
+        int n = 0;
+        for (int i = 0; i < cap && n < (int)(sizeof(ids)/sizeof(ids[0])); i++) {
+            ZymPreemptId id = zym_preemptRegister(vm, 1000, zym_newNull(), 0);
+            if (id) ids[n++] = id;
+        }
+        CHECK(n == cap, "the table fills to exactly its capacity");
+        CHECK(zym_preemptRegister(vm, 1000, zym_newNull(), 0) == 0,
+              "registration fails cleanly when full");
+        CHECK(zym_preemptUnregister(vm, ids[0]), "unregister frees a slot");
+        CHECK(zym_preemptRegister(vm, 1000, zym_newNull(), 0) != 0,
+              "the freed slot is reusable");
+        zym_freeVM(vm);
+    }
+
+    // ---- misuse must not crash ------------------------------------------
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, "var x = 1 + 1\n");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK, "trivial program runs");
+        CHECK(zym_resume(vm) == ZYM_STATUS_RUNTIME_ERROR,
+              "resuming a finished VM reports an error instead of crashing");
+        CHECK(zym_resume(vm) == ZYM_STATUS_RUNTIME_ERROR,
+              "and stays safe when called again");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+
+        ZymVM* fresh = zym_newVM(NULL);
+        CHECK(zym_resume(fresh) == ZYM_STATUS_RUNTIME_ERROR,
+              "resuming a VM that never ran is an error, not a crash");
+        zym_freeVM(fresh);
+    }
+
+    printf(failures == 0 ? "ALL PASS\n" : "%d FAILURES\n", failures);
+    return failures == 0 ? 0 : 1;
+}

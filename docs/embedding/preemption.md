@@ -76,7 +76,7 @@ zym_setHostPreemptReserve(vm, 8);      // before anything runs
 
 ### Watchdogs: a NULL callback means abort
 
-Passing `zym_newNull()` as the callback registers a **watchdog**. On expiry the VM does not run anything — it unwinds to `ZYM_STATUS_ABORTED` and returns to you.
+Passing `zym_newNull()` as the callback registers a **watchdog**. On expiry the VM does not run anything — it returns `ZYM_STATUS_SUSPENDED` to you with `zym_vmCause()` reading `ZYM_CAUSE_PREEMPT`.
 
 That is the shape to reach for when supervising code you do not trust. A callback-based entry runs *script*, which is something the script can subvert: it could loop inside your callback, throw from it, or arrange for it never to complete. A watchdog gives it nothing to work with.
 
@@ -123,7 +123,7 @@ void   zym_clearOom(ZymVM* vm);
 
 A watchdog bounds how long a script runs; this bounds how much it allocates. `0` means unlimited, which is the default.
 
-Crossing the ceiling does **not** fail the allocation. The request is satisfied — the allocator still has memory — and the VM is then suspended at the next instruction boundary with `ZYM_STATUS_ABORTED`. Failing it instead would strand every caller inside the VM that assumes allocation succeeds, and would leave you nothing to recover. Overshoot is therefore bounded by one allocation rather than zero.
+Crossing the ceiling does **not** fail the allocation. The request is satisfied — the allocator still has memory — and the VM is then suspended at the next instruction boundary with `ZYM_STATUS_SUSPENDED` and cause `ZYM_CAUSE_MEMORY_LIMIT`. Failing it instead would strand every caller inside the VM that assumes allocation succeeds, and would leave you nothing to recover. Overshoot is therefore bounded by one allocation rather than zero.
 
 A collection runs before the ceiling is declared crossed, so a script that merely produces garbage is never charged for it. Only what it retains counts.
 
@@ -135,11 +135,19 @@ This bounds the script. It is not a guard against the process genuinely running 
 
 ## Observing and resuming
 
-An abort **suspends**; it does not unwind. Frames, stack, and instruction pointer are all intact, which is what makes `zym_resume` meaningful.
+A suspension does not unwind. Frames, stack, and instruction pointer are all intact, which is what makes `zym_resume` meaningful.
+
+There is one suspended status, not one per reason, because there is one VM state. `zym_vmCause()` says which of `ZYM_CAUSE_PREEMPT`, `ZYM_CAUSE_HOST_STOP`, `ZYM_CAUSE_MEMORY_LIMIT`, or `ZYM_CAUSE_PREEMPT_BLOCKED` put it there, and those call for different responses.
 
 ```c
 ZymStatus zym_resume(ZymVM* vm);
+
+// Prefer these over a hand-rolled loop.
+ZymStatus zym_runToCompletion(ZymVM* vm, ZymChunk* chunk);
+ZymStatus zym_callToCompletion(ZymVM* vm, const char* fn, int argc, ZymValue* argv);
 ```
+
+**Never write `while (s == ZYM_STATUS_SUSPENDED) s = zym_resume(vm);`.** That disarms every watchdog on the VM: it grants a fresh slice forever and the supervision never reaches you. The completion helpers exist so the policy lives in one place — they continue only past `ZYM_CAUSE_PREEMPT_BLOCKED`, where a preempt callback could not be pushed because the call stack was exhausted and the entry has already been rearmed, and hand everything else back.
 
 | Suspended by | To continue |
 | --- | --- |
@@ -151,9 +159,9 @@ ZymStatus zym_resume(ZymVM* vm);
 
 If more than one condition is pending, all must be cleared. Resuming a VM that is not suspended returns `ZYM_STATUS_RUNTIME_ERROR` rather than executing from a stale position.
 
-`ZYM_STATUS_ABORTED` is **not** a runtime error. No diagnostic is pushed and no script-visible handler runs, so the script cannot observe, intercept, or loop inside its own termination. Test it separately from `ZYM_STATUS_RUNTIME_ERROR`: the two mean "I stopped it" and "it failed", and conflating them loses the distinction you most need when reporting back to whoever supplied the code.
+`ZYM_STATUS_SUSPENDED` is **not** a runtime error. No diagnostic is pushed and no script-visible handler runs, so the script cannot observe, intercept, or loop inside its own termination. Test it separately from `ZYM_STATUS_RUNTIME_ERROR`: the two mean "I stopped it" and "it failed", and conflating them loses the distinction you most need when reporting back to whoever supplied the code.
 
-**A native that re-enters the VM must propagate `ZYM_STATUS_ABORTED`** rather than treating it as an ordinary failure. Swallowing it defeats the stop — the script continues running inside your native's error path.
+**A native that re-enters the VM must propagate `ZYM_STATUS_SUSPENDED`** rather than treating it as an ordinary failure. Swallowing it defeats the stop — the script continues running inside your native's error path.
 
 ---
 
@@ -178,7 +186,7 @@ zym_setMemoryLimit(vm, zym_memoryUsed(vm) + (4u << 20));   // +4 MiB
 ZymStatus st = zym_runChunk(vm, chunk);
 
 int slices = 0;
-while (st == ZYM_STATUS_ABORTED) {
+while (st == ZYM_STATUS_SUSPENDED) {
     if (zym_oomPending(vm)) {
         fprintf(stderr, "script exceeded its memory budget\n");
         break;                       // no more room: this one is done
@@ -198,7 +206,7 @@ zym_freeVM(vm);
 
 The `slices > 20` bound is the point of the loop. A rearming watchdog on its own grants budget forever, one slice at a time; the counter is what converts it into a hard total. Without it you have written an unbounded VM the slow way.
 
-Testing `zym_oomPending` inside the loop is what separates "needs more time" from "needs more memory" — both arrive as `ZYM_STATUS_ABORTED`, and they call for different decisions.
+Testing the cause inside the loop is what separates "needs more time" from "needs more memory" — every suspension arrives as `ZYM_STATUS_SUSPENDED`, and they call for different decisions. `zym_vmCause()` answers it directly; `zym_oomPending()` is the narrower check used above.
 
 ---
 

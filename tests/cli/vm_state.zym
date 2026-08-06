@@ -1,0 +1,134 @@
+// =============================================================================
+// CHILD VM STATE AND CAUSE
+//
+// Every pause of a child returns the same Zym.STATUS.SUSPENDED, because it is
+// one VM state. `cv.info()` is what tells a parent which pause it was, and
+// therefore what to do about it: grant another slice, give it memory, or give
+// up. These assertions pin that a parent can actually distinguish them.
+// =============================================================================
+
+var testsPassed = 0
+var testsFailed = 0
+
+func assert_wrap(condition, testName) {
+    if (condition) {
+        testsPassed = testsPassed + 1
+    } else {
+        testsFailed = testsFailed + 1
+        print("FAILED: ")
+        print(testName)
+    }
+}
+
+print("=== STARTING CHILD VM STATE TESTS ===")
+
+var SPIN = "var i = 0\nwhile (true) { i = i + 1 }"
+
+// -----------------------------------------------------------------------------
+print("--- [1] a fresh child is idle ---")
+
+var fresh = Zym.newVM()
+var fi = fresh.info()
+assert_wrap(fi.state == Zym.STATE.IDLE, "[1] fresh child is IDLE")
+assert_wrap(fi.cause == Zym.CAUSE.NONE, "[1] with no cause")
+assert_wrap(fi.resumable == false, "[1] and is not resumable")
+
+// -----------------------------------------------------------------------------
+print("--- [2] a completed run returns to idle ---")
+
+var done = Zym.newVM()
+var okStatus = done.run("var x = 1 + 1")
+assert_wrap(okStatus.status == Zym.STATUS.OK, "[2] clean run reports OK")
+assert_wrap(done.info().state == Zym.STATE.IDLE, "[2] and ends IDLE")
+assert_wrap(done.info().cause == Zym.CAUSE.NONE, "[2] with the cause cleared")
+
+// -----------------------------------------------------------------------------
+print("--- [3] a watchdog: suspended, PREEMPT, resumable ---")
+
+var wd = Zym.newVM()
+var wdId = wd.setWatchdog(200000)
+var wdStatus = wd.run(SPIN)
+var wi = wd.info()
+assert_wrap(wdStatus.status == Zym.STATUS.SUSPENDED, "[3] watchdog reports SUSPENDED")
+assert_wrap(wi.state == Zym.STATE.SUSPENDED, "[3] state is SUSPENDED")
+assert_wrap(wi.cause == Zym.CAUSE.PREEMPT, "[3] cause is PREEMPT")
+assert_wrap(wi.preemptId == wdId, "[3] the entry that fired is named")
+assert_wrap(wi.resumable, "[3] a watchdog leaves it immediately resumable")
+
+// -----------------------------------------------------------------------------
+print("--- [4] the memory ceiling: same state, different cause ---")
+
+var mem = Zym.newVM()
+mem.setMemoryLimit(mem.memoryUsed() + 262144)
+var memStatus = mem.run("var h = []\nvar i = 0\nwhile (true) { push(h, [i, i])\n i = i + 1 }")
+var mi = mem.info()
+assert_wrap(memStatus.status == Zym.STATUS.SUSPENDED, "[4] ceiling reports SUSPENDED")
+assert_wrap(mi.state == Zym.STATE.SUSPENDED, "[4] state is SUSPENDED, same as a watchdog")
+assert_wrap(mi.cause == Zym.CAUSE.MEMORY_LIMIT, "[4] but the cause differs")
+assert_wrap(mi.bytesWanted > 0, "[4] the request that crossed is reported")
+assert_wrap(mi.memoryLimit > 0, "[4] the limit is reported")
+assert_wrap(mi.resumable == false, "[4] and it is sticky, so not resumable")
+
+// Granting room retires it without a separate clear.
+mem.setMemoryLimit(mem.memoryUsed() + 262144)
+assert_wrap(mem.info().resumable, "[4] granting room makes it resumable")
+
+// -----------------------------------------------------------------------------
+print("--- [5] a hard stop ---")
+
+var stopped = Zym.newVM()
+stopped.requestStop()
+var stopStatus = stopped.run(SPIN)
+var si = stopped.info()
+assert_wrap(stopStatus.status == Zym.STATUS.SUSPENDED, "[5] a stop reports SUSPENDED")
+assert_wrap(si.cause == Zym.CAUSE.HOST_STOP, "[5] cause is HOST_STOP")
+assert_wrap(si.resumable == false, "[5] sticky until cleared")
+stopped.clearStop()
+assert_wrap(stopped.info().resumable, "[5] clearStop makes it resumable")
+
+// -----------------------------------------------------------------------------
+print("--- [6] a failure is a different state, not a different cause ---")
+
+var boom = Zym.newVM()
+boom.run("var bad = null\nbad.nope()")
+var bi = boom.info()
+assert_wrap(bi.state == Zym.STATE.FAILED, "[6] a failure is FAILED")
+assert_wrap(bi.state != Zym.STATE.SUSPENDED, "[6] never SUSPENDED")
+assert_wrap(bi.cause == Zym.CAUSE.RUNTIME_ERROR, "[6] with a runtime-error cause")
+assert_wrap(bi.resumable == false, "[6] and cannot be resumed")
+
+// -----------------------------------------------------------------------------
+print("--- [7] resuming in slices under a watchdog ---")
+
+var slicer = Zym.newVM()
+slicer.setWatchdog(50000)
+var st = slicer.run("var t = 0\nvar i = 0\nwhile (i < 400000) { t = t + 1\n i = i + 1 }\nfunc get() { return t }")
+var slices = 0
+while (st.status == Zym.STATUS.SUSPENDED && slices < 500) {
+    // The cause is what makes this loop safe to write: it only continues for
+    // a preemption, and stops for anything the parent must decide about.
+    if (slicer.info().cause != Zym.CAUSE.PREEMPT) { slices = 9999 }
+    else {
+        st = { status: slicer.resume() }
+        slices = slices + 1
+    }
+}
+assert_wrap(st.status == Zym.STATUS.OK, "[7] slicing completes the work")
+assert_wrap(slicer.info().state == Zym.STATE.IDLE, "[7] and ends IDLE")
+slicer.call("get", [])
+assert_wrap(slicer.callResult() == 400000, "[7] the work really finished")
+
+// -----------------------------------------------------------------------------
+print("==========================================================")
+print("TEST RESULTS")
+print("==========================================================")
+print("Tests Passed:")
+print(testsPassed)
+print("Tests Failed:")
+print(testsFailed)
+if (testsFailed == 0) {
+    print("ALL TESTS PASSED!")
+} else {
+    print("SOME TESTS FAILED")
+}
+print("==========================================================")

@@ -87,9 +87,10 @@ available when you need finer control.
 - **Pipeline status codes.** The mutating pipeline calls (`compile`,
   `runChunk`, `call`, `deserializeChunk`) return values from
   `Zym.STATUS`: `OK` (`0`), `COMPILE_ERROR` (`1`),
-  `RUNTIME_ERROR` (`2`), `YIELD` (`3`). `runChunk` and `call`
-  auto-loop on `YIELD` until the call resolves to `OK` or a non-yield
-  error.
+  `RUNTIME_ERROR` (`2`), `SUSPENDED` (`3`). There is one suspended
+  status rather than one per reason, because it is one VM state: a
+  watchdog, `requestStop`, and the memory ceiling all land there and
+  are told apart by asking the child, not by the status.
 
 ---
 
@@ -99,7 +100,9 @@ available when you need finer control.
 | --- | --- | --- |
 | `Zym.cliNatives()` | `[string]` | The list of native names the calling VM is allowed to grant to its children, in grant order (catalog declaration order at the root). `Buffer` is omitted (it is universal, not grantable). |
 | `Zym.newVM()` | `ChildVM` | Allocates a fresh in-process VM. The returned value is a struct of method closures (see below) bound to the new VM. The child's allocator is inherited from the parent (not script-selectable). The child starts with `Buffer` auto-installed and an empty grantable set; the parent must explicitly grant any other natives via `registerCliNative` *before* the child enters the execution phase. |
-| `Zym.STATUS` | `map` | Status code constants returned by pipeline calls: `OK`, `COMPILE_ERROR`, `RUNTIME_ERROR`, `YIELD`, `ABORTED`. `ABORTED` means the child was stopped by its host (a watchdog expiring or `requestStop()`), and is deliberately distinct from `RUNTIME_ERROR` so a parent can tell "I stopped it" from "it failed on its own". |
+| `Zym.STATE` | `map` | What a child *is*: `IDLE`, `RUNNING`, `SUSPENDED`, `FAILED`. Compare against `cv.info().state`. |
+| `Zym.CAUSE` | `map` | Why it is there: `NONE`, `SCRIPT_YIELD`, `PREEMPT`, `PREEMPT_BLOCKED`, `HOST_STOP`, `MEMORY_LIMIT`, `RUNTIME_ERROR`, `COMPILE_ERROR`. New reasons to stop are added here rather than to `STATE` or `STATUS`, so existing branches keep meaning what they meant. `SCRIPT_YIELD` is reserved: the language has no cooperative yield yet, so nothing sets it. |
+| `Zym.STATUS` | `map` | Status code constants returned by pipeline calls: `OK`, `COMPILE_ERROR`, `RUNTIME_ERROR`, `SUSPENDED`. `SUSPENDED` means the child paused with its frames intact and can be resumed — a watchdog expiring, `requestStop()`, or the memory ceiling. Deliberately distinct from `RUNTIME_ERROR` so a parent can tell "I stopped it" from "it failed on its own"; use `oomPending()` to tell a memory pause from a time one. |
 
 ---
 
@@ -127,6 +130,7 @@ they raise `no such native`.
 | `cv.cliNatives()` | `[string]` | The names this child has been granted, in grant order. Equivalent to "what this child could grant onward". |
 | `cv.hasFunction(name, arity)` | `bool` | True iff the child has a top-level function `name` with exactly the given fixed arity. Strict slot probe. |
 | `cv.hasFunc(name [, arity])` | `bool` | Existence probe with an optional arity. With one argument, returns `true` if **any** callable named `name` exists at any arity (fixed *or* variadic). With two arguments, returns `true` if calling `name` with exactly `arity` args can dispatch — i.e., either an exact fixed-arity match or a variadic with `arity >= fixed-prefix`. Useful for entry-point discovery (`if (vm.hasFunc("main")) ...`) before any `cv.call`. Not intended for hot paths. |
+| `cv.info()` | `map` | One snapshot of the child: `{ state, cause, resumable, preemptId, bytesWanted, memoryLimit, memoryUsed }`. Compare `state` against `Zym.STATE.*` and `cause` against `Zym.CAUSE.*`. `resumable` folds "is it suspended" together with "has every sticky condition been cleared", which is otherwise three separate checks. `preemptId` is meaningful for the preemption causes, `bytesWanted` for `MEMORY_LIMIT`. Taken as one call so the fields cannot disagree with each other. |
 | `cv.preemptCapacity()` | `int` | Total preemption slots the VM was built with. A build-time constant (32 in this CLI, 8 by default in `zym_core`), not per-child. |
 | `cv.preemptReserve()` | `int` | Slots currently held back from the child. `0` unless `setPreemptReserve` was called. |
 | `cv.preemptUsed()` | `int` | Live entries in the child's table, parent-registered and child-registered together. |
@@ -149,7 +153,7 @@ Mirror `full_executor.cpp` step-for-step.
 | `cv.disassembleChunk(chunk, name)` | `string` | Human-readable disassembly of a compiled or deserialized chunk, the same listing `zym <file> --dump` produces. `name` labels the top-level chunk in the output (pass `null` for the default `"chunk"`). Returns `null` if the listing could not be captured (an environmental failure such as an unwritable temp dir), so a failed dump never aborts a caller mid-pipeline. |
 | `cv.serializeChunk(chunk, opts)` | `{ status, bytes }` | Serializes a compiled chunk to a `Buffer` of `.zbc` bytes. `opts.includeLineInfo` mirrors compile. |
 | `cv.deserializeChunk(chunk, bytes)` | `int` (status) | Loads `.zbc` bytes (a `Buffer`) into a freshly-allocated chunk. **Flips the child into execution phase.** |
-| `cv.runChunk(chunk)` | `int` (status) | Runs a compiled or deserialized chunk on the child. Auto-loops on `YIELD`. **Flips the child into execution phase.** |
+| `cv.runChunk(chunk)` | `int` (status) | Runs a compiled or deserialized chunk on the child. Continues automatically only past a preempt callback that could not be run; a watchdog, a stop, or the memory ceiling is handed back as `SUSPENDED`. **Flips the child into execution phase.** |
 | `cv.resume()` | `int` (status) | Continues a child that stopped. An abort **suspends** rather than unwinds: frames, `ip`, and stack are intact, so the child picks up at the exact instruction that was interrupted. Auto-loops on `YIELD`. Whatever caused the stop is still in force, so clear it first (see [Sandbox controls](#sandbox-controls)) or the resume aborts again immediately. |
 | `cv.run(source)` | `{ status, result }` | One-shot helper: registers a hidden source file, **runs the preprocessor**, compiles, and runs the chunk in a single call. `source` is a `string` or a `Buffer` of utf-8 source bytes (not a `.zbc` Buffer — use `runBytecode` for that). `status` is a `Zym.STATUS` code; `result` is the marshalled top-level return value (or `null` on non-`OK` status). **Flips the child into execution phase.** |
 | `cv.runBytecode(bytes)` | `{ status, result }` | One-shot helper for serialized bytecode: deserializes `bytes` (a `Buffer` produced by `serializeChunk`) into a fresh chunk and runs it. Same return shape as `run`. **Flips the child into execution phase.** |
@@ -168,7 +172,7 @@ half.
 All three mechanisms are deliberately **abort-only** — they take no callback.
 A watchdog that called back into the child would be something the child could
 intercept, mishandle, or loop inside. On expiry the child unwinds to
-`Zym.STATUS.ABORTED` with no diagnostic pushed and no script-visible handler
+`Zym.STATUS.SUSPENDED` with no diagnostic pushed and no script-visible handler
 run, so it cannot observe or block its own termination.
 
 A watchdog bounds how long the child *runs*. A memory ceiling bounds how much
@@ -1130,7 +1134,7 @@ vm.compile(untrusted, chunk, null, "untrusted.zym", {})
 var wd = vm.setWatchdog(1000000)       // resource half: 1M instructions
 var status = vm.runChunk(chunk)
 
-if (status == Zym.STATUS.ABORTED) {
+if (status == Zym.STATUS.SUSPENDED) {
     print("child exceeded its budget and was stopped")
 } else if (status != Zym.STATUS.OK) {
     print("child failed on its own")
@@ -1142,7 +1146,7 @@ vm.clearWatchdog(wd)
 child exceeded its budget and was stopped
 ```
 
-The parent keeps running: a stop is per-VM. Testing `ABORTED` separately
+The parent keeps running: a stop is per-VM. Testing `SUSPENDED` separately
 from `RUNTIME_ERROR` is what lets you distinguish "I killed it" from "it
 threw", which matters when you are reporting back to whoever supplied the
 code.
@@ -1209,11 +1213,73 @@ countdown.
 
 ---
 
+### Telling apart why a child stopped
+
+Every pause returns the same `Zym.STATUS.SUSPENDED`, because it is one VM
+state. Which one it was — and what to do about it — comes from `cv.info()`.
+
+```zym
+// A parent telling apart the reasons a child stopped — from script.
+func describe(vm) {
+    var i = vm.info()
+    if (i.cause == Zym.CAUSE.PREEMPT)      { return "out of time (entry " + str(i.preemptId) + ")" }
+    if (i.cause == Zym.CAUSE.MEMORY_LIMIT) { return "out of memory (wanted " + str(i.bytesWanted) + " B)" }
+    if (i.cause == Zym.CAUSE.HOST_STOP)    { return "stopped by us" }
+    if (i.cause == Zym.CAUSE.RUNTIME_ERROR){ return "it failed on its own" }
+    return "finished"
+}
+
+var a = Zym.newVM()
+a.setWatchdog(200000)
+a.run("var i = 0\nwhile (true) { i = i + 1 }")
+print("A: %v  (resumable: %v)", describe(a), a.info().resumable)
+
+var b = Zym.newVM()
+b.setMemoryLimit(b.memoryUsed() + 262144)
+b.run("var h = []\nvar i = 0\nwhile (true) { push(h, [i, i])\n i = i + 1 }")
+print("B: %v  (resumable: %v)", describe(b), b.info().resumable)
+
+var c = Zym.newVM()
+c.requestStop()
+c.run("var i = 0\nwhile (true) { i = i + 1 }")
+print("C: %v  (resumable: %v)", describe(c), c.info().resumable)
+
+var d = Zym.newVM()
+d.run("var bad = null\nbad.nope()")
+print("D: %v  (state == FAILED: %v)", describe(d), d.info().state == Zym.STATE.FAILED)
+
+var e = Zym.newVM()
+e.run("var x = 1 + 1")
+print("E: %v  (state == IDLE: %v)", describe(e), e.info().state == Zym.STATE.IDLE)
+```
+
+```
+A: out of time (entry 1)  (resumable: true)
+B: out of memory (wanted 64 B)  (resumable: false)
+C: stopped by us  (resumable: false)
+D: it failed on its own  (state == FAILED: true)
+E: finished  (state == IDLE: true)
+```
+
+(Case D also prints the child's own runtime error, which is the child failing
+as intended.)
+
+Read the `resumable` column rather than inferring it. A watchdog leaves the
+child immediately continuable, so it reads `true`; a memory ceiling and a stop
+are both sticky and read `false` until cleared. That one field is the
+difference between a resume loop that makes progress and one that spins.
+
+Note `D` lands in `Zym.STATE.FAILED`, not `SUSPENDED` — a failure is a
+different state, not a different reason for the same one, so it can never be
+mistaken for something to resume.
+
+---
+
 ### Capping a child's memory
 
 A watchdog stops a child that runs too long. It does nothing about one that
 allocates until the host dies. `setMemoryLimit` is the other bound, and it
-reports through the same `ABORTED` status — check `oomPending()` to tell the
+reports through the same `SUSPENDED` status — check `oomPending()` to tell the
 two apart.
 
 Size the ceiling relative to a freshly spawned VM rather than picking an
@@ -1230,7 +1296,7 @@ vm.setMemoryLimit(vm.memoryUsed() + 262144)   // 256 KiB of headroom
 
 var status = vm.run(greedy)
 
-if (status.status == Zym.STATUS.ABORTED && vm.oomPending()) {
+if (status.status == Zym.STATUS.SUSPENDED && vm.oomPending()) {
     print("child hit its memory ceiling at %v bytes", vm.memoryUsed())
     vm.free()
 }
@@ -1272,7 +1338,7 @@ vm.setMemoryLimit(vm.memoryUsed() + budget)
 var status = vm.runChunk(chunk)
 var grants = 0
 
-while (status == Zym.STATUS.ABORTED && vm.oomPending() && grants < 32) {
+while (status == Zym.STATUS.SUSPENDED && vm.oomPending() && grants < 32) {
     grants = grants + 1
     // Decide, per grant, whether this child has earned more room.
     vm.setMemoryLimit(vm.memoryUsed() + budget)
@@ -1317,7 +1383,7 @@ var wd = vm.setWatchdog(50000)
 var status = vm.runChunk(chunk)
 var slices = 0
 
-while (status == Zym.STATUS.ABORTED) {
+while (status == Zym.STATUS.SUSPENDED) {
     slices = slices + 1
     // ... host work between slices ...
     status = vm.resume()
@@ -1333,10 +1399,10 @@ finished after 28 slices, total = 200000
 ```
 
 Use this shape when you want cooperative progress. For a hard ceiling, do
-**not** loop: treat the first `ABORTED` as final and tear the child down.
+**not** loop: treat the first `SUSPENDED` as final and tear the child down.
 
 ```zym
-if (vm.runChunk(chunk) == Zym.STATUS.ABORTED) {
+if (vm.runChunk(chunk) == Zym.STATUS.SUSPENDED) {
     print("child exceeded its budget")
     vm.free()
 }

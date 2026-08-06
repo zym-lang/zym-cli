@@ -100,7 +100,7 @@ int main(void) {
         CHECK(c != NULL, "fixture compiles");
         ZymPreemptId wd = zym_preemptRegister(vm, 200000, zym_newNull(), 0);
         CHECK(wd != 0, "watchdog registers");
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED,
               "infinite loop is stopped by the watchdog");
         zym_freeChunk(vm, c);
         zym_freeVM(vm);
@@ -109,7 +109,7 @@ int main(void) {
         ZymVM* vm = zym_newVM(NULL);
         ZymChunk* c = compile_or_null(vm, SPIN_SHIELDED);
         zym_preemptRegister(vm, 200000, zym_newNull(), 0);
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED,
               "a script shield cannot suppress a non-maskable watchdog");
         zym_freeChunk(vm, c);
         zym_freeVM(vm);
@@ -138,9 +138,9 @@ int main(void) {
         ZymChunk* c = compile_or_null(vm, WORK);
         zym_requestStop(vm);
         CHECK(zym_stopRequested(vm), "stopRequested reflects a pending stop");
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED,
               "a pending stop aborts the run");
-        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+        CHECK(zym_resume(vm) == ZYM_STATUS_SUSPENDED,
               "the stop is sticky: resuming without clearing re-aborts");
         zym_clearStop(vm);
         CHECK(!zym_stopRequested(vm), "clearStop resets the flag");
@@ -156,12 +156,12 @@ int main(void) {
         ZymChunk* c = compile_or_null(vm, WORK);
         ZymPreemptId wd = zym_preemptRegister(vm, 50000, zym_newNull(), 0);
         ZymStatus st = zym_runChunk(vm, c);
-        CHECK(st == ZYM_STATUS_ABORTED, "watchdog interrupts partway through");
+        CHECK(st == ZYM_STATUS_SUSPENDED, "watchdog interrupts partway through");
 
         // A rearming watchdog grants one fresh slice per resume, so the work
         // completes in slices. Bounded so a regression cannot spin forever.
         int slices = 0;
-        while (st == ZYM_STATUS_ABORTED && slices < 500) {
+        while (st == ZYM_STATUS_SUSPENDED && slices < 500) {
             st = zym_resume(vm);
             slices++;
         }
@@ -177,7 +177,7 @@ int main(void) {
         ZymVM* vm = zym_newVM(NULL);
         ZymChunk* c = compile_or_null(vm, WORK);
         zym_preemptRegister(vm, 50000, zym_newNull(), ZYM_PREEMPT_ONESHOT);
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "oneshot watchdog fires");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED, "oneshot watchdog fires");
         CHECK(zym_resume(vm) == ZYM_STATUS_OK,
               "a oneshot retires after firing, so one resume finishes");
         zym_freeChunk(vm, c);
@@ -190,7 +190,7 @@ int main(void) {
         ZymChunk* c = compile_or_null(vm, WORK);
         ZymPreemptId a = zym_preemptRegister(vm, 50000, zym_newNull(), 0);
         ZymPreemptId b = zym_preemptRegister(vm, 90000, zym_newNull(), 0);
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED,
               "the nearest of several watchdogs fires first");
         zym_preemptUnregister(vm, a);
         zym_preemptUnregister(vm, b);
@@ -205,9 +205,9 @@ int main(void) {
         ZymChunk* c = compile_or_null(vm, WORK);
         ZymPreemptId wd = zym_preemptRegister(vm, 50000, zym_newNull(), 0);
         zym_requestStop(vm);
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "stopped with both armed");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED, "stopped with both armed");
         zym_preemptUnregister(vm, wd);
-        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+        CHECK(zym_resume(vm) == ZYM_STATUS_SUSPENDED,
               "watchdog gone but stop still pending: still aborts");
         zym_clearStop(vm);
         CHECK(zym_resume(vm) == ZYM_STATUS_OK, "clearing both lets it run free");
@@ -348,6 +348,43 @@ int main(void) {
         zym_freeVM(vm);
     }
 
+    // ---- the completion helpers must not swallow a supervision event -----
+    {
+        // YIELD and ABORTED collapsed into one SUSPENDED status, so a resume
+        // loop written as `while (s == SUSPENDED) resume()` now disarms every
+        // watchdog on the VM. zym_runToCompletion exists so nobody writes that:
+        // it continues only past causes the host has no decision to make about.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, SPIN_FOREVER);
+        zym_preemptRegister(vm, 200000, zym_newNull(), 0);
+        CHECK(zym_runToCompletion(vm, c) == ZYM_STATUS_SUSPENDED,
+              "runToCompletion hands a watchdog back instead of resuming past it");
+        CHECK(zym_vmCause(vm) == ZYM_CAUSE_PREEMPT, "and names the cause");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        zym_requestStop(vm);
+        CHECK(zym_runToCompletion(vm, c) == ZYM_STATUS_SUSPENDED,
+              "nor does it resume past a hard stop");
+        CHECK(zym_vmCause(vm) == ZYM_CAUSE_HOST_STOP, "cause is the stop");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        // And it still completes an ordinary program in one call.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, WORK);
+        CHECK(zym_runToCompletion(vm, c) == ZYM_STATUS_OK,
+              "an unsupervised program runs straight through");
+        zym_call(vm, "get", 0);
+        CHECK(zym_asNumber(zym_getCallResult(vm)) == 200000, "and did the work");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
     // ---- the host reserve ------------------------------------------------
     {
         // Script must not be able to starve the host of slots, and its own
@@ -454,7 +491,7 @@ int main(void) {
         ZymVM* vm = zym_newVM(NULL);
         ZymChunk* c = compile_or_null(vm, SPIN_FOREVER);
         zym_preemptRegister(vm, 200000, zym_newNull(), 0);
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED,
               "watchdog leaves the VM suspended inside the chunk");
         zym_freeChunk(vm, c);
         CHECK(zym_resume(vm) == ZYM_STATUS_RUNTIME_ERROR,

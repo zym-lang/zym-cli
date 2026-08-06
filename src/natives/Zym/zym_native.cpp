@@ -65,11 +65,32 @@ const StatusEntry kStatusEntries[] = {
     { "OK",             ZYM_STATUS_OK },
     { "COMPILE_ERROR",  ZYM_STATUS_COMPILE_ERROR },
     { "RUNTIME_ERROR",  ZYM_STATUS_RUNTIME_ERROR },
-    { "YIELD",          ZYM_STATUS_YIELD },
-    // A child VM stopped by the host (watchdog expiry or requestStop).
-    // Distinct from RUNTIME_ERROR so a parent can tell "I killed it" from
-    // "it failed on its own".
-    { "ABORTED",        ZYM_STATUS_ABORTED },
+    // The child paused with its frames intact and can be resumed. A watchdog,
+    // requestStop, the memory ceiling, and an unservable preempt callback all
+    // land here -- ask the child which. Distinct from RUNTIME_ERROR so a parent
+    // can tell "I stopped it" from "it failed on its own".
+    { "SUSPENDED",      ZYM_STATUS_SUSPENDED },
+};
+
+// What the child *is*, as opposed to what one call returned.
+const StatusEntry kStateEntries[] = {
+    { "IDLE",      ZYM_STATE_IDLE },
+    { "RUNNING",   ZYM_STATE_RUNNING },
+    { "SUSPENDED", ZYM_STATE_SUSPENDED },
+    { "FAILED",    ZYM_STATE_FAILED },
+};
+
+// Why it is there. New reasons to stop are added here rather than to STATE or
+// STATUS, so a parent's existing branches keep meaning what they meant.
+const StatusEntry kCauseEntries[] = {
+    { "NONE",            ZYM_CAUSE_NONE },
+    { "SCRIPT_YIELD",    ZYM_CAUSE_SCRIPT_YIELD },
+    { "PREEMPT",         ZYM_CAUSE_PREEMPT },
+    { "PREEMPT_BLOCKED", ZYM_CAUSE_PREEMPT_BLOCKED },
+    { "HOST_STOP",       ZYM_CAUSE_HOST_STOP },
+    { "MEMORY_LIMIT",    ZYM_CAUSE_MEMORY_LIMIT },
+    { "RUNTIME_ERROR",   ZYM_CAUSE_RUNTIME_ERROR },
+    { "COMPILE_ERROR",   ZYM_CAUSE_COMPILE_ERROR },
 };
 
 // =============================================================================
@@ -367,15 +388,11 @@ ChunkRes* require_chunk(ZymVM* parentVm, ChildVmHandle* h, ZymValue v) {
 
 // Auto-loop on YIELD (matches `execute_bytecode` in full_executor.cpp).
 ZymStatus run_to_completion_chunk(ZymVM* child, ZymChunk* chunk) {
-    ZymStatus s = zym_runChunk(child, chunk);
-    while (s == ZYM_STATUS_YIELD) s = zym_resume(child);
-    return s;
+    return zym_runToCompletion(child, chunk);
 }
 
 ZymStatus call_to_completion(ZymVM* child, const char* name, int argc, ZymValue* argv) {
-    ZymStatus s = zym_callv(child, name, argc, argv);
-    while (s == ZYM_STATUS_YIELD) s = zym_resume(child);
-    return s;
+    return zym_callToCompletion(child, name, argc, argv);
 }
 
 // =============================================================================
@@ -734,11 +751,17 @@ ZymValue cv_clearWatchdog(ZymVM* parentVm, ZymValue context, ZymValue idV) {
 ZymValue cv_resume(ZymVM* parentVm, ZymValue context) {
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
+    // Same rule as zym_runToCompletion: continue past a preempt callback that
+    // could not be pushed, but hand a watchdog, a stop, or the memory ceiling
+    // straight back to the caller.
     ZymStatus s = zym_resume(h->child);
-    while (s == ZYM_STATUS_YIELD) s = zym_resume(h->child);
-    // Still ABORTED means still suspended in the parked chunk; anything else
-    // means the run is over and the chunk can go.
-    if (s != ZYM_STATUS_ABORTED) release_pending(h);
+    while (s == ZYM_STATUS_SUSPENDED &&
+           zym_vmCause(h->child) == ZYM_CAUSE_PREEMPT_BLOCKED) {
+        s = zym_resume(h->child);
+    }
+    // Still suspended means still parked in the chunk; anything else means the
+    // run is over and the chunk can go.
+    if (s != ZYM_STATUS_SUSPENDED) release_pending(h);
     freeze(h);
     return zym_newNumber((double)s);
 }
@@ -770,6 +793,29 @@ ZymValue cv_stopRequested(ZymVM* parentVm, ZymValue context) {
 
 // Setup-phase only, mirroring the core rule: the reserve has to be fixed before
 // the child runs anything so its preemption budget cannot shift underneath it.
+// One snapshot of the child: what it is, why, and whether resume would get
+// anywhere. Taken together rather than as separate calls so the parent cannot
+// read a state and a cause that disagree.
+ZymValue cv_info(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+
+    ZymVmInfo i;
+    zym_vmInfo(h->child, &i);
+
+    ZymValue m = zym_newMap(parentVm);
+    zym_pushRoot(parentVm, m);
+    zym_mapSet(parentVm, m, "state",       zym_newNumber((double)i.state));
+    zym_mapSet(parentVm, m, "cause",       zym_newNumber((double)i.cause));
+    zym_mapSet(parentVm, m, "resumable",   zym_newBool(i.resumable));
+    zym_mapSet(parentVm, m, "preemptId",   zym_newNumber((double)i.preempt_id));
+    zym_mapSet(parentVm, m, "bytesWanted", zym_newNumber((double)i.bytes_wanted));
+    zym_mapSet(parentVm, m, "memoryLimit", zym_newNumber((double)i.memory_limit));
+    zym_mapSet(parentVm, m, "memoryUsed",  zym_newNumber((double)i.memory_used));
+    zym_popRoot(parentVm);
+    return m;
+}
+
 ZymValue cv_setPreemptReserve(ZymVM* parentVm, ZymValue context, ZymValue slotsV) {
     auto* h = require_child(parentVm, context, /*setupOnly*/ true);
     if (!h) return ZYM_ERROR;
@@ -934,7 +980,7 @@ ZymValue cv_run(ZymVM* parentVm, ZymValue context, ZymValue srcV) {
     }
     zym_mapSet(parentVm, result, "result", marshalled);
 
-    if (st == ZYM_STATUS_ABORTED) {
+    if (st == ZYM_STATUS_SUSPENDED) {
         // Suspended inside `ch`: park it so resume() has bytecode to return to.
         h->pendingChunk     = ch;
         h->pendingSourceMap = sm;
@@ -990,7 +1036,7 @@ ZymValue cv_runBytecode(ZymVM* parentVm, ZymValue context, ZymValue bufV) {
     }
     zym_mapSet(parentVm, result, "result", marshalled);
 
-    if (st == ZYM_STATUS_ABORTED) {
+    if (st == ZYM_STATUS_SUSPENDED) {
         h->pendingChunk = ch;   // see cv_run: suspended inside `ch`
     } else {
         zym_freeChunk(h->child, ch);
@@ -1843,6 +1889,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mReqStop  = MK_CLOSURE("requestStop()", cv_requestStop);                             zym_pushRoot(parentVm, mReqStop);
     ZymValue mClrStop  = MK_CLOSURE("clearStop()", cv_clearStop);                                 zym_pushRoot(parentVm, mClrStop);
     ZymValue mStopped  = MK_CLOSURE("stopRequested()", cv_stopRequested);                         zym_pushRoot(parentVm, mStopped);
+    ZymValue mInfo     = MK_CLOSURE("info()", cv_info);                                          zym_pushRoot(parentVm, mInfo);
     ZymValue mSetRsv   = MK_CLOSURE("setPreemptReserve(slots)", cv_setPreemptReserve);          zym_pushRoot(parentVm, mSetRsv);
     ZymValue mRsv      = MK_CLOSURE("preemptReserve()", cv_preemptReserve);                      zym_pushRoot(parentVm, mRsv);
     ZymValue mPCap     = MK_CLOSURE("preemptCapacity()", cv_preemptCapacity);                    zym_pushRoot(parentVm, mPCap);
@@ -1897,6 +1944,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "requestStop",        mReqStop);
     zym_mapSet(parentVm, obj, "clearStop",          mClrStop);
     zym_mapSet(parentVm, obj, "stopRequested",      mStopped);
+    zym_mapSet(parentVm, obj, "info",              mInfo);
     zym_mapSet(parentVm, obj, "setPreemptReserve", mSetRsv);
     zym_mapSet(parentVm, obj, "preemptReserve",    mRsv);
     zym_mapSet(parentVm, obj, "preemptCapacity",   mPCap);
@@ -1928,7 +1976,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "moduleLoader", mlObj);
 
     // ctx + 30 closures + 2 moduleLoader closures + obj + mlObj = 35
-    for (int i = 0; i < 45; i++) zym_popRoot(parentVm);
+    for (int i = 0; i < 46; i++) zym_popRoot(parentVm);
     return obj;
 }
 
@@ -1958,14 +2006,28 @@ ZymValue nativeZym_create(ZymVM* vm, ZymCliVmCtx* ctx) {
         zym_mapSet(vm, status, e.name, zym_newNumber((double)e.value));
     }
 
+    ZymValue state = zym_newMap(vm);
+    zym_pushRoot(vm, state);
+    for (const auto& e : kStateEntries) {
+        zym_mapSet(vm, state, e.name, zym_newNumber((double)e.value));
+    }
+
+    ZymValue cause = zym_newMap(vm);
+    zym_pushRoot(vm, cause);
+    for (const auto& e : kCauseEntries) {
+        zym_mapSet(vm, cause, e.name, zym_newNumber((double)e.value));
+    }
+
     ZymValue obj = zym_newMap(vm);
     zym_pushRoot(vm, obj);
 
     zym_mapSet(vm, obj, "cliNatives", mCli);
     zym_mapSet(vm, obj, "newVM",      mNew);
     zym_mapSet(vm, obj, "STATUS",     status);
+    zym_mapSet(vm, obj, "STATE",      state);
+    zym_mapSet(vm, obj, "CAUSE",      cause);
 
-    // sharedCtx + cliNatives + newVM + status + obj = 5
-    for (int i = 0; i < 5; i++) zym_popRoot(vm);
+    // sharedCtx + cliNatives + newVM + status + state + cause + obj = 7
+    for (int i = 0; i < 7; i++) zym_popRoot(vm);
     return obj;
 }

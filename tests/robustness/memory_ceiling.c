@@ -2,7 +2,7 @@
 //
 // The other half of the sandbox: a watchdog bounds how long script runs, this
 // bounds how much it allocates. Crossing the ceiling suspends the VM the same
-// way a watchdog does (ZYM_STATUS_ABORTED) instead of calling exit(1), so the
+// way a watchdog does (ZYM_STATUS_SUSPENDED) instead of calling exit(1), so the
 // host keeps the decision about what happens next.
 //
 // The allocation that crosses the line still succeeds -- real memory is
@@ -86,7 +86,7 @@ int main(void) {
         zym_setMemoryLimit(vm, base + (256 * 1024));
         CHECK(zym_getMemoryLimit(vm) == base + (256 * 1024), "limit reads back");
 
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED,
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED,
               "unbounded allocation is stopped by the ceiling");
         CHECK(zym_oomPending(vm), "the pending condition is visible to the host");
 
@@ -126,22 +126,22 @@ int main(void) {
         ZymVM* vm = zym_newVM(NULL);
         ZymChunk* c = compile_or_null(vm, GLUTTON);
         zym_setMemoryLimit(vm, zym_memoryUsed(vm) + (256 * 1024));
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "ceiling trips");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED, "ceiling trips");
 
-        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+        CHECK(zym_resume(vm) == ZYM_STATUS_SUSPENDED,
               "resuming without clearing suspends again immediately");
 
         // Raising the limit above current usage retires the condition.
         zym_setMemoryLimit(vm, zym_memoryUsed(vm) + (256 * 1024));
         CHECK(!zym_oomPending(vm), "raising the limit clears the condition");
-        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+        CHECK(zym_resume(vm) == ZYM_STATUS_SUSPENDED,
               "and the script runs on until it hits the new ceiling too");
 
         // Clearing by hand without freeing anything: the script simply trips
         // it again, which is the honest outcome.
         zym_clearOom(vm);
         CHECK(!zym_oomPending(vm), "clearOom resets the flag");
-        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+        CHECK(zym_resume(vm) == ZYM_STATUS_SUSPENDED,
               "a glutton re-trips a ceiling it is already over");
 
         zym_freeChunk(vm, c);
@@ -153,14 +153,14 @@ int main(void) {
         ZymVM* vm = zym_newVM(NULL);
         ZymChunk* c = compile_or_null(vm, RETAINER);
         zym_setMemoryLimit(vm, zym_memoryUsed(vm) + (64 * 1024));
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "tight ceiling trips");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED, "tight ceiling trips");
 
         zym_setMemoryLimit(vm, 0);   // unlimited
         CHECK(!zym_oomPending(vm), "removing the limit retires the condition");
 
         int slices = 0;
         ZymStatus st = zym_resume(vm);
-        while (st == ZYM_STATUS_ABORTED && slices < 200) {
+        while (st == ZYM_STATUS_SUSPENDED && slices < 200) {
             st = zym_resume(vm);
             slices++;
         }
@@ -175,18 +175,18 @@ int main(void) {
         ZymChunk* c = compile_or_null(vm, GLUTTON);
         zym_setMemoryLimit(vm, zym_memoryUsed(vm) + (256 * 1024));
         zym_requestStop(vm);
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "stopped with both armed");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED, "stopped with both armed");
 
         // Clearing only the memory side must not release the VM.
         zym_clearOom(vm);
-        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+        CHECK(zym_resume(vm) == ZYM_STATUS_SUSPENDED,
               "memory condition cleared but stop still pending: still suspended");
         CHECK(zym_stopRequested(vm), "the stop outranks the ceiling and survives it");
 
         // Clear the stop but leave the ceiling in place -- this fixture never
         // terminates on its own, so the ceiling is what keeps the test bounded.
         zym_clearStop(vm);
-        CHECK(zym_resume(vm) == ZYM_STATUS_ABORTED,
+        CHECK(zym_resume(vm) == ZYM_STATUS_SUSPENDED,
               "with the stop gone the ceiling still bounds the script");
         zym_freeChunk(vm, c);
         zym_freeVM(vm);

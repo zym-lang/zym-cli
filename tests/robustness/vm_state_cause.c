@@ -1,9 +1,9 @@
 // What the VM is, and why.
 //
 // ZymStatus says what one call returned. ZymVmState/ZymVmCause say what the VM
-// *is* and what put it there -- three different reasons currently arrive as the
-// same ABORTED status, so the status alone cannot tell a host whether to grant
-// another slice, free memory, or give up.
+// *is* and what put it there. Every reason arrives as the same SUSPENDED
+// status, by design -- it is one VM state -- so the status alone cannot tell a
+// host whether to grant another slice, free memory, or give up. The cause can.
 //
 // Every transition is covered here, plus the detail fields and `resumable`,
 // which folds together "suspended" with "every sticky condition cleared".
@@ -64,7 +64,7 @@ int main(void) {
         ZymVM* vm = zym_newVM(NULL);
         ZymChunk* c = compile_or_null(vm, SPIN);
         ZymPreemptId wd = zym_preemptRegister(vm, 200000, zym_newNull(), 0);
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "watchdog stops the spin");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED, "watchdog stops the spin");
         CHECK(zym_vmState(vm) == ZYM_STATE_SUSPENDED, "state is suspended, not failed");
         CHECK(zym_vmCause(vm) == ZYM_CAUSE_PREEMPT, "cause is preemption");
 
@@ -82,7 +82,7 @@ int main(void) {
         ZymVM* vm = zym_newVM(NULL);
         ZymChunk* c = compile_or_null(vm, SPIN);
         zym_requestStop(vm);
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "the stop takes effect");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED, "the stop takes effect");
         CHECK(zym_vmState(vm) == ZYM_STATE_SUSPENDED, "still merely suspended");
         CHECK(zym_vmCause(vm) == ZYM_CAUSE_HOST_STOP,
               "and the cause distinguishes it from a watchdog");
@@ -104,7 +104,7 @@ int main(void) {
         ZymVM* vm = zym_newVM(NULL);
         ZymChunk* c = compile_or_null(vm, GLUTTON);
         zym_setMemoryLimit(vm, zym_memoryUsed(vm) + (256 * 1024));
-        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_ABORTED, "the ceiling trips");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_SUSPENDED, "the ceiling trips");
         CHECK(zym_vmState(vm) == ZYM_STATE_SUSPENDED, "suspended, not failed");
         CHECK(zym_vmCause(vm) == ZYM_CAUSE_MEMORY_LIMIT,
               "cause names the memory ceiling");
@@ -175,7 +175,7 @@ int main(void) {
 
         ZymStatus st = zym_runChunk(vm, c);
         int slices = 0;
-        while (st == ZYM_STATUS_ABORTED && slices < 500) {
+        while (st == ZYM_STATUS_SUSPENDED && slices < 500) {
             if (zym_vmCause(vm) != ZYM_CAUSE_PREEMPT) { failures++; break; }
             st = zym_resume(vm);
             slices++;

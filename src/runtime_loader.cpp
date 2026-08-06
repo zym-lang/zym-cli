@@ -161,11 +161,10 @@ static int run_source_entry(const char* source, size_t source_size,
     free(src);
     freeModuleLoadResult(vm, mr);
 
-    ZymStatus result = zym_runChunk(vm, chunk);
-    while (result == ZYM_STATUS_YIELD) {
-        result = zym_resume(vm);
-    }
-    if (result == ZYM_STATUS_ABORTED) {
+    // Auto-resumes only the causes a host has no decision to make about;
+    // a watchdog or a stop still comes back as SUSPENDED.
+    ZymStatus result = zym_runToCompletion(vm, chunk);
+    if (result == ZYM_STATUS_SUSPENDED) {
         fprintf(stderr, "Error: Execution stopped by the host.\n");
     } else if (result != ZYM_STATUS_OK) {
         fprintf(stderr, "Error: Runtime error occurred.\n");
@@ -185,11 +184,8 @@ static int run_source_entry(const char* source, size_t source_size,
         zym_listAppend(vm, argv_list, zym_newString(vm, argv[i]));
     }
     if (zym_hasFunction(vm, "main", 1)) {
-        ZymStatus call_result = zym_call(vm, "main", 1, argv_list);
-        while (call_result == ZYM_STATUS_YIELD) {
-            call_result = zym_resume(vm);
-        }
-        if (call_result == ZYM_STATUS_ABORTED) {
+        ZymStatus call_result = zym_callToCompletion(vm, "main", 1, &argv_list);
+        if (call_result == ZYM_STATUS_SUSPENDED) {
             fprintf(stderr, "Error: Execution stopped by the host.\n");
         } else if (call_result != ZYM_STATUS_OK) {
             fprintf(stderr, "Error: main(argv) function failed.\n");
@@ -288,11 +284,10 @@ int runtime_main(int argc, char** argv, ZymAllocator* allocator) {
 
     free(bytecode);
 
-    ZymStatus result = zym_runChunk(vm, chunk);
-    while (result == ZYM_STATUS_YIELD) {
-        result = zym_resume(vm);
-    }
-    if (result == ZYM_STATUS_ABORTED) {
+    // Auto-resumes only the causes a host has no decision to make about;
+    // a watchdog or a stop still comes back as SUSPENDED.
+    ZymStatus result = zym_runToCompletion(vm, chunk);
+    if (result == ZYM_STATUS_SUSPENDED) {
         fprintf(stderr, "Error: Execution stopped by the host.\n");
     } else if (result != ZYM_STATUS_OK) {
         fprintf(stderr, "Error: Runtime error occurred.\n");
@@ -312,11 +307,8 @@ int runtime_main(int argc, char** argv, ZymAllocator* allocator) {
     }
 
     if (zym_hasFunction(vm, "main", 1)) {
-        ZymStatus call_result = zym_call(vm, "main", 1, argv_list);
-        while (call_result == ZYM_STATUS_YIELD) {
-            call_result = zym_resume(vm);
-        }
-        if (call_result == ZYM_STATUS_ABORTED) {
+        ZymStatus call_result = zym_callToCompletion(vm, "main", 1, &argv_list);
+        if (call_result == ZYM_STATUS_SUSPENDED) {
             fprintf(stderr, "Error: Execution stopped by the host.\n");
         } else if (call_result != ZYM_STATUS_OK) {
             fprintf(stderr, "Error: main(argv) function failed.\n");

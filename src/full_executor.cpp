@@ -804,12 +804,11 @@ static int execute_bytecode(char* bytecode, size_t bytecode_size, int script_arg
 #if DEBUG_SHOW
     printf("Executing bytecode...\n");
 #endif
-    ZymStatus result = zym_runChunk(run_vm, loaded_chunk);
-    while (result == ZYM_STATUS_YIELD) {
-        result = zym_resume(run_vm);
-    }
+    // Auto-resumes only the causes a host has no decision to make about;
+    // a watchdog or a stop still comes back as SUSPENDED.
+    ZymStatus result = zym_runToCompletion(run_vm, loaded_chunk);
 
-    if (result == ZYM_STATUS_ABORTED) {
+    if (result == ZYM_STATUS_SUSPENDED) {
         fprintf(stderr, "Error: Execution stopped by the host.\n");
         zym_freeChunk(run_vm, loaded_chunk);
         zym_freeVM(run_vm);
@@ -836,11 +835,8 @@ static int execute_bytecode(char* bytecode, size_t bytecode_size, int script_arg
     }
 
     if (zym_hasFunction(run_vm, "main", 1)) {
-        ZymStatus call_result = zym_call(run_vm, "main", 1, argv_list);
-        while (call_result == ZYM_STATUS_YIELD) {
-            call_result = zym_resume(run_vm);
-        }
-        if (call_result == ZYM_STATUS_ABORTED) {
+        ZymStatus call_result = zym_callToCompletion(run_vm, "main", 1, &argv_list);
+        if (call_result == ZYM_STATUS_SUSPENDED) {
             fprintf(stderr, "Error: Execution stopped by the host.\n");
             zym_freeChunk(run_vm, loaded_chunk);
             zym_freeVM(run_vm);

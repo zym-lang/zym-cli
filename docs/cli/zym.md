@@ -161,11 +161,14 @@ embedder does: a child can always be stopped, no matter what it does. These
 are the resource half of the sandbox; `registerCliNative` is the capability
 half.
 
-Both mechanisms are deliberately **abort-only** — they take no callback. A
-watchdog that called back into the child would be something the child could
+All three mechanisms are deliberately **abort-only** — they take no callback.
+A watchdog that called back into the child would be something the child could
 intercept, mishandle, or loop inside. On expiry the child unwinds to
 `Zym.STATUS.ABORTED` with no diagnostic pushed and no script-visible handler
 run, so it cannot observe or block its own termination.
+
+A watchdog bounds how long the child *runs*. A memory ceiling bounds how much
+it *allocates*. A stop ends it outright.
 
 | Method | Returns | Notes |
 | --- | --- | --- |
@@ -174,8 +177,24 @@ run, so it cannot observe or block its own termination.
 | `cv.requestStop()` | `null` | Asks the child to stop at its next instruction. Sticky and unmaskable: it is checked before any masking, so a shield, an in-flight preempt callback, or an empty preemption table cannot suppress it. Not cleared automatically. |
 | `cv.stopRequested()` | `bool` | Whether a stop is pending on the child. |
 | `cv.clearStop()` | `null` | Clears a pending stop so the child VM can be reused. |
+| `cv.setMemoryLimit(bytes)` | `null` | Caps the child's heap at `bytes`. `0` means unlimited, which is the default. Raising the limit above current usage also retires a pending condition, so you do not need `clearOom` as well. |
+| `cv.memoryLimit()` | `int` | The child's current ceiling in bytes; `0` if unlimited. |
+| `cv.memoryUsed()` | `int` | Bytes the child currently has allocated. Useful for sizing a ceiling relative to a freshly spawned VM. |
+| `cv.oomPending()` | `bool` | Whether the child is suspended on its memory ceiling. |
+| `cv.clearOom()` | `null` | Clears the pending memory condition without changing the limit. |
 
 Note that a stop is *per-VM*: stopping a child leaves the parent running.
+
+**How the memory ceiling behaves.** Crossing it does **not** fail an
+allocation. The allocation succeeds and the child is then suspended at the
+next instruction boundary, so it is left in a consistent, resumable state
+rather than half-built. Overshoot is bounded by that one allocation. A
+collection runs before the ceiling is declared crossed, so a child that
+merely produces garbage is never charged for it — only what it *retains*
+counts.
+
+The ceiling bounds the child's own allocation. It is not protection against
+the machine genuinely running out of memory.
 
 **Resuming.** A stopped child is not dead. `cv.resume()` continues it from
 the interrupted instruction. What you must clear first depends on what
@@ -187,6 +206,11 @@ stopped it:
 | a rearming watchdog | just `resume()`; each resume grants one fresh slice |
 | a watchdog you are done with | `clearWatchdog(id)` |
 | a watchdog needing a different budget | `setWatchdog` a new one, or drop the old and register another |
+| the memory ceiling | give it room with `setMemoryLimit(...)`, or `clearOom()`; sticky like a stop |
+
+If more than one is pending, all of them have to be cleared. A `requestStop`
+outranks the memory ceiling, so clearing only the memory side leaves the
+child suspended.
 
 A watchdog registered normally rearms itself, which is what makes
 "run in slices" work: every `resume()` buys another `instructions` worth of
@@ -1130,6 +1154,97 @@ vm.clearStop()                         // before reusing the VM
 
 ---
 
+### Capping a child's memory
+
+A watchdog stops a child that runs too long. It does nothing about one that
+allocates until the host dies. `setMemoryLimit` is the other bound, and it
+reports through the same `ABORTED` status — check `oomPending()` to tell the
+two apart.
+
+Size the ceiling relative to a freshly spawned VM rather than picking an
+absolute number: `memoryUsed()` on a new child already includes its own
+runtime footprint.
+
+```zym
+var vm = Zym.newVM()
+vm.registerCliNative("print")
+
+var greedy = "var hoard = []\nvar i = 0\nwhile(true){ push(hoard, [i, i, i])\n i = i + 1 }"
+
+vm.setMemoryLimit(vm.memoryUsed() + 262144)   // 256 KiB of headroom
+
+var status = vm.run(greedy)
+
+if (status.status == Zym.STATUS.ABORTED && vm.oomPending()) {
+    print("child hit its memory ceiling at %v bytes", vm.memoryUsed())
+    vm.free()
+}
+```
+
+```
+child hit its memory ceiling at 286417 bytes
+```
+
+The reported figure is a few bytes past the ceiling, not wildly over it. The
+allocation that crosses the line is allowed to complete — failing it would
+leave the child half-built and unresumable — and the suspend happens at the
+next instruction boundary, so the overshoot is one allocation.
+
+A child that only produces garbage is not charged for it. A collection runs
+before the ceiling is declared crossed, so churning temporaries under a tight
+ceiling still completes; only retained memory counts against the budget.
+
+---
+
+### Metering a child: granting memory in instalments
+
+Because the ceiling suspends rather than kills, it can be used as a meter
+instead of a wall. Each time the child asks for more, the parent decides
+whether it has earned it.
+
+```zym
+var vm = Zym.newVM()
+
+// Retains a bounded amount, so it can actually finish once given room.
+var work = "var rows = []\nvar i = 0\nwhile(i < 20000){ push(rows, [i, i])\n i = i + 1 }\nfunc count(){ return length(rows) }"
+
+var chunk = vm.newChunk()
+vm.compile(work, chunk, null, "work.zym", {})
+
+var budget = 65536                       // start it on a tight 64 KiB
+vm.setMemoryLimit(vm.memoryUsed() + budget)
+
+var status = vm.runChunk(chunk)
+var grants = 0
+
+while (status == Zym.STATUS.ABORTED && vm.oomPending() && grants < 32) {
+    grants = grants + 1
+    // Decide, per grant, whether this child has earned more room.
+    vm.setMemoryLimit(vm.memoryUsed() + budget)
+    status = vm.resume()
+}
+
+vm.call("count", [])
+print("finished after %v grants, rows = %v, used %v bytes",
+      grants, vm.callResult(), vm.memoryUsed())
+```
+
+```
+finished after 30 grants, rows = 20000, used 2209521 bytes
+```
+
+The `grants < 32` bound is the point of the pattern: it is what turns an
+open-ended appetite into a hard total. Without it the loop grants forever and
+you have written an unlimited VM the slow way.
+
+Raising the limit above current usage clears the pending condition on its
+own, which is why the loop needs no `clearOom()`. Use `clearOom()` when you
+want to release the child *without* giving it more room — after dropping
+references on your own side, say. A child that is still over its limit simply
+trips again on its next allocation, which is the honest outcome.
+
+---
+
 ### Resuming a stopped child: running in slices
 
 Because an abort suspends rather than unwinds, a watchdog doubles as a
@@ -1244,8 +1359,14 @@ a problem with the chunk.
   grandchild nest further (subject to its own subset grants).
 - **Allocator is inherited, never script-selectable.** `Zym.newVM()`
   is zero-arg: the child VM transparently reuses the parent's
-  allocator. Memory configuration is not part of the script-visible
-  surface.
+  allocator. What a script *can* configure is how much that allocator
+  hands out — `setMemoryLimit` caps the child's budget — but which
+  allocator is used, and how it obtains memory, stays a host
+  decision.
+- **A memory ceiling bounds the child, not the machine.**
+  `setMemoryLimit` stops a child from allocating past its budget and
+  hands the parent control at that point. It is not a guard against
+  the process genuinely running out of memory, which remains fatal.
 - **`Buffer` is auto-installed on every child.** It does not need to
   be granted, and granting it is a no-op. It is the recommended way
   to pass bulk data across VM boundaries: Buffers cross by byte-copy,

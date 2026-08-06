@@ -763,6 +763,52 @@ ZymValue cv_stopRequested(ZymVM* parentVm, ZymValue context) {
     return zym_newBool(zym_stopRequested(h->child));
 }
 
+// ---- memory ceiling ------------------------------------------------------
+// The allocation counterpart to setWatchdog: a watchdog bounds how long the
+// child runs, this bounds how much it allocates. Crossing it suspends the
+// child with ABORTED, so the same resume() drives recovery.
+
+ZymValue cv_setMemoryLimit(ZymVM* parentVm, ZymValue context, ZymValue bytesV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isNumber(bytesV)) {
+        zym_runtimeError(parentVm, "setMemoryLimit(bytes) expects a number");
+        return ZYM_ERROR;
+    }
+    double bytes = zym_asNumber(bytesV);
+    if (bytes < 0) {
+        zym_runtimeError(parentVm, "setMemoryLimit(bytes) must not be negative");
+        return ZYM_ERROR;
+    }
+    zym_setMemoryLimit(h->child, (size_t)bytes);
+    return zym_newNull();
+}
+
+ZymValue cv_memoryLimit(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    return zym_newNumber((double)zym_getMemoryLimit(h->child));
+}
+
+ZymValue cv_memoryUsed(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    return zym_newNumber((double)zym_memoryUsed(h->child));
+}
+
+ZymValue cv_oomPending(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    return zym_newBool(zym_oomPending(h->child));
+}
+
+ZymValue cv_clearOom(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    zym_clearOom(h->child);
+    return zym_newNull();
+}
+
 ZymValue cv_runChunk(ZymVM* parentVm, ZymValue context, ZymValue chunkV) {
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
@@ -1760,6 +1806,11 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mReqStop  = MK_CLOSURE("requestStop()", cv_requestStop);                             zym_pushRoot(parentVm, mReqStop);
     ZymValue mClrStop  = MK_CLOSURE("clearStop()", cv_clearStop);                                 zym_pushRoot(parentVm, mClrStop);
     ZymValue mStopped  = MK_CLOSURE("stopRequested()", cv_stopRequested);                         zym_pushRoot(parentVm, mStopped);
+    ZymValue mSetMem   = MK_CLOSURE("setMemoryLimit(bytes)", cv_setMemoryLimit);                  zym_pushRoot(parentVm, mSetMem);
+    ZymValue mMemLim   = MK_CLOSURE("memoryLimit()", cv_memoryLimit);                             zym_pushRoot(parentVm, mMemLim);
+    ZymValue mMemUsed  = MK_CLOSURE("memoryUsed()", cv_memoryUsed);                               zym_pushRoot(parentVm, mMemUsed);
+    ZymValue mOomPend  = MK_CLOSURE("oomPending()", cv_oomPending);                               zym_pushRoot(parentVm, mOomPend);
+    ZymValue mClrOom   = MK_CLOSURE("clearOom()", cv_clearOom);                                   zym_pushRoot(parentVm, mClrOom);
     ZymValue mRunSrc   = MK_CLOSURE("run(source)", cv_run);                                      zym_pushRoot(parentVm, mRunSrc);
     ZymValue mRunBc    = MK_CLOSURE("runBytecode(bytes)", cv_runBytecode);                       zym_pushRoot(parentVm, mRunBc);
     ZymValue mCall     = MK_CLOSURE("call(name, args)", cv_call);                                zym_pushRoot(parentVm, mCall);
@@ -1805,6 +1856,11 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "requestStop",        mReqStop);
     zym_mapSet(parentVm, obj, "clearStop",          mClrStop);
     zym_mapSet(parentVm, obj, "stopRequested",      mStopped);
+    zym_mapSet(parentVm, obj, "setMemoryLimit",     mSetMem);
+    zym_mapSet(parentVm, obj, "memoryLimit",        mMemLim);
+    zym_mapSet(parentVm, obj, "memoryUsed",         mMemUsed);
+    zym_mapSet(parentVm, obj, "oomPending",         mOomPend);
+    zym_mapSet(parentVm, obj, "clearOom",           mClrOom);
     zym_mapSet(parentVm, obj, "run",                mRunSrc);
     zym_mapSet(parentVm, obj, "runBytecode",        mRunBc);
     zym_mapSet(parentVm, obj, "call",               mCall);
@@ -1827,7 +1883,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "moduleLoader", mlObj);
 
     // ctx + 30 closures + 2 moduleLoader closures + obj + mlObj = 35
-    for (int i = 0; i < 36; i++) zym_popRoot(parentVm);
+    for (int i = 0; i < 41; i++) zym_popRoot(parentVm);
     return obj;
 }
 

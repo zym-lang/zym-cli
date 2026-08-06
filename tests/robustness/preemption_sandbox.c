@@ -50,6 +50,38 @@ static const char* SPIN_SHIELDED =
     "func spin() { var i = 0\n while (true) { i = i + 1 }\n }\n"
     "Preempt.shield(spin)\n";
 
+// Script-owned entries. These exercise the callback path rather than the
+// abort path: an entry with a callback runs script and then has to be put back
+// into a sane state, which is where both of the bugs below lived.
+static const char* REARM_SRC =
+    "var fires = 0\n"
+    "var id = Preempt.every(10000, func() { fires = fires + 1 })\n"
+    "var i = 0\n"
+    "while (i < 500000) { i = i + 1 }\n"
+    "Preempt.cancel(id)\n"
+    "func get() { return fires }\n";
+
+static const char* ONESHOT_SRC =
+    "var fires = 0\n"
+    "var id = Preempt.once(10000, func() { fires = fires + 1 })\n"
+    "var i = 0\n"
+    "while (i < 500000) { i = i + 1 }\n"
+    "func get() { return fires }\n"
+    "func rem() { return Preempt.remaining(id) }\n";
+
+static const char* SHIELD_RELEASE_SRC =
+    "var fires = 0\n"
+    "var id = Preempt.every(10000, func() { fires = fires + 1 })\n"
+    "func quiet() { var j = 0\n"
+    "               while (j < 50000) { j = j + 1 }\n"
+    "               return 0 }\n"
+    "Preempt.shield(quiet)\n"
+    "var mark = fires\n"
+    "var k = 0\n"
+    "while (k < 300000) { k = k + 1 }\n"
+    "Preempt.cancel(id)\n"
+    "func afterShield() { return fires - mark }\n";
+
 static ZymChunk* compile_or_null(ZymVM* vm, const char* src) {
     ZymCompilerConfig cfg = { 1 };
     ZymChunk* chunk = zym_newChunk(vm);
@@ -219,6 +251,54 @@ int main(void) {
         CHECK(zym_resume(fresh) == ZYM_STATUS_RUNTIME_ERROR,
               "resuming a VM that never ran is an error, not a crash");
         zym_freeVM(fresh);
+    }
+
+    // ---- script entries with callbacks come back cleanly -----------------
+    {
+        // A rearming entry used to fire exactly once: preemptArm skips a
+        // masked entry, so while the callback ran the counter was armed from
+        // whatever was left (INT32_MAX with nothing else live), and nothing
+        // re-armed once the callback returned and unmasked it.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, REARM_SRC);
+        CHECK(c != NULL, "rearm fixture compiles");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK, "rearm fixture runs");
+        zym_call(vm, "get", 0);
+        CHECK(zym_asNumber(zym_getCallResult(vm)) > 1,
+              "a rearming script entry fires repeatedly, not once");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        // A one-shot whose callback ran was left live with remaining <= 0.
+        // preemptArm clamps that to 1, so it re-fired on the next instruction
+        // and never stopped. It must retire instead.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, ONESHOT_SRC);
+        CHECK(c != NULL, "oneshot fixture compiles");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK,
+              "a one-shot callback does not re-fire forever");
+        zym_call(vm, "get", 0);
+        CHECK(zym_asNumber(zym_getCallResult(vm)) == 1,
+              "a one-shot callback runs exactly once");
+        zym_call(vm, "rem", 0);
+        CHECK(zym_asNumber(zym_getCallResult(vm)) == -1,
+              "and the entry is retired afterwards");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        // Leaving a shield unmasks maskable entries, which also needs a
+        // re-arm; without it the shield retired them permanently.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, SHIELD_RELEASE_SRC);
+        CHECK(c != NULL, "shield-release fixture compiles");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK, "shield-release fixture runs");
+        zym_call(vm, "afterShield", 0);
+        CHECK(zym_asNumber(zym_getCallResult(vm)) > 0,
+              "maskable entries fire again once the shield exits");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
     }
 
     // ---- freeing the chunk a suspended VM is parked in -------------------

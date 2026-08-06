@@ -45,6 +45,35 @@ int  zym_preemptCapacity(void);
 | `zym_preemptTrigger(vm, id)` | `bool` | Fires the entry at the next instruction boundary regardless of its countdown. The hook for wall-clock deadlines, signals, and UI cancel buttons. |
 | `zym_preemptCapacity()` | `int` | Total entries per VM. |
 
+### Reserving slots from script
+
+The table is shared, so a script that registers greedily can leave you unable to arm a watchdog or a deadline later. A reserve holds slots back.
+
+```c
+bool zym_setHostPreemptReserve(ZymVM* vm, int slots);
+int  zym_getHostPreemptReserve(const ZymVM* vm);
+
+int  zym_preemptCount(const ZymVM* vm, bool script_owned_only);
+int  zym_preemptScriptCapacity(const ZymVM* vm);   // capacity - reserve
+int  zym_preemptScriptAvailable(const ZymVM* vm);
+int  zym_preemptIds(const ZymVM* vm, ZymPreemptId* out, int max);
+```
+
+Script's ceiling becomes `capacity - reserve`; you stay free to use any slot beyond your reserve if script has not taken it. A reserve is a floor for you and a ceiling for script.
+
+It is expressed as a reserve rather than a script quota deliberately. A quota of 24 is right on a 32-slot build, wrong on an 8-slot MCU build, and stale on a 64-slot one. A reserve of 8 is right on all three without recomputing anything, and "keep me some room" is what you actually meant.
+
+**Settable only before the VM has executed anything.** It returns `false` afterwards. That is not a limitation to work around — it is what lets a script treat its budget as fixed: whatever `Preempt.capacity()` reads at the start of a run is still bindable at the end. A budget that could shrink mid-run for reasons script cannot observe would make every registration a lottery. It also means the reserve can never fail to be satisfied, since at bring-up script holds nothing.
+
+The payoff is late binding without idle cost. Without a reserve, a host that might need a slot later has to register one up front — and a live entry is not free: it joins every rearm calculation and every expiry scan, and a rearming entry fires on its own schedule whether you want it yet or not. With a reserve you bind only when you actually need to, and the slot is guaranteed to be there.
+
+```c
+ZymVM* vm = zym_newVM(NULL);
+zym_setHostPreemptReserve(vm, 8);      // before anything runs
+// ... grant natives, define globals, compile ...
+// script may now hold at most capacity - 8, and 8 remain yours
+```
+
 ### Watchdogs: a NULL callback means abort
 
 Passing `zym_newNull()` as the callback registers a **watchdog**. On expiry the VM does not run anything — it unwinds to `ZYM_STATUS_ABORTED` and returns to you.
@@ -189,7 +218,7 @@ For a soft deadline the script may defer briefly, register a maskable entry and 
 ## Notes
 
 - **Authority is the whole design.** Host entries are non-maskable and host-owned by default; script entries are always maskable and script-owned. A script cannot disarm what is supervising it, and a shield it raises never suppresses a host watchdog.
-- **`zym_preemptRemaining` is readable by script for any entry.** Scripts can see a host deadline's countdown. Observation is harmless; the guarantee is about control.
+- **Host entries are invisible to script, not just untouchable.** `Preempt.remaining` returns `-1` for an entry script does not own and `Preempt.ids()` lists only its own, so a script cannot map your supervision by probing the id space. Expose a deadline through your own native if you want it seen.
 - **One callback per expiry.** When several entries come due on the same instruction, the first by registration order runs; the rest keep refreshed deadlines for a later pass. A callback-less entry always wins over a callback, so a watchdog is honoured before any script runs.
 - **An entry is masked while its own callback runs**, so it cannot re-enter itself. Other entries still fire.
 - **The dispatch cost is one decrement and one predicted branch**, whether or not any entries exist. All table work happens on expiry, in a cold path.

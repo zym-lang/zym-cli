@@ -348,6 +348,103 @@ int main(void) {
         zym_freeVM(vm);
     }
 
+    // ---- the host reserve ------------------------------------------------
+    {
+        // Script must not be able to starve the host of slots, and its own
+        // budget must not move under it: whatever capacity it reads at the
+        // start of a run is still bindable at the end.
+        const int cap     = zym_preemptCapacity();
+        const int reserve = cap / 4 > 0 ? cap / 4 : 1;
+
+        ZymVM* vm = zym_newVM(NULL);
+        CHECK(zym_getHostPreemptReserve(vm) == 0, "no reserve by default");
+        CHECK(zym_setHostPreemptReserve(vm, reserve),
+              "the reserve is settable before the VM has executed");
+        CHECK(zym_preemptScriptCapacity(vm) == cap - reserve,
+              "script capacity is capacity minus reserve");
+        CHECK(!zym_setHostPreemptReserve(vm, -1) &&
+              !zym_setHostPreemptReserve(vm, cap + 1),
+              "out-of-range reserves are refused");
+
+        ZymChunk* c = compile_or_null(vm,
+            "var mine = []\n"
+            "var capStart = Preempt.capacity()\n"
+            "while (Preempt.available() > 0) {\n"
+            "    push(mine, Preempt.every(900000, func() { var z = 0 }))\n"
+            "}\n"
+            "func held() { return length(mine) }\n"
+            "func capStartWas() { return capStart }\n"
+            "func capNow() { return Preempt.capacity() }\n"
+            "func idsLen() { return length(Preempt.ids()) }\n"
+            "func avail() { return Preempt.available() }\n");
+        CHECK(c != NULL, "reserve fixture compiles");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK, "reserve fixture runs");
+
+        zym_call(vm, "held", 0);
+        CHECK((int)zym_asNumber(zym_getCallResult(vm)) == cap - reserve,
+              "script fills exactly its ceiling and no further");
+        zym_call(vm, "capStartWas", 0);
+        int cap_start = (int)zym_asNumber(zym_getCallResult(vm));
+        zym_call(vm, "capNow", 0);
+        CHECK(cap_start == (int)zym_asNumber(zym_getCallResult(vm)),
+              "the capacity script saw at the start still holds at the end");
+        zym_call(vm, "idsLen", 0);
+        CHECK((int)zym_asNumber(zym_getCallResult(vm)) == cap - reserve,
+              "ids() lists everything script owns");
+        zym_call(vm, "avail", 0);
+        CHECK((int)zym_asNumber(zym_getCallResult(vm)) == 0,
+              "available() reads zero once the ceiling is reached");
+
+        // The reserve is still the host's, after script took all it could.
+        int claimed = 0;
+        for (int i = 0; i < reserve; i++) {
+            if (zym_preemptRegister(vm, 900000, zym_newNull(), 0) != 0) claimed++;
+        }
+        CHECK(claimed == reserve,
+              "the host can still claim every reserved slot afterwards");
+        CHECK(zym_preemptCount(vm, true) == cap - reserve, "per-owner counts are right");
+        CHECK(zym_preemptCount(vm, false) == cap, "and the total is the full table");
+
+        CHECK(!zym_setHostPreemptReserve(vm, 1),
+              "the reserve is locked once the VM has executed");
+
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        // Host entries must be invisible, not merely untouchable: ids are
+        // handed out sequentially, so an ungated remaining() would let script
+        // map the host's supervision by probing 1, 2, 3...
+        ZymVM* vm = zym_newVM(NULL);
+        for (int i = 0; i < 4; i++) zym_preemptRegister(vm, 900000, zym_newNull(), 0);
+
+        ZymChunk* c = compile_or_null(vm,
+            "var mine = Preempt.every(900000, func() { var z = 0 })\n"
+            "func probed() {\n"
+            "    var seen = 0\n"
+            "    var i = 1\n"
+            "    while (i < 60) {\n"
+            "        if (Preempt.remaining(i) >= 0) { seen = seen + 1 }\n"
+            "        i = i + 1\n"
+            "    }\n"
+            "    return seen\n"
+            "}\n"
+            "func ownVisible() { return Preempt.remaining(mine) >= 0 }\n");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK, "probe fixture runs");
+
+        zym_call(vm, "probed", 0);
+        CHECK((int)zym_asNumber(zym_getCallResult(vm)) == 1,
+              "probing the id space finds only script's own entry");
+        zym_call(vm, "ownVisible", 0);
+        CHECK(zym_asBool(zym_getCallResult(vm)),
+              "while its own entry stays readable");
+        CHECK(zym_preemptRemaining(vm, 1) >= 0,
+              "the host can still read a host entry it owns");
+
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
     // ---- freeing the chunk a suspended VM is parked in -------------------
     {
         // An abort suspends rather than unwinds, so `ip` still points into the

@@ -75,8 +75,8 @@ available when you need finer control.
   *setup phase*. The first call to any of `compile`, `runChunk`,
   `call`, or `deserializeChunk` flips it into *execution phase*.
   Setup-only methods (`registerCliNative`, `defineGlobal`,
-  `registerNative`) cease to be callable after the flip; re-running
-  the same chunk does not reopen setup.
+  `registerNative`, `setPreemptReserve`) cease to be callable after
+  the flip; re-running the same chunk does not reopen setup.
 - **Errors.** Bad argument types or arity raise a Zym runtime error
   of the form `Zym.method(args) ...`. *Capability and lifecycle
   failures all collapse to a single* `no such native` *error* —
@@ -117,6 +117,7 @@ they raise `no such native`.
 | --- | --- | --- |
 | `cv.registerCliNative(arg)` | `bool` | Grants one or more native modules to the child. `arg` is a single name (`"File"`), a list of names (`["File", "Path"]`), or the literal string `"ALL"`. Names must be in the calling VM's own grantable set; granting a name that is unknown *or* withheld raises `no such native` (same error in both cases). Idempotent: re-granting a name already on the child is a silent no-op. With `"ALL"`, every name from the calling VM's grantable set is granted in declaration order. |
 | `cv.defineGlobal(name, value)` | `bool` | Defines a global on the child. The value is marshalled across the VM boundary as a full graph copy (primitives, strings, lists, maps, structs, enums, `Buffer` byte-copy, and closures wrapped as cross-VM callables). Last-write-wins on name collision (matches the underlying C API). |
+| `cv.setPreemptReserve(slots)` | `bool` | Holds `slots` preemption entries back from the child, so the parent can still arm a watchdog or a deadline after the child has been running. The child's own ceiling becomes `preemptCapacity() - slots`. Setup-phase only by design: a child must be able to treat its preemption budget as fixed, so whatever it reads at the start of a run is still bindable at the end. Raises for a value outside `0 .. cv.preemptCapacity()`. |
 | `cv.registerNative(signature, fn)` | `bool` | Registers a parent closure as a native on the child. `signature` follows the C-side `"name(arg1, arg2)"` convention and also accepts the script-natural rest form `"name(a, ...rest)"` / `"name(...rest)"` for variadics. The child sees a regular native; calling it from the child marshals args back to the parent, runs `fn`, and marshals the result back to the child. |
 
 ### Query
@@ -126,6 +127,9 @@ they raise `no such native`.
 | `cv.cliNatives()` | `[string]` | The names this child has been granted, in grant order. Equivalent to "what this child could grant onward". |
 | `cv.hasFunction(name, arity)` | `bool` | True iff the child has a top-level function `name` with exactly the given fixed arity. Strict slot probe. |
 | `cv.hasFunc(name [, arity])` | `bool` | Existence probe with an optional arity. With one argument, returns `true` if **any** callable named `name` exists at any arity (fixed *or* variadic). With two arguments, returns `true` if calling `name` with exactly `arity` args can dispatch — i.e., either an exact fixed-arity match or a variadic with `arity >= fixed-prefix`. Useful for entry-point discovery (`if (vm.hasFunc("main")) ...`) before any `cv.call`. Not intended for hot paths. |
+| `cv.preemptCapacity()` | `int` | Total preemption slots the VM was built with. A build-time constant (32 in this CLI, 8 by default in `zym_core`), not per-child. |
+| `cv.preemptReserve()` | `int` | Slots currently held back from the child. `0` unless `setPreemptReserve` was called. |
+| `cv.preemptUsed()` | `int` | Live entries in the child's table, parent-registered and child-registered together. |
 | `cv.diagnostics()` | `[map]` | Drains the child's diagnostic sink. Each entry is `{ severity, file, fileId, line, column, startByte, length, message }`. `severity` is one of `"error"`, `"warning"`, `"info"`, `"hint"`. After this call the child's sink is empty. |
 | `cv.moduleLoader.getCaller()` | `string` or `null` | Resolved module path of the **immediate parent** of the module whose `read_callback` is currently running. `null` when the *entry* module is being loaded (it has no caller). **Raises a runtime error if called outside of an active `loadModules` `read_callback` invocation.** See [Module loader context](#module-loader-context). |
 | `cv.moduleLoader.getStack()` | `[string]` | The full chain of in-flight `read_callback` invocations on this VM. `stack[0]` is the entry module, `stack[stack.length - 1]` equals the `path` the current callback was invoked with. `getCaller()` is equivalent to `stack[stack.length - 2]` (or `null` at the entry). **Raises a runtime error if called outside of an active `read_callback` invocation.** |
@@ -1151,6 +1155,57 @@ vm.requestStop()                       // sticky, unmaskable
 print("%v", vm.stopRequested())        // true
 vm.clearStop()                         // before reusing the VM
 ```
+
+---
+
+### Reserving preemption slots from a child
+
+The preemption table is shared between parent and child, and it is not large.
+A child that registers greedily can leave the parent unable to arm a watchdog
+*later* — the parent keeps its ability to `requestStop`, which needs no slot,
+but loses the softer supervision.
+
+`setPreemptReserve` holds slots back. It is setup-phase only, and that
+restriction is the feature: a child must be able to treat its budget as fixed,
+so `Preempt.capacity()` read at the start of a run is still bindable at the end.
+
+```zym
+var vm = Zym.newVM()
+
+// Keep 8 slots for ourselves before the child runs anything.
+vm.setPreemptReserve(8)
+
+var res = vm.run("
+var mine = []
+while (Preempt.available() > 0) {
+    push(mine, Preempt.every(900000, func() { var z = 0 }))
+}
+func held() { return length(mine) }
+")
+
+vm.call("held", [])
+print("child took %v of %v slots", vm.callResult(), vm.preemptCapacity())
+print("reserved: %v, used in total: %v", vm.preemptReserve(), vm.preemptUsed())
+
+// The reserve is still ours, after the child took everything it could.
+var wd = vm.setWatchdog(500000)
+print("parent still armed a watchdog: %v", wd != 0)
+```
+
+```
+child took 24 of 32 slots
+reserved: 8, used in total: 24
+parent still armed a watchdog: true
+```
+
+The child is not told it was limited — `Preempt.capacity()` simply reports 24,
+and it has no way to see the parent's entries at all. Note `Preempt` needs no
+grant: it is part of the language surface, like `Buffer`, not a catalog entry.
+
+The alternative to a reserve is registering the watchdog up front, which costs
+a live entry that joins every rearm and expiry scan and fires on its own
+schedule whether or not you want it yet. A reserve buys the slot without the
+countdown.
 
 ---
 

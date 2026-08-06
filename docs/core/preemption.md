@@ -34,8 +34,16 @@ This is the script-visible half. The host embedding the VM has its own preemptio
 | Method | Returns | Notes |
 | --- | --- | --- |
 | `Preempt.setSlice(id, n)` | bool | Changes the interval and **restarts the countdown** — the entry next fires `n` instructions from now, not `n` from when it was registered. `false` if unknown or not script-owned. |
-| `Preempt.remaining(id)` | number | Instructions left before this entry fires. `-1` if the id is unknown, which is also what a retired one-shot reports. |
+| `Preempt.remaining(id)` | number | Instructions left before this entry fires. `-1` if the id is unknown, **not script-owned**, or belongs to a retired one-shot. |
 | `Preempt.request(id)` | bool | Makes an entry fire at the next instruction boundary instead of waiting out its countdown. `false` if unknown or not script-owned. |
+
+### Budget
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `Preempt.capacity()` | number | How many entries this script may hold in total. Fixed for the whole run. Not the size of the VM's table — the host may have reserved slots for itself. |
+| `Preempt.available()` | number | How many more it can register right now. Never promises room that does not exist. |
+| `Preempt.ids()` | list | The ids this script currently owns, in table order. |
 
 ### Critical sections
 
@@ -53,7 +61,9 @@ Every entry a script registers is **script-owned** and **maskable**. That has tw
 - A script **cannot touch host-owned entries.** `cancel`, `setSlice`, and `request` all check ownership and return `false` for an entry the host registered. A script cannot disarm the watchdog that is supervising it.
 - A shield only suppresses **maskable** entries, which means only script's own. A host watchdog registered non-maskable fires straight through `Preempt.shield(...)`, mid-critical-section, and there is nothing script can do about that.
 
-`remaining` is deliberately *not* gated. A script may read the countdown of any entry, including host ones. Observing a deadline is harmless; the guarantee is about control, not secrecy.
+Host entries are invisible, not merely untouchable. `remaining` returns `-1` for an entry a script does not own, and `ids()` lists only its own, so probing the id space discovers nothing. A host that *wants* a script to see one of its deadlines can expose it through a native of its own; that is the host's call to make, not something the default surface leaks.
+
+The budget a script sees is its own, too. `capacity()` reports what the host left it, which may be less than the VM's table holds, and it cannot change while the script runs: whatever it reads at the start is still bindable at the end.
 
 A shield is also not a way to become uninterruptible. It defers your own callbacks so a short critical section is not re-entered partway through. It does not extend your time budget, and it cannot outlast a host stop.
 
@@ -98,6 +108,55 @@ done: 1000000 rows
 The loop contains no reporting logic at all.
 
 Two things to read off that output. The counts are not round numbers, because the slice counts *instructions*, not iterations — the callback lands near the deadline, wherever that falls. And the spacing tells you the loop body costs roughly nine instructions per row: 200000 instructions bought about 22222 rows. That ratio is the only reliable way to size a slice, and it changes with the shape of the work, so measure rather than guess.
+
+---
+
+### Working within the budget
+
+The table is shared with the host and is not large, so a script that registers
+several entries should ask rather than assume. `capacity()` is its ceiling for
+the whole run; `available()` never reports room that is not really there.
+
+```zym
+// Ask before spending, rather than registering and hoping.
+print("capacity: %v, available: %v", Preempt.capacity(), Preempt.available())
+
+var watchers = []
+var wanted = 3
+var i = 0
+while (i < wanted && Preempt.available() > 0) {
+    push(watchers, Preempt.every(400000, func() { var z = 0 }))
+    i = i + 1
+}
+
+print("registered %v of %v wanted", length(watchers), wanted)
+print("ids: %v, available now: %v", length(Preempt.ids()), Preempt.available())
+
+// Ids are only ever this script's own, so cleanup is a loop over ids().
+var live = Preempt.ids()
+var j = 0
+while (j < length(live)) {
+    Preempt.cancel(live[j])
+    j = j + 1
+}
+print("after cleanup: %v owned, %v available", length(Preempt.ids()), Preempt.available())
+```
+
+```
+capacity: 32, available: 32
+registered 3 of 3 wanted
+ids: 3, available now: 29
+after cleanup: 0 owned, 32 available
+```
+
+Those numbers are from the `zym` CLI, which builds with 32 slots; `zym_core`
+defaults to 8, and a host may have reserved some of them. That is the reason to
+read `capacity()` rather than hard-code a number — the same script running
+under a different host sees a different, and equally correct, answer.
+
+`ids()` returns only entries this script owns, which is what makes the cleanup
+loop safe: it can never cancel something the host is relying on, and there is
+nothing in it the host did not intend the script to have.
 
 ---
 

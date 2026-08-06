@@ -768,6 +768,43 @@ ZymValue cv_stopRequested(ZymVM* parentVm, ZymValue context) {
 // child runs, this bounds how much it allocates. Crossing it suspends the
 // child with ABORTED, so the same resume() drives recovery.
 
+// Setup-phase only, mirroring the core rule: the reserve has to be fixed before
+// the child runs anything so its preemption budget cannot shift underneath it.
+ZymValue cv_setPreemptReserve(ZymVM* parentVm, ZymValue context, ZymValue slotsV) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ true);
+    if (!h) return ZYM_ERROR;
+    if (!zym_isNumber(slotsV)) {
+        zym_runtimeError(parentVm, "setPreemptReserve(slots) expects a number");
+        return ZYM_ERROR;
+    }
+    double slots = zym_asNumber(slotsV);
+    if (slots < 0 || slots > (double)zym_preemptCapacity()) {
+        zym_runtimeError(parentVm,
+            "setPreemptReserve(slots): must be between 0 and %d", zym_preemptCapacity());
+        return ZYM_ERROR;
+    }
+    return zym_newBool(zym_setHostPreemptReserve(h->child, (int)slots));
+}
+
+ZymValue cv_preemptReserve(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    return zym_newNumber((double)zym_getHostPreemptReserve(h->child));
+}
+
+ZymValue cv_preemptCapacity(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    (void)h;
+    return zym_newNumber((double)zym_preemptCapacity());
+}
+
+ZymValue cv_preemptUsed(ZymVM* parentVm, ZymValue context) {
+    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
+    if (!h) return ZYM_ERROR;
+    return zym_newNumber((double)zym_preemptCount(h->child, /*script_owned_only=*/false));
+}
+
 ZymValue cv_setMemoryLimit(ZymVM* parentVm, ZymValue context, ZymValue bytesV) {
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
@@ -1806,6 +1843,10 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mReqStop  = MK_CLOSURE("requestStop()", cv_requestStop);                             zym_pushRoot(parentVm, mReqStop);
     ZymValue mClrStop  = MK_CLOSURE("clearStop()", cv_clearStop);                                 zym_pushRoot(parentVm, mClrStop);
     ZymValue mStopped  = MK_CLOSURE("stopRequested()", cv_stopRequested);                         zym_pushRoot(parentVm, mStopped);
+    ZymValue mSetRsv   = MK_CLOSURE("setPreemptReserve(slots)", cv_setPreemptReserve);          zym_pushRoot(parentVm, mSetRsv);
+    ZymValue mRsv      = MK_CLOSURE("preemptReserve()", cv_preemptReserve);                      zym_pushRoot(parentVm, mRsv);
+    ZymValue mPCap     = MK_CLOSURE("preemptCapacity()", cv_preemptCapacity);                    zym_pushRoot(parentVm, mPCap);
+    ZymValue mPUsed    = MK_CLOSURE("preemptUsed()", cv_preemptUsed);                            zym_pushRoot(parentVm, mPUsed);
     ZymValue mSetMem   = MK_CLOSURE("setMemoryLimit(bytes)", cv_setMemoryLimit);                  zym_pushRoot(parentVm, mSetMem);
     ZymValue mMemLim   = MK_CLOSURE("memoryLimit()", cv_memoryLimit);                             zym_pushRoot(parentVm, mMemLim);
     ZymValue mMemUsed  = MK_CLOSURE("memoryUsed()", cv_memoryUsed);                               zym_pushRoot(parentVm, mMemUsed);
@@ -1856,6 +1897,10 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "requestStop",        mReqStop);
     zym_mapSet(parentVm, obj, "clearStop",          mClrStop);
     zym_mapSet(parentVm, obj, "stopRequested",      mStopped);
+    zym_mapSet(parentVm, obj, "setPreemptReserve", mSetRsv);
+    zym_mapSet(parentVm, obj, "preemptReserve",    mRsv);
+    zym_mapSet(parentVm, obj, "preemptCapacity",   mPCap);
+    zym_mapSet(parentVm, obj, "preemptUsed",       mPUsed);
     zym_mapSet(parentVm, obj, "setMemoryLimit",     mSetMem);
     zym_mapSet(parentVm, obj, "memoryLimit",        mMemLim);
     zym_mapSet(parentVm, obj, "memoryUsed",         mMemUsed);
@@ -1883,7 +1928,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "moduleLoader", mlObj);
 
     // ctx + 30 closures + 2 moduleLoader closures + obj + mlObj = 35
-    for (int i = 0; i < 41; i++) zym_popRoot(parentVm);
+    for (int i = 0; i < 45; i++) zym_popRoot(parentVm);
     return obj;
 }
 

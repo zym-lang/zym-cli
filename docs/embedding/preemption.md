@@ -14,7 +14,7 @@ For the script-visible surface, which is deliberately weaker, see `docs/core/pre
 - **`ZymPreemptId`** is a `uint32_t`. `0` is never valid and is what a full table returns.
 - **Ownership.** Everything registered through this API is *host-owned*. Script cannot cancel, retune, or trigger it. The reverse is not true: the host can address script-owned entries by id.
 - **Maskability is opt-in.** Host entries are non-maskable by default, so `Preempt.shield(...)` in the script does not suppress them. Pass `ZYM_PREEMPT_MASKABLE` if you want an entry a script may defer.
-- **Capacity is fixed at 8 entries per VM**, shared with script. `zym_preemptCapacity()` reports it rather than hard-coding it at the call site.
+- **Capacity is a build-time constant**, shared with script. It defaults to **8** (the MCU figure) and is overridden with `-DZYM_PREEMPT_MAX_ENTRIES=N`, the same way `FRAMES_MAX` and `STACK_MAX` are; the `zym` CLI builds with 32. Each slot costs 24 bytes of VM struct. Always read `zym_preemptCapacity()` rather than hard-coding a number — a library compiled against one value and a host assuming another is the failure this avoids.
 - **Slices below 1 are clamped to 1**, so an entry always makes forward progress.
 
 ---
@@ -38,7 +38,7 @@ int  zym_preemptCapacity(void);
 
 | Function | Returns | Notes |
 | --- | --- | --- |
-| `zym_preemptRegister(vm, slice, callback, flags)` | `ZymPreemptId` | Registers a host-owned entry. `0` when the table is full — check it. Pass `zym_newNull()` as `callback` for a watchdog (see below). |
+| `zym_preemptRegister(vm, slice, callback, flags)` | `ZymPreemptId` | Registers a host-owned entry. `0` when the table is full, or when `callback` is a closure taking arguments — check it. Pass `zym_newNull()` as `callback` for a watchdog (see below). |
 | `zym_preemptUnregister(vm, id)` | `bool` | Removes an entry. `false` if the id is unknown. A host may unregister a script-owned entry. |
 | `zym_preemptSetSlice(vm, id, slice)` | `bool` | Sets the interval and **restarts the countdown**: the entry next fires `slice` instructions from now. This is how you give an exhausted entry more budget after an abort. |
 | `zym_preemptRemaining(vm, id)` | `int` | Instructions until this entry fires; `-1` if unknown. |
@@ -193,5 +193,5 @@ For a soft deadline the script may defer briefly, register a maskable entry and 
 - **One callback per expiry.** When several entries come due on the same instruction, the first by registration order runs; the rest keep refreshed deadlines for a later pass. A callback-less entry always wins over a callback, so a watchdog is honoured before any script runs.
 - **An entry is masked while its own callback runs**, so it cannot re-enter itself. Other entries still fire.
 - **The dispatch cost is one decrement and one predicted branch**, whether or not any entries exist. All table work happens on expiry, in a cold path.
-- **Callbacks must have arity 0.** A non-zero-arity callback is never invoked.
+- **Callbacks must have arity 0.** `zym_preemptRegister` returns `0` for a callback that takes arguments, the same way it reports a full table — the VM has no way to invoke one, so it will not hand back an id for an entry that could never fire.
 - **Stop is per-VM.** Stopping a child VM leaves its parent, and every sibling, running.

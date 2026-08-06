@@ -301,6 +301,53 @@ int main(void) {
         zym_freeVM(vm);
     }
 
+    // ---- an unusable callback cannot be registered -----------------------
+    {
+        // pushPreemptFrame requires arity 0. A callback taking arguments used
+        // to register fine, consume a table slot, come due every slice, and
+        // never run -- with nothing reported. If registration succeeds, the
+        // callback has to be invocable.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm,
+            "var fired = 0\n"
+            "Preempt.every(1000, func(x) { fired = fired + 1 })\n");
+        CHECK(c != NULL, "arity fixture compiles");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_RUNTIME_ERROR,
+              "registering a non-zero-arity callback is refused, not accepted");
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        // Same guard on the host path, reported the way a full table is: id 0.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm,
+            "func takesOne(a) { return a }\n"
+            "func takesNone() { return 1 }\n"
+            "func getOne() { return takesOne }\n"
+            "func getNone() { return takesNone }\n");
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_OK, "host arity fixture runs");
+
+        CHECK(zym_preemptRegister(vm, 1000, zym_newNull(), 0) != 0,
+              "a callback-less watchdog registers");
+
+        zym_call(vm, "getOne", 0);
+        ZymValue oneArg = zym_getCallResult(vm);
+        zym_pushRoot(vm, oneArg);
+        CHECK(zym_preemptRegister(vm, 1000, oneArg, 0) == 0,
+              "the host cannot register a non-zero-arity callback either");
+        zym_popRoot(vm);
+
+        zym_call(vm, "getNone", 0);
+        ZymValue noArg = zym_getCallResult(vm);
+        zym_pushRoot(vm, noArg);
+        CHECK(zym_preemptRegister(vm, 1000, noArg, 0) != 0,
+              "a zero-arity callback registers normally");
+        zym_popRoot(vm);
+
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
     // ---- freeing the chunk a suspended VM is parked in -------------------
     {
         // An abort suspends rather than unwinds, so `ip` still points into the

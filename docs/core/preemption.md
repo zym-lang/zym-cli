@@ -12,8 +12,8 @@ This is the script-visible half. The host embedding the VM has its own preemptio
 
 - **Slices are instruction counts, not time.** A slice of `10000` means "after ten thousand more VM instructions", which is deterministic and independent of machine speed. There is no wall-clock scheduling here; see `Time` for that.
 - **Ids are numbers.** Every registration returns an id used to address the entry later. `0` is never a valid id. An unknown id is not an error: mutators return `false` and `remaining` returns `-1`.
-- **Callbacks take no arguments.** A callback registered with a non-zero arity is never invoked. Give it zero parameters and close over what it needs.
-- **The table is small and fixed.** A VM has room for **8** entries total, shared between script and host. Registering when it is full raises a runtime error rather than silently doing nothing.
+- **Callbacks take no arguments.** Registration is refused if `fn` takes any, because the VM could not invoke it. Close over what the callback needs instead.
+- **The table is small and fixed.** Entries are shared between script and host, and the count is set when the VM is built: **8** by default, **32** in the `zym` CLI. Registering when it is full raises a runtime error rather than silently doing nothing. Do not hard-code the number — a script that needs to know should register and handle the failure.
 - **Slices below 1 are clamped to 1.** Registering `0` or a negative slice gives you `1`.
 - **Errors.** Bad argument types raise a runtime error naming the method, e.g. `Preempt.every(slice, fn): fn must be a function.`
 
@@ -25,8 +25,8 @@ This is the script-visible half. The host embedding the VM has its own preemptio
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `Preempt.every(slice, fn)` | number (id) | Calls `fn` every `slice` instructions, rearming after each call. Raises if the table is full. |
-| `Preempt.once(slice, fn)` | number (id) | Calls `fn` once, `slice` instructions from now, then retires the entry. Raises if the table is full. |
+| `Preempt.every(slice, fn)` | number (id) | Calls `fn` every `slice` instructions, rearming after each call. Raises if `fn` takes arguments, or if the table is full. |
+| `Preempt.once(slice, fn)` | number (id) | Calls `fn` once, `slice` instructions from now, then retires the entry. Raises if `fn` takes arguments, or if the table is full. |
 | `Preempt.cancel(id)` | bool | Removes an entry. `false` if the id is unknown **or not script-owned**. |
 
 ### Tuning and inspection

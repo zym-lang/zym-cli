@@ -94,6 +94,9 @@ target_compile_definitions(zym_core PUBLIC FRAMES_MAX=${ZYM_FRAMES_MAX})
 set(ZYM_STACK_MAX 262144 CACHE STRING "Max VM value stack size (overrides STACK_MAX in zym_core/src/vm.h)")
 target_compile_definitions(zym_core PUBLIC STACK_MAX=${ZYM_STACK_MAX})
 
+set(ZYM_PREEMPT_MAX_ENTRIES 32 CACHE STRING "Preemption table slots per VM (overrides ZYM_PREEMPT_MAX_ENTRIES in zym_core/src/vm.h)")
+target_compile_definitions(zym_core PUBLIC ZYM_PREEMPT_MAX_ENTRIES=${ZYM_PREEMPT_MAX_ENTRIES})
+
 set(APP_SOURCES
         src/main.cpp
         src/runtime_loader.hpp

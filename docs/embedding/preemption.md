@@ -129,7 +129,19 @@ A collection runs before the ceiling is declared crossed, so a script that merel
 
 The condition is sticky, like a stop. `zym_setMemoryLimit` above current usage retires it automatically, so raising the limit is a single call; use `zym_clearOom` when you want to release the VM without granting more room.
 
-This bounds the script. It is not a guard against the process genuinely running out of memory, which remains fatal.
+This bounds the script. The allocator genuinely running out is a different condition, handled separately below.
+
+### When the allocator itself fails
+
+A ceiling breach is recoverable because memory *is* available and you merely declined to hand more over: the allocation succeeds and the VM suspends. A genuine allocation failure cannot work that way, because `reallocate` has to return usable memory to callers that assume success.
+
+So it unwinds instead. The VM leaves the operation entirely and the call returns `ZYM_STATUS_RUNTIME_ERROR` (or `ZYM_STATUS_COMPILE_ERROR` from `zym_compile`) with `zym_vmCause()` reading `ZYM_CAUSE_OUT_OF_MEMORY`, in state `ZYM_STATE_FAILED` rather than `SUSPENDED`. That distinction is deliberate: the frames were abandoned mid-operation, so the VM is not continuable. Free it.
+
+The unwind lands at the **nearest** API boundary, so a native that re-entered the VM gets a status back and returns normally rather than being jumped over.
+
+One case remains fatal: an allocation failure with no boundary armed, which means outside any VM operation, such as during `zym_newVM` itself. There is nowhere to unwind to, and a host that cannot construct a VM has nothing to recover into.
+
+A compile has no instruction boundary to suspend at, so the memory ceiling reaches it through the frontend's cancellation poll instead: crossing the ceiling mid-compile stops it at the next statement boundary with a compile error, rather than letting it run away unbounded.
 
 ---
 

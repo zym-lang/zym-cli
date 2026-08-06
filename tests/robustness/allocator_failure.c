@@ -242,6 +242,87 @@ int main(void) {
         zym_freeVM(vm);
     }
 
+    // ---- failure while DESERIALIZING untrusted bytes ---------------------
+    {
+        // The loader is hardened against malformed sizes, but a well-formed
+        // chunk whose allocation simply fails used to take the process down,
+        // which undercut that hardening.
+        Starver s = { -1, 0 };
+        ZymAllocator a = make_allocator(&s);
+        ZymVM* vm = zym_newVM(&a);
+
+        ZymCompilerConfig cfg = { 1 };
+        ZymChunk* src = zym_newChunk(vm);
+        CHECK(zym_compile(vm, HUNGRY, src, NULL, "t.zym", cfg, NULL) == ZYM_STATUS_OK,
+              "a chunk compiles for serializing");
+
+        char* bytes = NULL; size_t nbytes = 0;
+        CHECK(zym_serializeChunk(vm, cfg, src, &bytes, &nbytes) == ZYM_STATUS_OK,
+              "and serializes");
+
+        ZymChunk* dst = zym_newChunk(vm);
+        // Deserializing this chunk takes only a handful of allocations (the
+        // string pool interns each name once), so the budget has to be tight.
+        s.budget = 3;
+        ZymStatus st = zym_deserializeChunk(vm, dst, bytes, nbytes);
+        CHECK(st == ZYM_STATUS_COMPILE_ERROR,
+              "an allocation failure while deserializing returns instead of exiting");
+        CHECK(zym_vmCause(vm) == ZYM_CAUSE_OUT_OF_MEMORY, "with out-of-memory");
+
+        s.budget = -1;
+        free(bytes);
+        zym_freeChunk(vm, src);
+        zym_freeChunk(vm, dst);
+        zym_freeVM(vm);
+        CHECK(1, "and teardown is clean");
+    }
+
+#if ZYM_HAS_PARSE_TREE_RETENTION
+    // ---- the tooling entries, which retain what compile discards ---------
+    {
+        // zym_parseOnly and zym_check hand back a parse tree (and symbol
+        // table) that outlive the call, so they are the peak-memory paths in
+        // the library -- and they run in a long-lived language server on
+        // whatever file a user happens to open.
+        Starver s = { -1, 0 };
+        ZymAllocator a = make_allocator(&s);
+        ZymVM* vm = zym_newVM(&a);
+
+        ZymParseTree* tree = (ZymParseTree*)0x1;   // poisoned: must be NULLed
+        s.budget = 30;
+        ZymStatus st = zym_parseOnly(vm, HUNGRY, NULL, "t.zym", &tree);
+        CHECK(st == ZYM_STATUS_COMPILE_ERROR,
+              "an allocation failure in parseOnly returns instead of exiting");
+        CHECK(zym_vmCause(vm) == ZYM_CAUSE_OUT_OF_MEMORY, "with out-of-memory");
+        CHECK(tree == NULL, "and never hands back a half-built tree");
+
+        s.budget = -1;
+        zym_freeVM(vm);
+        CHECK(1, "teardown is clean after a failed parseOnly");
+    }
+#endif
+#if ZYM_HAS_SYMBOL_TABLE
+    {
+        Starver s = { -1, 0 };
+        ZymAllocator a = make_allocator(&s);
+        ZymVM* vm = zym_newVM(&a);
+
+        ZymParseTree*   tree  = (ZymParseTree*)0x1;
+        ZymSymbolTable* table = (ZymSymbolTable*)0x1;
+        s.budget = 30;
+        ZymStatus st = zym_check(vm, HUNGRY, NULL, "t.zym", &tree, &table);
+        CHECK(st == ZYM_STATUS_COMPILE_ERROR,
+              "an allocation failure in check returns instead of exiting");
+        CHECK(zym_vmCause(vm) == ZYM_CAUSE_OUT_OF_MEMORY, "with out-of-memory");
+        CHECK(tree == NULL && table == NULL,
+              "and clears both out-params rather than leaving them partial");
+
+        s.budget = -1;
+        zym_freeVM(vm);
+        CHECK(1, "teardown is clean after a failed check");
+    }
+#endif
+
     printf(failures == 0 ? "ALL PASS\n" : "%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;
 }

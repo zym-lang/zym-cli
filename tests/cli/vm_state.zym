@@ -1,3 +1,4 @@
+// @expect-stderr  deliberately fails a child VM to check FAILED is reported
 // =============================================================================
 // CHILD VM STATE AND CAUSE
 //

@@ -1,3 +1,4 @@
+// @expect-stderr  covers the missing-archive error path, which reports on stderr
 // ============================================================================
 // COMPREHENSIVE Pack NATIVE TEST SUITE
 // Exercises the `Pack` global: from-scratch `Pack.build`, the read-only

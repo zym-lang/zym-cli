@@ -89,6 +89,18 @@ assert_wrap(isOdd(0) == false, "4.4: Mutual recursion - isOdd(0)")
 assert_wrap(isOdd(1) == true, "4.5: Mutual recursion - isOdd(1)")
 assert_wrap(isOdd(11) == true, "4.6: Mutual recursion - isOdd(11)")
 
+// Depth well past FRAMES_MAX (4096). The shallow cases above only prove the
+// answers are right -- they pass whether or not the calls are optimized, which
+// is why mutual recursion went unoptimized in the default mode unnoticed. Only
+// a depth that would overflow an unoptimized stack actually tests TCO.
+//
+// Note there is no @tco pragma here on purpose: the point is that the DEFAULT
+// mode handles it. Mutual recursion always has one forward reference, and the
+// forward direction used to be refused.
+assert_wrap(isEven(200000) == true, "4.7: Mutual recursion past frame limit - isEven(200000)")
+assert_wrap(isOdd(200001) == true, "4.8: Mutual recursion past frame limit - isOdd(200001)")
+assert_wrap(isEven(199999) == false, "4.9: Mutual recursion past frame limit - isEven(199999)")
+
 // ============================================================================
 // TEST 5: Tail Call with Closure Capture
 // ============================================================================

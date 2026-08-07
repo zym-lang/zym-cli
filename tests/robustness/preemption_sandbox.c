@@ -385,6 +385,53 @@ int main(void) {
         zym_freeVM(vm);
     }
 
+    // ---- the event pump: calling into a parked VM ------------------------
+    {
+        // A host parked on a preemption is entitled to call a script function:
+        // handing the script a periodic tick is the point of a callback-less
+        // entry. That call must not disturb the parked run.
+        //
+        // Two defects made this impossible. settle_result treated the nested
+        // call's completion as the whole VM finishing, clearing the suspension;
+        // and zym_call_prepare placed the call at stack slot 0, on top of the
+        // suspended script's live registers, so the run completed with silently
+        // wrong values.
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm,
+            "var total = 0\n"
+            "var i = 0\n"
+            "while (i < 300000) { total = total + i\n i = i + 1 }\n"
+            "func total_() { return total }\n"
+            "func tick() { return 99 }\n");
+        CHECK(c != NULL, "event-pump fixture compiles");
+
+        zym_preemptRegister(vm, 50000, zym_newNull(), 0);
+        ZymStatus st = zym_runChunk(vm, c);
+        CHECK(st == ZYM_STATUS_SUSPENDED, "the entry parks the VM");
+
+        int pumped = 0, slices = 0;
+        while (st == ZYM_STATUS_SUSPENDED && slices < 500) {
+            if (zym_vmCause(vm) != ZYM_CAUSE_PREEMPT) break;
+            // The call a host would make from its handler.
+            if (zym_callv(vm, "tick", 0, NULL) == ZYM_STATUS_OK &&
+                zym_asNumber(zym_getCallResult(vm)) == 99) {
+                pumped++;
+            }
+            st = zym_resume(vm);
+            slices++;
+        }
+
+        CHECK(pumped > 1, "the script function is callable on every tick");
+        CHECK(st == ZYM_STATUS_OK, "and the parked run still completes");
+
+        zym_call(vm, "total_", 0);
+        CHECK(zym_asNumber(zym_getCallResult(vm)) == 44999850000.0,
+              "with its state undisturbed by the calls");
+
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
     // ---- the host reserve ------------------------------------------------
     {
         // Script must not be able to starve the host of slots, and its own

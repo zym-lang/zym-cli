@@ -142,6 +142,110 @@ int main(void) {
         zym_freeVM(vm);
     }
 
+    // ---- a nested call that succeeds does not launder the failure --------
+    // Regression: settle_result() sets IDLE/NONE on INTERPRET_OK, and the
+    // restore branch in zym_callv only covered prior RUNNING and prior
+    // suspended. FAILED matched neither, so calling any working function on
+    // a failed VM reported it healthy again -- a watchdog kill or a runtime
+    // error silently became "finished cleanly".
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* ok = compile_or_null(vm, "func ok() { return 42 }");
+        zym_runChunk(vm, ok);
+
+        ZymChunk* c = compile_or_null(vm, BOOM);
+        CHECK(zym_runChunk(vm, c) == ZYM_STATUS_RUNTIME_ERROR, "the VM fails first");
+        CHECK(zym_vmState(vm) == ZYM_STATE_FAILED, "and reports FAILED");
+
+        CHECK(zym_call(vm, "ok", 0) == ZYM_STATUS_OK,
+              "a call into a failed VM still runs");
+        CHECK(zym_vmState(vm) == ZYM_STATE_FAILED,
+              "and the failure survives the successful call");
+        CHECK(zym_vmCause(vm) == ZYM_CAUSE_RUNTIME_ERROR,
+              "with its original cause intact");
+
+        ZymVmInfo info;
+        zym_vmInfo(vm, &info);
+        CHECK(!info.resumable, "a laundered VM would have looked resumable");
+
+        zym_freeChunk(vm, c);
+        zym_freeChunk(vm, ok);
+        zym_freeVM(vm);
+    }
+
+    // ---- a nested call does not disturb a suspension either --------------
+    {
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* ok = compile_or_null(vm, "func ok() { return 42 }");
+        zym_runChunk(vm, ok);
+
+        ZymChunk* spin = compile_or_null(vm, SPIN);
+        zym_preemptRegister(vm, 100000, zym_newNull(), 0);
+        CHECK(zym_runChunk(vm, spin) == ZYM_STATUS_SUSPENDED, "the watchdog parks it");
+
+        CHECK(zym_call(vm, "ok", 0) == ZYM_STATUS_OK, "the event pump can call in");
+        CHECK(zym_vmState(vm) == ZYM_STATE_SUSPENDED,
+              "and the parked run is still parked");
+        CHECK(zym_vmCause(vm) == ZYM_CAUSE_PREEMPT, "with its cause intact");
+
+        zym_freeChunk(vm, spin);
+        zym_freeChunk(vm, ok);
+        zym_freeVM(vm);
+    }
+
+    // ---- the closure path reports identically to the by-name path --------
+    // zym_callv and zym_callClosurev differ only in how the callee is named;
+    // both run the same zym_call_execute. zym_callClosurev used to return its
+    // status without touching vm_state at all, so a failure through a closure
+    // was invisible to zym_vmState() while the same failure through a name was
+    // not.
+    {
+        static const char* SRC =
+            "func ok() { return 42 }\n"
+            "func boom() { return 1 + \"s\" }\n"
+            "func getOk() { return ok }\n"
+            "func getBoom() { return boom }\n";
+
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, SRC);
+        zym_runChunk(vm, c);
+
+        zym_call(vm, "getBoom", 0);
+        ZymValue boom = zym_getCallResult(vm);
+        CHECK(zym_callClosurev(vm, boom, 0, NULL) == ZYM_STATUS_RUNTIME_ERROR,
+              "a closure call can fail");
+        CHECK(zym_vmState(vm) == ZYM_STATE_FAILED,
+              "and the closure path reports it through vm_state");
+        CHECK(zym_vmCause(vm) == ZYM_CAUSE_RUNTIME_ERROR,
+              "with a runtime-error cause, same as the by-name path");
+
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+    {
+        static const char* SRC =
+            "func ok() { return 42 }\n"
+            "func boom() { return 1 + \"s\" }\n"
+            "func getOk() { return ok }\n";
+
+        ZymVM* vm = zym_newVM(NULL);
+        ZymChunk* c = compile_or_null(vm, SRC);
+        zym_runChunk(vm, c);
+
+        zym_call(vm, "getOk", 0);
+        ZymValue ok = zym_getCallResult(vm);
+        zym_call(vm, "boom", 0);
+        CHECK(zym_vmState(vm) == ZYM_STATE_FAILED, "the VM fails");
+
+        CHECK(zym_callClosurev(vm, ok, 0, NULL) == ZYM_STATUS_OK,
+              "a closure call into a failed VM still runs");
+        CHECK(zym_vmState(vm) == ZYM_STATE_FAILED,
+              "and does not launder the failure either");
+
+        zym_freeChunk(vm, c);
+        zym_freeVM(vm);
+    }
+
     // ---- the cause is latched, and cleared by the next run ---------------
     {
         ZymVM* vm = zym_newVM(NULL);

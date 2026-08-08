@@ -1,4 +1,4 @@
 [submodule "zym_core"]
 	path = zym_core
 	url = https://github.com/zym-lang/zym_core.git
-	branch = lsp
+	branch = main

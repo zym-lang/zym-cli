@@ -13,6 +13,8 @@ Zym is a compact, systems-oriented scripting language that combines the familiar
 
 This repository contains the **Zym CLI** — a standalone runtime and toolchain built on top of the embeddable [`zym_core`](zym_core/) language library.
 
+Zym itself is the core; the CLI is one host built on it. It does enough to be useful on its own — a native module catalog, capability-gated child VMs, packaging to a standalone binary — and along the way it ends up being a fairly complete picture of what embedding looks like past a hello world, since all of it goes through the same public C API anyone else would use. Its version tracks the core it embeds rather than counting its own releases.
+
 ### Familiar Syntax
 
 If you've written JavaScript, Python, or Lua, Zym reads exactly like you'd expect.

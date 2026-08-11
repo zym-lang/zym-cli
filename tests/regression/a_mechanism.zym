@@ -1,0 +1,29 @@
+@tco aggressive
+
+var hits = 0
+
+func nativeTail() {
+    hits = hits + 1
+    return sqrt(4.0)
+}
+
+var id = Preempt.every(100, nativeTail)
+
+var acc = 0
+for (var i = 0; i < 5000; i = i + 1) { acc = acc + 1 }
+print("phase1 hits %v", hits)
+
+// Force the counter to 0 and remaining to 0: if the entry were merely
+// un-armed, this would make it fire again. If in_flight is stuck true,
+// canFire() still refuses.
+print("request -> %v", Preempt.request(id))
+for (var i = 0; i < 5000; i = i + 1) { acc = acc + 1 }
+print("phase2 hits %v remaining %v shieldDepth %v", hits, Preempt.remaining(id), Preempt.shieldDepth())
+
+// Re-registering a fresh entry with the same callback proves the callback
+// itself is still callable -- the guard is per-entry state, not the closure.
+var id2 = Preempt.every(100, nativeTail)
+for (var i = 0; i < 5000; i = i + 1) { acc = acc + 1 }
+print("phase3 (fresh entry) hits %v", hits)
+Preempt.cancel(id)
+Preempt.cancel(id2)

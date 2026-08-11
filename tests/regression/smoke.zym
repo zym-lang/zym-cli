@@ -1,0 +1,14 @@
+var TAG = Cont.newPrompt("t")
+
+func body() {
+    var a = 1
+    var b = 2
+    Cont.capture(TAG)
+    return a + b
+}
+
+Cont.pushPrompt(TAG)
+var k = body()
+print("isCont=%v", Cont.isContinuation(k))
+var r = Cont.resume(k, null)
+print("r=%v", r)

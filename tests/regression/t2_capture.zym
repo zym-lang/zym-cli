@@ -1,0 +1,30 @@
+// Recurring entry + continuation capture from inside the callback.
+var TAG = Cont.newPrompt("t")
+var hits = 0
+
+func onPreempt() {
+    hits = hits + 1
+    Cont.capture(TAG)
+}
+
+var id = Preempt.every(2000, onPreempt)
+
+func work() {
+    var s = 0
+    for (var i = 0; i < 50000; i = i + 1) { s = s + i }
+    return "done"
+}
+
+var r = Cont.withPrompt(TAG, work)
+print("A after-first-capture hits=%v isCont=%v remaining=%v", hits, Cont.isContinuation(r), Preempt.remaining(id))
+
+// Long plain workload at top level (no prompt, no capture in the way).
+var s2 = 0
+for (var i = 0; i < 400000; i = i + 1) { s2 = s2 + i }
+print("B after-400k-loop hits=%v remaining=%v", hits, Preempt.remaining(id))
+
+// Explicit request should still work.
+Preempt.request(id)
+var s3 = 0
+for (var i = 0; i < 100; i = i + 1) { s3 = s3 + i }
+print("C after-request hits=%v remaining=%v", hits, Preempt.remaining(id))

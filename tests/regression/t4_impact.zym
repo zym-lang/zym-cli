@@ -1,0 +1,44 @@
+// Does the lost shield actually break a critical section's invariant?
+// Invariant: a + b == 100 must never be observed as false from outside.
+var TAG = Cont.newPrompt("t")
+var a = 50
+var b = 50
+var torn = 0
+var armed = true
+
+func cb() {
+    if (a + b != 100) { torn = torn + 1 }
+    if (armed) { armed = false; Cont.capture(TAG) }
+}
+var id = Preempt.every(120, cb)
+
+func criticalSection() {
+    for (var i = 0; i < 300; i = i + 1) {
+        a = a + 1          // <-- invariant is broken between these two lines
+        var spin = 0
+        while (spin < 60) { spin = spin + 1 }
+        b = b - 1          // <-- restored here
+    }
+}
+
+// BEFORE the round trip: the shield really protects the section.
+torn = 0
+Preempt.shield(criticalSection)
+print("torn observations while shielded, BEFORE round trip = %v", torn)
+
+// capture from inside the preempt callback, then resume
+var result = Cont.withPrompt(TAG, func() {
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+    return "done"
+})
+if (Cont.isContinuation(result)) {
+    Cont.withPrompt(TAG, func() { return Cont.resume(result, null) })
+}
+print("shieldDepth after round trip = %v", Preempt.shieldDepth())
+
+// AFTER: identical shielded critical section
+torn = 0
+Preempt.shield(criticalSection)
+print("torn observations while shielded, AFTER round trip  = %v", torn)
+print("final a+b = %v", a + b)

@@ -1,0 +1,179 @@
+// C2 -- captureContinuation() saves a NEGATIVE preempt_shield_depth.
+//
+// The tail of captureContinuation() adjusts the shield depth it stores in the
+// continuation by walking the frames it did NOT capture (everything from the
+// truncating FRAME_FLAG_PREEMPT frame upward) and decrementing once per frame
+// carrying FRAME_FLAG_PREEMPT *or* FRAME_FLAG_DISABLE_PREEMPT.
+//
+// Only FRAME_FLAG_DISABLE_PREEMPT frames contribute to vm->preempt_shield_depth
+// (Preempt.shield pushes such a frame and calls preemptShieldPush). A
+// FRAME_FLAG_PREEMPT frame -- a preempt callback -- contributes nothing; it is
+// masked structurally by the entry-local in_flight guard. Decrementing for it
+// subtracts a shield that was never pushed, and the stored depth goes negative.
+// resumeContinuation() installs that value into vm->preempt_shield_depth
+// verbatim, so after a resume the VM is running at depth -1 (once per excluded
+// preempt frame).
+//
+// The consequence is not cosmetic. Preempt.shield() masks only while
+// preempt_shield_depth > 0, so from -1 the next shield pushes to 0 and masks
+// NOTHING: a critical section the script explicitly asked to protect runs with
+// preemption fully live.
+//
+// Every case below asserts the depth is a sane non-negative number and, where
+// it matters, that a shield entered afterwards actually suppresses a maskable
+// entry.
+
+func spin(n) {
+    var j = 0
+    while (j < n) { j = j + 1 }
+    return j
+}
+
+// ---------------------------------------------------------------------------
+// Case 0 -- Control. Shielding on a pristine VM masks a maskable entry.
+// If this fails the harness is wrong, not the VM.
+// ---------------------------------------------------------------------------
+var ctrl_fired = 0
+var ctrl_id = Preempt.every(200, func() { ctrl_fired = ctrl_fired + 1 })
+
+assert(Preempt.shieldDepth() == 0, "case 0: a fresh VM must start at shield depth 0")
+Preempt.shield(func() {
+    assert(Preempt.shieldDepth() == 1, "case 0: inside shield the depth must be 1")
+    spin(20000)
+})
+print("case 0 control: fired-during-shield=%v depth=%v", ctrl_fired, Preempt.shieldDepth())
+assert(ctrl_fired == 0, "case 0: a shield on a pristine VM must mask a maskable entry")
+assert(Preempt.shieldDepth() == 0, "case 0: depth must return to 0 after the shield")
+Preempt.cancel(ctrl_id)
+
+// ---------------------------------------------------------------------------
+// Case 1 -- capture from inside a preempt callback, then resume.
+// One excluded FRAME_FLAG_PREEMPT frame, no shield anywhere: the saved depth
+// must be 0, not -1.
+// ---------------------------------------------------------------------------
+var TAG1 = Cont.newPrompt("c2_plain")
+var cap1 = 0
+
+func tick1() {
+    cap1 = cap1 + 1
+    assert(Preempt.shieldDepth() == 0, "case 1: no shield is up inside the callback")
+    Cont.capture(TAG1)
+}
+
+var id1 = Preempt.every(400, tick1)
+var k1 = Cont.withPrompt(TAG1, func() {
+    spin(50000)
+    return "body-finished"
+})
+Preempt.cancel(id1)             // stop further firing so the resume is clean
+
+assert(Cont.isContinuation(k1), "case 1: the capture should have escaped as a continuation")
+assert(cap1 == 1, "case 1: the callback should have fired exactly once")
+assert(Preempt.shieldDepth() == 0, "case 1: depth at the capture site must be 0")
+
+var r1 = Cont.withPrompt(TAG1, func() { return Cont.resume(k1, null) })
+print("case 1 plain: result=%v depth-after-resume=%v", r1, Preempt.shieldDepth())
+assert(r1 == "body-finished", "case 1: the resumed body should run to completion")
+assert(Preempt.shieldDepth() >= 0,
+       "case 1: resume installed a NEGATIVE shield depth -- capture decremented for a FRAME_FLAG_PREEMPT frame that never pushed a shield")
+assert(Preempt.shieldDepth() == 0,
+       "case 1: depth after resume must be exactly 0 (nothing was shielded at capture)")
+
+// Consequence: with the depth poisoned to -1, this shield pushes to 0 and does
+// not mask, so the entry fires straight through the critical section.
+var fired1 = 0
+var eid1 = Preempt.every(200, func() { fired1 = fired1 + 1 })
+Preempt.shield(func() {
+    assert(Preempt.shieldDepth() >= 1,
+           "case 1: inside a shield the depth must be at least 1 -- a poisoned negative depth leaves it at 0 and masks nothing")
+    spin(20000)
+})
+print("case 1 consequence: fired-during-shield=%v depth=%v", fired1, Preempt.shieldDepth())
+assert(fired1 == 0,
+       "case 1: a shielded section after a resume ran UNSHIELDED -- the maskable entry fired inside it")
+Preempt.cancel(eid1)
+
+// ---------------------------------------------------------------------------
+// Case 2 -- capture from inside a Preempt.shield() that is itself inside a
+// preempt callback. Two excluded frames, one of each flag.
+//
+// At the capture site the depth is 1 (the shield). The shield frame is excluded
+// from the capture, so it must be subtracted -- expected saved depth 0. The
+// preempt frame must NOT be subtracted. Getting this right also rules out the
+// lazy "delete the adjustment entirely" fix, which would save 1 here and leak a
+// shield that no frame will ever pop.
+// ---------------------------------------------------------------------------
+var TAG2 = Cont.newPrompt("c2_shielded_cb")
+var cap2 = 0
+
+func tick2() {
+    cap2 = cap2 + 1
+    Preempt.shield(func() {
+        assert(Preempt.shieldDepth() == 1, "case 2: inside the callback's shield the depth must be 1")
+        Cont.capture(TAG2)
+    })
+}
+
+var id2 = Preempt.every(400, tick2)
+var k2 = Cont.withPrompt(TAG2, func() {
+    spin(50000)
+    return "body-finished"
+})
+Preempt.cancel(id2)
+
+assert(Cont.isContinuation(k2), "case 2: the capture should have escaped as a continuation")
+assert(cap2 == 1, "case 2: the callback should have fired exactly once")
+assert(Preempt.shieldDepth() == 0,
+       "case 2: unwinding out of the callback's shield must restore the depth to 0")
+
+var r2 = Cont.withPrompt(TAG2, func() { return Cont.resume(k2, null) })
+print("case 2 shield-in-callback: result=%v depth-after-resume=%v", r2, Preempt.shieldDepth())
+assert(r2 == "body-finished", "case 2: the resumed body should run to completion")
+assert(Preempt.shieldDepth() >= 0,
+       "case 2: resume installed a NEGATIVE shield depth")
+assert(Preempt.shieldDepth() == 0,
+       "case 2: depth after resume must be exactly 0 -- the excluded shield frame is subtracted, the excluded preempt frame is not")
+
+var fired2 = 0
+var eid2 = Preempt.every(200, func() { fired2 = fired2 + 1 })
+Preempt.shield(func() {
+    assert(Preempt.shieldDepth() >= 1, "case 2: inside a shield the depth must be at least 1")
+    spin(20000)
+})
+print("case 2 consequence: fired-during-shield=%v depth=%v", fired2, Preempt.shieldDepth())
+assert(fired2 == 0, "case 2: a shielded section after a resume ran UNSHIELDED")
+Preempt.cancel(eid2)
+
+// ---------------------------------------------------------------------------
+// Case 3 -- the legitimate positive case must keep working: a shield frame
+// INSIDE the captured range is carried by the continuation, so the resumed
+// body is still shielded and the depth drops back to 0 when it returns.
+// This pins the half of the adjustment that was always correct.
+// ---------------------------------------------------------------------------
+var TAG3 = Cont.newPrompt("c2_shield_captured")
+var fired3 = 0
+var eid3 = Preempt.every(300, func() { fired3 = fired3 + 1 })
+
+var k3 = Cont.withPrompt(TAG3, func() {
+    return Preempt.shield(func() {
+        assert(Preempt.shieldDepth() == 1, "case 3: inside the shield body the depth must be 1")
+        Cont.capture(TAG3)
+        assert(Preempt.shieldDepth() == 1,
+               "case 3: the resumed shield body must still be shielded -- the captured DISABLE_PREEMPT frame carries its depth")
+        spin(20000)
+        return "shielded-body-finished"
+    })
+})
+assert(Cont.isContinuation(k3), "case 3: the capture should have escaped as a continuation")
+assert(Preempt.shieldDepth() == 0, "case 3: the capture unwound the shield frame, so the depth is 0 here")
+
+var before3 = fired3
+var r3 = Cont.withPrompt(TAG3, func() { return Cont.resume(k3, null) })
+print("case 3 captured-shield: result=%v fired-in-resumed-shield=%v depth=%v",
+      r3, fired3 - before3, Preempt.shieldDepth())
+assert(r3 == "shielded-body-finished", "case 3: the resumed shield body should run to completion")
+assert(fired3 - before3 == 0, "case 3: the resumed shield body must still mask the maskable entry")
+assert(Preempt.shieldDepth() == 0, "case 3: the depth must return to 0 once the resumed shield body returns")
+Preempt.cancel(eid3)
+
+print("C2 OK")

@@ -1,0 +1,87 @@
+// Escalation probe: resume the continuation from a DEEPER frame index than the
+// one it was captured at. resumeContinuation never assigns dst->spill_base, so
+// the restored frames inherit whatever spill_base the frames[] slot last held --
+// here, a slot belonging to an unrelated, deeper call chain.
+
+var TAG = Cont.newPrompt("t")
+var SAVED = null
+
+func spillBody() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8
+    var i = 9
+    var j = 10
+    var k = 11
+    var l = 12
+    Cont.capture(TAG)
+    var total = a + b
+    total = total + c
+    total = total + d
+    total = total + e
+    total = total + f
+    total = total + g
+    total = total + h
+    total = total + i
+    total = total + j
+    total = total + k
+    total = total + l
+    return total
+}
+
+func lvl4() {
+    var s1 = 7000
+    var s2 = 7000
+    var s3 = 7000
+    var s4 = 7000
+    var s5 = 7000
+    var s6 = 7000
+    var s7 = 7000
+    var s8 = 7000
+    var s9 = 7000
+    var sA = 7000
+    var sB = 7000
+    var sC = 7000
+    if (s1 == s2) { return Cont.resume(SAVED, null) }
+    if (s3 == s4) { return 0 }
+    if (s5 == s6) { return 0 }
+    if (s7 == s8) { return 0 }
+    if (s9 == sA) { return 0 }
+    if (sB == sC) { return 0 }
+    return 1
+}
+
+func lvl3() {
+    var t1 = 5000
+    var t2 = 5000
+    var t3 = 5000
+    var t4 = 5000
+    var t5 = 5000
+    var t6 = 5000
+    var t7 = 5000
+    var t8 = 5000
+    var t9 = 5000
+    var tA = 5000
+    var tB = 5000
+    var r = lvl4()
+    if (t1 == t2) { return r }
+    if (t3 == t4) { return r }
+    if (t5 == t6) { return r }
+    if (t7 == t8) { return r }
+    if (t9 == tA) { return r }
+    if (tB == tB) { return r }
+    return r
+}
+
+func lvl2() { return lvl3() }
+func lvl1() { return lvl2() }
+
+Cont.pushPrompt(TAG)
+SAVED = spillBody()
+Cont.pushPrompt(TAG)
+print("deep resume = %v   (expect 78)", lvl1())

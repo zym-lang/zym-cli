@@ -1,0 +1,117 @@
+// C4(b) REGRESSION: a continuation stores no prompt-stack slice, so a prompt
+// that was live INSIDE the captured extent is not put back when the extent is
+// resumed. The frames come back -- execution really is dynamically inside
+// withPrompt(INNER, ...) again -- but the INNER bookmark is gone, so any
+// tagged operation on it fails with "prompt tag not found".
+//
+//   B1  abort to the restored inner prompt
+//   B2  shift to the restored inner prompt
+//   B3  a restored inner prompt must still be popped when its withPrompt
+//       boundary returns normally -- restoring the entry without its boundary
+//       would trade the lost prompt for a leaked one.
+
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+// More than MAX_PROMPTS (64) so a one-slot-per-iteration leak is fatal.
+var ITERS = 200
+
+// -------------------------------------------------------- B1: abort to INNER
+var b1Resumed = null
+var b1Inner = null
+
+func b1InnerBody() {
+    var x = Cont.capture(OUTER)
+    // Everything below runs only after resume.
+    b1Resumed = x
+    Cont.abort(INNER, "inner-abort")
+    return "inner-fell-through"
+}
+func b1OuterBody() {
+    var y = Cont.withPrompt(INNER, b1InnerBody)
+    b1Inner = y
+    return "outer-done"
+}
+
+var k1 = Cont.withPrompt(OUTER, b1OuterBody)
+assert(Cont.isContinuation(k1), "B1: capture(OUTER) must yield a continuation")
+var r1 = Cont.resume(k1, 42)
+assert(b1Resumed == 42, "B1: resume must deliver its value into the restored frame")
+assert(b1Inner == "inner-abort", "B1: the INNER prompt live inside the captured extent must be restored on resume")
+assert(r1 == "outer-done", "B1: the resumed extent must run to completion")
+print("B1 abort to restored inner prompt: ok")
+
+// -------------------------------------------------------- B2: shift to INNER
+var b2Resumed = null
+var b2Inner = null
+var b2HandlerRan = 0
+
+func b2Handler(cont) {
+    b2HandlerRan = b2HandlerRan + 1
+    return "inner-shift"
+}
+func b2InnerBody() {
+    var x = Cont.capture(OUTER)
+    b2Resumed = x
+    Cont.shift(INNER, b2Handler)
+    return "inner-fell-through"
+}
+func b2OuterBody() {
+    var y = Cont.withPrompt(INNER, b2InnerBody)
+    b2Inner = y
+    return "outer-done-2"
+}
+
+var k2 = Cont.withPrompt(OUTER, b2OuterBody)
+assert(Cont.isContinuation(k2), "B2: capture(OUTER) must yield a continuation")
+var r2 = Cont.resume(k2, 7)
+assert(b2Resumed == 7, "B2: resume must deliver its value into the restored frame")
+assert(b2HandlerRan == 1, "B2: the shift handler at the restored INNER prompt must run exactly once")
+assert(b2Inner == "inner-shift", "B2: shift to the restored INNER prompt must deliver the handler result")
+assert(r2 == "outer-done-2", "B2: the resumed extent must run to completion")
+print("B2 shift to restored inner prompt: ok")
+
+// ------------------------------- B3: restored inner prompt is popped on RET
+// Restoring a prompt entry without the with_prompt boundary that owns it would
+// only trade one bug for its mirror image: the entry would be live and correct
+// for the resumed body, and then never popped when b3InnerBody returns, leaving
+// exactly the kind of ghost C4(a) is about.
+//
+// Detected the same way A4 detects a ghost: the leaked INNER entry would sit
+// ABOVE the live INNER pushed by the outermost withPrompt here, and findPrompt
+// scans from the top, so the abort below would take the dead one.
+//
+// This is a loop-free check on purpose. Cont.resume splices the captured slice
+// in at vm->stack_top and nothing lowers stack_top when the resumed extent
+// returns, so repeated resumes exhaust the value stack -- a separate,
+// pre-existing defect that reproduces with no inner prompt in sight, and not
+// what this file is about.
+func b3InnerBody() {
+    Cont.capture(OUTER)
+    return "li"
+}
+func b3OuterBody() {
+    var y = Cont.withPrompt(INNER, b3InnerBody)
+    return y
+}
+
+var b3Unreachable = 0
+func b3Body() {
+    var k3 = Cont.withPrompt(OUTER, b3OuterBody)
+    assert(Cont.isContinuation(k3), "B3: capture(OUTER) must yield a continuation")
+    var out = Cont.resume(k3, 1)
+    assert(out == "li", "B3: the resumed extent must return normally through withPrompt(INNER)")
+    Cont.abort(INNER, "V3")
+    b3Unreachable = b3Unreachable + 1
+    return "not-reached"
+}
+
+var b3TailRuns = 0
+var r3 = Cont.withPrompt(INNER, b3Body)
+b3TailRuns = b3TailRuns + 1
+assert(b3TailRuns == 1, "B3: a restored-but-never-popped INNER prompt re-entered the tail of the script")
+assert(b3Unreachable == 0, "B3: abort(INNER) must not fall through")
+assert(r3 == "V3", "B3: a restored INNER prompt must be popped when its withPrompt boundary returns")
+print("B3 restored inner prompt is popped on return: ok")
+
+print("C4b PASS")

@@ -1,0 +1,21 @@
+// Same missing re-arm, reached via FRAME_FLAG_DISABLE_PREEMPT instead of FRAME_FLAG_PREEMPT.
+var TAG = Cont.newPrompt("s")
+var hits = 0
+var id = Preempt.every(2000, func() { hits = hits + 1 })
+
+// Capture out of the middle of a Preempt.shield(...) body.
+var r = Cont.withPrompt(TAG, func() {
+    return Preempt.shield(func() {
+        var s = 0
+        for (var i = 0; i < 20000; i = i + 1) { s = s + i }
+        Cont.capture(TAG)
+        return "unreached"
+    })
+})
+print("1 after-capture-through-shield isCont=%v hits=%v shieldDepth=%v remaining=%v",
+      Cont.isContinuation(r), hits, Preempt.shieldDepth(), Preempt.remaining(id))
+
+var s2 = 0
+for (var i = 0; i < 300000; i = i + 1) { s2 = s2 + i }
+print("2 after-300k hits=%v shieldDepth=%v remaining=%v", hits, Preempt.shieldDepth(), Preempt.remaining(id))
+Preempt.cancel(id)

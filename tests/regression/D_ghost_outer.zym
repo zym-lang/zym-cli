@@ -1,0 +1,24 @@
+var OUTER = Cont.newPrompt("outer")
+var INNER = Cont.newPrompt("inner")
+
+func g() {
+    var v = Cont.capture(OUTER)
+    return v
+}
+func f() { return Cont.withPrompt(INNER, g) }
+
+var res = Cont.withPrompt(OUTER, f)
+print("outer withPrompt returned")
+
+// Now, OUTSIDE any prompt, abort to OUTER. Correct behaviour: runtime error
+// "Cont.abort: prompt tag not found." Ghost behaviour: accepted.
+func probeOuter() {
+    print("probeOuter: calling Cont.abort(OUTER, 'GHOST')")
+    var x = Cont.abort(OUTER, "GHOST")
+    print("probeOuter: abort returned inline?!")
+    return x
+}
+var po = probeOuter()
+print("after probeOuter, value:")
+print(po)
+print("END OF SCRIPT")

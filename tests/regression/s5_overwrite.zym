@@ -1,0 +1,25 @@
+// Bonus: resumeContinuation ASSIGNS the saved depth rather than adjusting it.
+// Capture at depth 0 (no preemption at all), resume inside a live shield.
+var TAG = Cont.newPrompt("t")
+func spin(n) { var j = 0  while (j < n) { j = j + 1 }  return j }
+
+var k = Cont.withPrompt(TAG, func() {
+    Cont.capture(TAG)
+    return "body-finished"
+})
+print("captured at depth = 0, isCont = %v", Cont.isContinuation(k))
+
+var fired = 0
+var id = Preempt.every(200, func() { fired = fired + 1 })
+
+Preempt.shield(func() {
+    print("inside shield, depth before resume = %v", Preempt.shieldDepth())
+    var r = Cont.withPrompt(TAG, func() { return Cont.resume(k, null) })
+    print("resume result = %v", r)
+    print("inside shield, depth AFTER resume = %v", Preempt.shieldDepth())
+    fired = 0
+    spin(20000)
+    print("fired while still inside the shield = %v", fired)
+})
+print("depth after shield returns = %v", Preempt.shieldDepth())
+Preempt.cancel(id)

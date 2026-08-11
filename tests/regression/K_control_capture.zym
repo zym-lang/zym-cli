@@ -1,0 +1,10 @@
+// CONTROL for the capture path: single, non-nested withPrompt.
+var T = Cont.newPrompt("T")
+func body() {
+    Cont.capture(T)
+    return 0
+}
+Cont.withPrompt(T, body)
+print("probing...")
+Cont.popPrompt()
+print("LEAK: pop#1 ok")

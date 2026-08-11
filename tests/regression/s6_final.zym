@@ -1,0 +1,47 @@
+// ===== C2-shield final repro =========================================
+// A single long-lived maskable entry, registered up front and never
+// re-registered.  Shield it once (works), then capture from inside its
+// callback + resume, then shield it again (must still work).
+var TAG = Cont.newPrompt("t")
+func spin(n) { var j = 0  while (j < n) { j = j + 1 }  return j }
+
+var fired = 0
+var wantCapture = false
+func onTick() {
+    fired = fired + 1
+    if (wantCapture) {
+        wantCapture = false
+        Cont.capture(TAG)       // capture truncated at the PREEMPT frame
+    }
+}
+var id = Preempt.every(200, onTick)
+
+print("depth at start = %v", Preempt.shieldDepth())
+
+// --- shield #1: control, before any continuation is involved ---
+fired = 0
+Preempt.shield(func() { spin(20000) })
+print("shield #1: fired = %v  (expect 0)", fired)
+
+// --- capture from inside the preempt callback, then resume ---
+wantCapture = true
+var k = Cont.withPrompt(TAG, func() {
+    spin(50000)
+    return "body-finished"
+})
+print("captured? %v", Cont.isContinuation(k))
+print("depth after capture = %v", Preempt.shieldDepth())
+
+var r = Cont.withPrompt(TAG, func() { return Cont.resume(k, null) })
+print("resume result = %v", r)
+print("depth after resume = %v   (expect 0)", Preempt.shieldDepth())
+
+// --- shield #2: same shield, same entry, after the round trip ---
+fired = 0
+Preempt.shield(func() {
+    print("shield #2: depth inside = %v  (expect 1)", Preempt.shieldDepth())
+    spin(20000)
+})
+print("shield #2: fired = %v  (expect 0)", fired)
+print("depth at end = %v", Preempt.shieldDepth())
+Preempt.cancel(id)

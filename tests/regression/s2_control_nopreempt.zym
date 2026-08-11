@@ -1,0 +1,30 @@
+// CONTROL A: identical capture/resume shape but WITHOUT a preempt frame.
+// If the -1 comes from the FRAME_FLAG_PREEMPT subtraction, this must stay 0.
+var TAG = Cont.newPrompt("t")
+
+func spin(n) { var j = 0  while (j < n) { j = j + 1 }  return j }
+
+print("depth before = %v", Preempt.shieldDepth())
+
+var k = Cont.withPrompt(TAG, func() {
+    Cont.capture(TAG)        // ordinary capture, no preempt frame anywhere
+    spin(1000)
+    return "body-finished"
+})
+
+print("captured? %v", Cont.isContinuation(k))
+print("depth after capture = %v", Preempt.shieldDepth())
+
+var r = Cont.withPrompt(TAG, func() { return Cont.resume(k, null) })
+print("resume result = %v", r)
+print("depth after resume = %v", Preempt.shieldDepth())
+
+var fired = 0
+var id2 = Preempt.every(200, func() { fired = fired + 1 })
+fired = 0
+Preempt.shield(func() {
+    print("  inside shield, depth = %v", Preempt.shieldDepth())
+    spin(20000)
+})
+print("fired DURING shield = %v", fired)
+Preempt.cancel(id2)

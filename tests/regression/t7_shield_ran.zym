@@ -1,0 +1,9 @@
+@tco aggressive
+var ran = 0
+func bodyNativeTail() { ran = ran + 1; return clock() }
+print("before: depth=%v ran=%v", Preempt.shieldDepth(), ran)
+Preempt.shield(bodyNativeTail)
+print("after : depth=%v ran=%v", Preempt.shieldDepth(), ran)
+Preempt.shield(bodyNativeTail)
+print("after2: depth=%v ran=%v", Preempt.shieldDepth(), ran)
+print("still executing normally, sum=%v", 1 + 2 + 3)

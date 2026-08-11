@@ -1,0 +1,9 @@
+// CONTROL: single prompt, 100 captures. No leak expected.
+var OUTER = Cont.newPrompt("outer")
+func f() { return Cont.capture(OUTER) }
+var i = 0
+while (i < 100) {
+    var r = Cont.withPrompt(OUTER, f)
+    i = i + 1
+}
+print("control: finished 100 single-prompt captures")

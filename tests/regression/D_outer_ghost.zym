@@ -1,0 +1,40 @@
+// Same setup, but probe OUTER, and do it from several frames deep so we can
+// see whether the ghost actually performs a control transfer (discarding
+// frames) rather than merely being "found".
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+func inner() {
+    Cont.abort(OUTER, "AV")
+    return 0
+}
+func outer() {
+    return Cont.withPrompt(INNER, inner)
+}
+
+var r = Cont.withPrompt(OUTER, outer)
+print("outer withPrompt returned:")
+print(r)
+print("--- both prompts are now out of scope ---")
+
+func lvl3() {
+    print("lvl3: aborting to OUTER outside any live withPrompt")
+    Cont.abort(OUTER, "GHOST")
+    print("lvl3: NOT REACHED")
+    return 0
+}
+func lvl2() {
+    var v = lvl3()
+    print("lvl2: NOT REACHED")
+    return v
+}
+func lvl1() {
+    var v = lvl2()
+    print("lvl1: NOT REACHED")
+    return v
+}
+
+var g = lvl1()
+print("top level continues; g =")
+print(g)
+print("DONE")

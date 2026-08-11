@@ -1,0 +1,54 @@
+// Two DISTINCT preempt entries: entry A's callback busy-loops, entry B fires
+// inside it and captures. Excluded range then holds TWO preempt frames.
+var TAG = Cont.newPrompt("t")
+var armedA = true
+var armedB = true
+var firesB = 0
+
+func cbB() {
+    firesB = firesB + 1
+    if (armedB) {
+        armedB = false
+        print("[B] depth inside nested callback = %v", Preempt.shieldDepth())
+        Cont.capture(TAG)
+    }
+}
+func cbA() {
+    if (armedA) {
+        armedA = false
+        print("[A] entered outer callback")
+        var idB = Preempt.every(150, cbB)
+        var z = 0
+        while (z < 5000) { z = z + 1 }
+    }
+}
+
+var idA = Preempt.every(400, cbA)
+
+var result = Cont.withPrompt(TAG, func() {
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+    return "body-finished"
+})
+print("captured? %v", Cont.isContinuation(result))
+if (Cont.isContinuation(result)) {
+    var r = Cont.withPrompt(TAG, func() { return Cont.resume(result, null) })
+    print("resume result = %v", r)
+}
+print("depth after resume = %v", Preempt.shieldDepth())
+
+var f1 = 0
+firesB = 0
+Preempt.shield(func() {
+    print("  shield#1 depth = %v", Preempt.shieldDepth())
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+})
+print("  shield#1 fires = %v, depth after = %v", firesB, Preempt.shieldDepth())
+firesB = 0
+Preempt.shield(func() {
+    print("  shield#2 depth = %v", Preempt.shieldDepth())
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+})
+print("  shield#2 fires = %v, depth after = %v", firesB, Preempt.shieldDepth())

@@ -1,0 +1,52 @@
+// C2-shield repro: capture from inside a preempt callback, then resume,
+// and see what preempt_shield_depth ends up as.
+
+var TAG = Cont.newPrompt("t")
+
+func spin(n) {
+    var j = 0
+    while (j < n) { j = j + 1 }
+    return j
+}
+
+var captures = 0
+func onTick() {
+    captures = captures + 1
+    print("[cb] depth inside preempt callback = %v", Preempt.shieldDepth())
+    Cont.capture(TAG)          // capture truncated at the PREEMPT frame
+}
+
+var id = Preempt.every(400, onTick)
+
+print("depth before = %v", Preempt.shieldDepth())
+
+var k = Cont.withPrompt(TAG, func() {
+    spin(50000)
+    return "body-finished"
+})
+
+Preempt.cancel(id)             // stop further firing so the resume is clean
+
+print("captured? %v   captures=%v", Cont.isContinuation(k), captures)
+print("depth after capture = %v", Preempt.shieldDepth())
+
+var r = Cont.withPrompt(TAG, func() {
+    return Cont.resume(k, null)
+})
+
+print("resume result = %v", r)
+print("depth after resume = %v", Preempt.shieldDepth())
+
+// Consequence check: is a maskable entry actually suppressed by shield now?
+var fired = 0
+func onTick2() { fired = fired + 1 }
+var id2 = Preempt.every(200, onTick2)
+
+fired = 0
+Preempt.shield(func() {
+    print("  inside shield, depth = %v", Preempt.shieldDepth())
+    spin(20000)
+})
+print("fired DURING shield = %v   (0 == masked, >0 == shield did nothing)", fired)
+print("depth after shield = %v", Preempt.shieldDepth())
+Preempt.cancel(id2)

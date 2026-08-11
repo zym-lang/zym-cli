@@ -1,0 +1,134 @@
+// C5: native tail-return paths must perform the same preempt/shield frame
+// cleanup that OP(RET) does.
+//
+// Under `@tco aggressive` a `return <native call>` compiles to TAIL_CALL with a
+// native callee. The interpreter's NATIVE / NATIVE-CLOSURE tail-return fast
+// paths pop the CallFrame directly. If they skip the FRAME_FLAG_PREEMPT /
+// FRAME_FLAG_DISABLE_PREEMPT release that RET performs:
+//   1. a recurring preempt callback whose body tail-returns a native stays
+//      `in_flight` forever and fires exactly once;
+//   2. a Preempt.shield(...) body that tail-returns a native leaks a shield
+//      depth, permanently suppressing every maskable entry afterwards.
+//
+// Run: /home/iamnobody/Documents/ZYM/zym-minimal/build/zym c5_native_tail_frame_cleanup.zym
+
+@tco aggressive
+
+var WORK = 200000
+var SLICE = 1000
+// A run of WORK iterations with a SLICE-instruction budget must fire the
+// callback many times. Anything in single digits means the guard leaked.
+var MIN_HITS = 20
+
+// ---------------------------------------------------------------------------
+// 1. Baseline: a callback that tail-returns a SCRIPT function re-arms fine.
+//    This is the known-good path; if it ever breaks the test is measuring the
+//    wrong thing.
+// ---------------------------------------------------------------------------
+func ident(x) { return x }
+
+var scriptHits = 0
+func scriptTailCb() {
+    scriptHits = scriptHits + 1
+    return ident(1)
+}
+
+var idA = Preempt.every(SLICE, scriptTailCb)
+var accA = 0
+for (var i = 0; i < WORK; i = i + 1) { accA = accA + 1 }
+Preempt.cancel(idA)
+print("1 script-tail hits=%v", scriptHits)
+assert(scriptHits >= MIN_HITS,
+       "baseline broken: script-tail callback did not re-arm")
+
+// ---------------------------------------------------------------------------
+// 2. The defect: a callback that tail-returns a NATIVE must re-arm identically.
+// ---------------------------------------------------------------------------
+var nativeHits = 0
+func nativeTailCb() {
+    nativeHits = nativeHits + 1
+    return clock()
+}
+
+var idB = Preempt.every(SLICE, nativeTailCb)
+var accB = 0
+for (var i = 0; i < WORK; i = i + 1) { accB = accB + 1 }
+Preempt.cancel(idB)
+print("2 native-tail hits=%v (script-tail was %v)", nativeHits, scriptHits)
+assert(nativeHits >= MIN_HITS,
+       "native tail-return left FRAME_FLAG_PREEMPT in_flight: callback fired once and never re-armed")
+
+// ---------------------------------------------------------------------------
+// 3. Same, via a native reached through a variable binding (module member
+//    pulled out as a value) rather than a global native name.
+// ---------------------------------------------------------------------------
+var boundNative = Preempt.shieldDepth
+var boundHits = 0
+func boundTailCb() {
+    boundHits = boundHits + 1
+    return boundNative()
+}
+
+var idC = Preempt.every(SLICE, boundTailCb)
+var accC = 0
+for (var i = 0; i < WORK; i = i + 1) { accC = accC + 1 }
+Preempt.cancel(idC)
+print("3 bound-native-tail hits=%v", boundHits)
+assert(boundHits >= MIN_HITS,
+       "bound-native tail-return left FRAME_FLAG_PREEMPT in_flight: callback fired once and never re-armed")
+
+// ---------------------------------------------------------------------------
+// 4. Shield: a body that tail-returns a native must not leak shield depth.
+// ---------------------------------------------------------------------------
+assert(Preempt.shieldDepth() == 0, "shield depth must start at 0")
+
+func shieldScriptTail() { return ident(2) }
+Preempt.shield(shieldScriptTail)
+print("4 depth after script-tail shield = %v", Preempt.shieldDepth())
+assert(Preempt.shieldDepth() == 0,
+       "baseline broken: script-tail shield body leaked shield depth")
+
+func shieldNativeTail() { return clock() }
+Preempt.shield(shieldNativeTail)
+print("5 depth after 1 native-tail shield = %v", Preempt.shieldDepth())
+assert(Preempt.shieldDepth() == 0,
+       "native tail-return leaked FRAME_FLAG_DISABLE_PREEMPT: shield depth not released")
+
+Preempt.shield(shieldNativeTail)
+Preempt.shield(shieldNativeTail)
+print("6 depth after 3 native-tail shields = %v", Preempt.shieldDepth())
+assert(Preempt.shieldDepth() == 0,
+       "native tail-return leaked shield depth (accumulates per shield)")
+
+// ---------------------------------------------------------------------------
+// 5. The leak is observable, not just cosmetic: after the shields above, a
+//    maskable entry must still fire.
+// ---------------------------------------------------------------------------
+var afterHits = 0
+func plainCb() { afterHits = afterHits + 1 }
+
+var idD = Preempt.every(SLICE, plainCb)
+var accD = 0
+for (var i = 0; i < WORK; i = i + 1) { accD = accD + 1 }
+Preempt.cancel(idD)
+print("7 post-shield maskable hits=%v depth=%v", afterHits, Preempt.shieldDepth())
+assert(afterHits >= MIN_HITS,
+       "leaked shield depth from a native tail-return is still suppressing maskable entries")
+
+// ---------------------------------------------------------------------------
+// 6. Shield body that tail-returns a native, with a preempt entry live across
+//    it: both guards must be released and the counter re-armed.
+// ---------------------------------------------------------------------------
+var bothHits = 0
+func bothCb() { bothHits = bothHits + 1 }
+var idE = Preempt.every(SLICE, bothCb)
+Preempt.shield(shieldNativeTail)
+var accE = 0
+for (var i = 0; i < WORK; i = i + 1) { accE = accE + 1 }
+Preempt.cancel(idE)
+print("8 shield-then-work hits=%v depth=%v", bothHits, Preempt.shieldDepth())
+assert(Preempt.shieldDepth() == 0, "shield depth leaked with a live entry")
+assert(bothHits >= MIN_HITS,
+       "counter was not re-armed after a native tail-return released the shield")
+
+print("C5 OK")

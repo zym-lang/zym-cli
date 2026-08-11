@@ -1,0 +1,18 @@
+var fires = 0
+func cb() { fires = fires + 1 }
+var id = Preempt.every(200, cb)
+print("id = %v", id)
+print("depth = %v", Preempt.shieldDepth())
+
+var j = 0
+while (j < 20000) { j = j + 1 }
+print("unshielded fires = %v", fires)
+
+fires = 0
+Preempt.shield(func() {
+    print("  inside shield depth = %v", Preempt.shieldDepth())
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+})
+print("shielded fires = %v", fires)
+print("depth after = %v", Preempt.shieldDepth())

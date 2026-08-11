@@ -1,0 +1,29 @@
+// Baseline: does the shield actually mask, and what is the resting depth?
+print("depth at start = %v", Preempt.shieldDepth())
+
+var fired = 0
+func onTick() {
+    fired = fired + 1
+}
+
+var id = Preempt.every(200, onTick)
+
+func spin(n) {
+    var j = 0
+    while (j < n) { j = j + 1 }
+    return j
+}
+
+fired = 0
+spin(20000)
+print("unshielded: fired = %v", fired)
+
+fired = 0
+Preempt.shield(func() {
+    print("  inside shield, depth = %v", Preempt.shieldDepth())
+    spin(20000)
+})
+print("shielded:   fired = %v", fired)
+print("depth after shield = %v", Preempt.shieldDepth())
+
+Preempt.cancel(id)

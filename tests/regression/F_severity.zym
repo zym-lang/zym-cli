@@ -1,0 +1,28 @@
+var OUTER = Cont.newPrompt("outer")
+var INNER = Cont.newPrompt("inner")
+
+func g() { return Cont.capture(OUTER) }
+func f() { return Cont.withPrompt(INNER, g) }
+
+var res = Cont.withPrompt(OUTER, f)
+
+// Unrelated later work, with a real prompt of its own.
+var OTHER = Cont.newPrompt("other")
+func h() {
+    print("h: running under OTHER prompt")
+    // A totally unrelated capture, to the OTHER tag. Fine.
+    var c = Cont.capture(OTHER)
+    print("h: NOT REACHED before resume")
+    return "h-done"
+}
+var hres = Cont.withPrompt(OTHER, h)
+print("OTHER capture ok, isContinuation =")
+print(Cont.isContinuation(hres))
+
+// prompt_count probe: OTHER's entry should be gone; is anything left?
+print("popPrompt probe #1:")
+Cont.popPrompt()
+print("  -> leftover entry #1 exists")
+print("popPrompt probe #2:")
+Cont.popPrompt()
+print("  -> leftover entry #2 exists")

@@ -1,0 +1,70 @@
+// Same probe, but every clobber local is the identical sentinel 1000, so any
+// leak shows up as an exact multiple of 1000 added to the surviving register
+// locals. Also prints the no-clobber control (resume immediately after
+// capture, nothing called in between).
+
+var TAG = Cont.newPrompt("t")
+var SAVED = null
+
+func clobber() {
+    var p = 1000
+    var q = 1000
+    var r = 1000
+    var s = 1000
+    var t = 1000
+    var u = 1000
+    var v = 1000
+    var w = 1000
+    var x = 1000
+    var y = 1000
+    var z = 1000
+    var zz = 1000
+    if (p == q) { return 0 }
+    if (r == s) { return 0 }
+    if (t == u) { return 0 }
+    if (v == w) { return 0 }
+    if (x == y) { return 0 }
+    if (z == zz) { return 0 }
+    return 1
+}
+
+func spillBody() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8
+    var i = 9
+    var j = 10
+    var k = 11
+    var l = 12
+    Cont.capture(TAG)
+    var total = a + b
+    total = total + c
+    total = total + d
+    total = total + e
+    total = total + f
+    total = total + g
+    total = total + h
+    total = total + i
+    total = total + j
+    total = total + k
+    total = total + l
+    return total
+}
+
+// control: capture then resume immediately, nothing in between
+Cont.pushPrompt(TAG)
+SAVED = spillBody()
+Cont.pushPrompt(TAG)
+print("no-clobber resume = %v   (expect 78)", Cont.resume(SAVED, null))
+
+// with an intervening spilling call
+Cont.pushPrompt(TAG)
+SAVED = spillBody()
+print("clobber ret       = %v", clobber())
+Cont.pushPrompt(TAG)
+print("clobbered resume  = %v   (expect 78)", Cont.resume(SAVED, null))

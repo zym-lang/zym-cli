@@ -1,0 +1,153 @@
+// C1 -- unwindFrames() clears preempt guards without re-arming the countdown.
+//
+// A preempt callback runs in a frame flagged FRAME_FLAG_PREEMPT, and while it
+// runs the entry is masked (in_flight = true). preemptArm() skips masked
+// entries, so the shared countdown vm->preempt_counter is armed from whatever
+// is left unmasked -- INT32_MAX when that entry was the only live one.
+//
+// Both RET paths in vm.c clear in_flight and then call preemptArm() to
+// recompute the shared countdown now that something is unmasked again.
+// unwindFrames() does the same clearing but never re-arms, so any non-local
+// exit out of a preempt callback (Cont.capture / Cont.abort / Cont.shift, all
+// of which unwind through unwindFrames) leaves the countdown at its
+// masked-armed value forever.
+//
+// The symptom is quiet: the entry's own `remaining` is refreshed correctly, so
+// Preempt.remaining(id) reports a healthy deadline, but the shared countdown
+// never reaches zero so the callback is never invoked again.
+//
+// Each case below registers ONE entry, escapes from its callback, and then
+// asserts the entry can still fire. Note that Preempt.remaining() is a pure
+// read (it does not re-arm), while every/cancel/setSlice/shield DO re-arm --
+// so each case must assert before it cancels, or the cancel would heal the
+// very state under test.
+
+// SLICE/SPIN are sized so a live entry fires a few hundred times per phase --
+// enough that "it fired again" is unambiguous, but far below the ~16000 total
+// callback firings at which an UNRELATED, pre-existing defect bites: pushPreemptFrame
+// places the callback at vm->stack_top and nothing ever lowers that watermark on
+// RET, so every firing permanently consumes stack slots. That leak reproduces on
+// a plain Preempt.every loop with no continuations at all, so keep this test's
+// firing count modest rather than letting a second bug drown this one.
+var SLICE = 5000
+var SPIN  = 200000
+
+func spin(n) {
+    var j = 0
+    while (j < n) { j = j + 1 }
+    return j
+}
+
+// ---------------------------------------------------------------------------
+// Control: an entry whose callback returns normally (RET path, which does
+// re-arm) keeps firing. This pins the harness -- if this fails, the test is
+// broken, not the VM.
+// ---------------------------------------------------------------------------
+var ctrl_hits = 0
+func ctrlTick() { ctrl_hits = ctrl_hits + 1 }
+
+var ctrl_id = Preempt.every(SLICE, ctrlTick)
+spin(SPIN)
+print("control: hits=%v remaining=%v", ctrl_hits, Preempt.remaining(ctrl_id))
+assert(ctrl_hits > 1, "control: a plain rearming entry must fire repeatedly")
+Preempt.cancel(ctrl_id)
+
+// ---------------------------------------------------------------------------
+// Case 1 -- Cont.capture() from inside a preempt callback.
+// ---------------------------------------------------------------------------
+var TAG1 = Cont.newPrompt("c1_capture")
+var cap_hits = 0
+var cap_done = false
+
+func capTick() {
+    cap_hits = cap_hits + 1
+    if (cap_done == false) {
+        cap_done = true
+        Cont.capture(TAG1)       // unwinds the PREEMPT frame
+    }
+}
+
+var cap_id = Preempt.every(SLICE, capTick)
+var k = Cont.withPrompt(TAG1, func() {
+    spin(SPIN)
+    return "body-finished"
+})
+
+assert(Cont.isContinuation(k), "case 1: the capture should have escaped as a continuation")
+assert(cap_hits == 1, "case 1: the callback should have fired exactly once so far")
+
+var cap_before = cap_hits
+var cap_rem = Preempt.remaining(cap_id)
+spin(SPIN)
+print("capture: hits=%v (was %v) remaining=%v", cap_hits, cap_before, cap_rem)
+assert(cap_hits > cap_before,
+       "case 1: entry never fired again after Cont.capture from its callback -- countdown left masked-armed")
+Preempt.cancel(cap_id)
+
+// ---------------------------------------------------------------------------
+// Case 2 -- Cont.abort() from inside a preempt callback.
+// ---------------------------------------------------------------------------
+var TAG2 = Cont.newPrompt("c1_abort")
+var ab_hits = 0
+var ab_done = false
+
+func abTick() {
+    ab_hits = ab_hits + 1
+    if (ab_done == false) {
+        ab_done = true
+        Cont.abort(TAG2, "aborted")
+    }
+}
+
+var ab_id = Preempt.every(SLICE, abTick)
+var av = Cont.withPrompt(TAG2, func() {
+    spin(SPIN)
+    return "body-finished"
+})
+
+assert(av == "aborted", "case 2: the abort value should have surfaced from withPrompt")
+assert(ab_hits == 1, "case 2: the callback should have fired exactly once so far")
+
+var ab_before = ab_hits
+var ab_rem = Preempt.remaining(ab_id)
+spin(SPIN)
+print("abort:   hits=%v (was %v) remaining=%v", ab_hits, ab_before, ab_rem)
+assert(ab_hits > ab_before,
+       "case 2: entry never fired again after Cont.abort from its callback -- countdown left masked-armed")
+Preempt.cancel(ab_id)
+
+// ---------------------------------------------------------------------------
+// Case 3 -- Cont.shift() from inside a preempt callback.
+// ---------------------------------------------------------------------------
+var TAG3 = Cont.newPrompt("c1_shift")
+var sh_hits = 0
+var sh_done = false
+
+func shHandler(k3) { return "shifted" }
+
+func shTick() {
+    sh_hits = sh_hits + 1
+    if (sh_done == false) {
+        sh_done = true
+        Cont.shift(TAG3, shHandler)
+    }
+}
+
+var sh_id = Preempt.every(SLICE, shTick)
+var sv = Cont.withPrompt(TAG3, func() {
+    spin(SPIN)
+    return "body-finished"
+})
+
+assert(sv == "shifted", "case 3: the shift handler's value should have surfaced from withPrompt")
+assert(sh_hits == 1, "case 3: the callback should have fired exactly once so far")
+
+var sh_before = sh_hits
+var sh_rem = Preempt.remaining(sh_id)
+spin(SPIN)
+print("shift:   hits=%v (was %v) remaining=%v", sh_hits, sh_before, sh_rem)
+assert(sh_hits > sh_before,
+       "case 3: entry never fired again after Cont.shift from its callback -- countdown left masked-armed")
+Preempt.cancel(sh_id)
+
+print("C1 OK")

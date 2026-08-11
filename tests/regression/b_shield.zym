@@ -1,0 +1,30 @@
+@tco aggressive
+
+func shieldNativeTail() {
+    return sqrt(9.0)
+}
+
+func shieldScriptTail() {
+    return 3.0
+}
+
+print("before %v", Preempt.shieldDepth())
+Preempt.shield(shieldScriptTail)
+print("after-shield-script-tail %v", Preempt.shieldDepth())
+Preempt.shield(shieldNativeTail)
+print("after-shield-native-tail %v", Preempt.shieldDepth())
+Preempt.shield(shieldNativeTail)
+print("after-second-shield-native-tail %v", Preempt.shieldDepth())
+
+// Does the leaked shield depth actually suppress a maskable entry?
+var hits = 0
+func cb() {
+    hits = hits + 1
+}
+var id = Preempt.every(100, cb)
+var acc = 0
+for (var i = 0; i < 10000; i = i + 1) {
+    acc = acc + 1
+}
+print("masked-work hits %v remaining %v shieldDepth %v", hits, Preempt.remaining(id), Preempt.shieldDepth())
+Preempt.cancel(id)

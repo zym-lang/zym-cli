@@ -1,0 +1,96 @@
+// ---------------------------------------------------------------
+// A. CONTROL: callback returns normally (no capture). Keeps firing?
+// ---------------------------------------------------------------
+func ctrlNormal() {
+    var hits = 0
+    var id = Preempt.every(2000, func() { hits = hits + 1 })
+    var s = 0
+    for (var i = 0; i < 100000; i = i + 1) { s = s + i }
+    var h1 = hits
+    for (var i = 0; i < 100000; i = i + 1) { s = s + i }
+    Preempt.cancel(id)
+    print("A control-no-capture: hits_after_100k=%v hits_after_200k=%v", h1, hits)
+}
+
+// ---------------------------------------------------------------
+// B. CONTROL: capture from ordinary code (NOT from a preempt frame).
+//    unwindFrames still runs, but no FRAME_FLAG_PREEMPT is unwound.
+// ---------------------------------------------------------------
+func ctrlPlainCapture() {
+    var TAG = Cont.newPrompt("b")
+    var hits = 0
+    var id = Preempt.every(2000, func() { hits = hits + 1 })
+    var r = Cont.withPrompt(TAG, func() {
+        Cont.capture(TAG)
+        return "unreached"
+    })
+    var hAtCapture = hits
+    var s = 0
+    for (var i = 0; i < 200000; i = i + 1) { s = s + i }
+    Preempt.cancel(id)
+    print("B control-plain-capture: isCont=%v hits_at_capture=%v hits_after_200k=%v",
+          Cont.isContinuation(r), hAtCapture, hits)
+}
+
+// ---------------------------------------------------------------
+// C. SUBJECT: capture from INSIDE the preempt callback.
+// ---------------------------------------------------------------
+func subjCaptureInCallback() {
+    var TAG = Cont.newPrompt("c")
+    var hits = 0
+    var armed = true
+    var id = Preempt.every(2000, func() {
+        hits = hits + 1
+        if (armed) { Cont.capture(TAG) }
+    })
+    var r = Cont.withPrompt(TAG, func() {
+        var s = 0
+        for (var i = 0; i < 50000; i = i + 1) { s = s + i }
+        return "done"
+    })
+    var hAtCapture = hits
+    armed = false
+    var s2 = 0
+    for (var i = 0; i < 400000; i = i + 1) { s2 = s2 + i }
+    var hAfter = hits
+    var remAfter = Preempt.remaining(id)
+    Preempt.request(id)
+    var s3 = 0
+    for (var i = 0; i < 100; i = i + 1) { s3 = s3 + i }
+    print("C subject: isCont=%v hits_at_capture=%v hits_after_400k=%v remaining=%v hits_after_request=%v",
+          Cont.isContinuation(r), hAtCapture, hAfter, remAfter, hits)
+    Preempt.cancel(id)
+}
+
+// ---------------------------------------------------------------
+// D. MECHANISM: same as C but a SECOND live entry keeps the shared
+//    countdown finite while the first entry is masked.
+// ---------------------------------------------------------------
+func mechSecondEntry() {
+    var TAG = Cont.newPrompt("d")
+    var hits = 0
+    var other = 0
+    var armed = true
+    var id = Preempt.every(2000, func() {
+        hits = hits + 1
+        if (armed) { Cont.capture(TAG) }
+    })
+    var id2 = Preempt.every(3000, func() { other = other + 1 })
+    var r = Cont.withPrompt(TAG, func() {
+        var s = 0
+        for (var i = 0; i < 50000; i = i + 1) { s = s + i }
+        return "done"
+    })
+    var hAtCapture = hits
+    armed = false
+    var s2 = 0
+    for (var i = 0; i < 400000; i = i + 1) { s2 = s2 + i }
+    print("D two-entries: hits_at_capture=%v hits_after_400k=%v other=%v", hAtCapture, hits, other)
+    Preempt.cancel(id)
+    Preempt.cancel(id2)
+}
+
+ctrlNormal()
+ctrlPlainCapture()
+subjCaptureInCallback()
+mechSecondEntry()

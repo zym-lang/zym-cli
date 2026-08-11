@@ -1,0 +1,22 @@
+// Does the same leak arise via cont_capture and cont_shift, not just abort?
+var T = Cont.newPrompt("T")
+var I = Cont.newPrompt("I")
+var MODE = 0
+
+func innerCapture() {
+    Cont.capture(T)
+    return 0
+}
+func innerShift() {
+    Cont.shift(T, func (k) { return 5 })
+    return 0
+}
+func outerCapture() { return Cont.withPrompt(I, innerCapture) }
+func outerShift()   { return Cont.withPrompt(I, innerShift) }
+
+print("--- capture path ---")
+Cont.withPrompt(T, outerCapture)
+Cont.popPrompt()
+print("capture: LEAK pop#1 ok")
+Cont.popPrompt()
+print("capture: LEAK pop#2 ok")

@@ -1,0 +1,23 @@
+@tco aggressive
+
+var hits = 0
+
+func ident(x) {
+    return x
+}
+
+func scriptTail() {
+    hits = hits + 1
+    return ident(4.0)
+}
+
+var id = Preempt.every(100, scriptTail)
+print("registered id %v", id)
+
+var acc = 0
+for (var i = 0; i < 10000; i = i + 1) {
+    acc = acc + 1
+}
+
+print("script-tail hits %v remaining %v result %v", hits, Preempt.remaining(id), acc)
+Preempt.cancel(id)

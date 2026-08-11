@@ -1,0 +1,11 @@
+@tco aggressive
+var hits = 0
+func helper() { return 7 }
+func cb() {
+    hits = hits + 1
+    return helper()
+}
+var id = Preempt.every(2000, cb)
+var acc = 0
+for (var i = 0; i < 400000; i = i + 1) { acc = acc + 1 }
+print("T3 aggressive+script-tail hits=%v remaining=%v acc=%v ids=%v", hits, Preempt.remaining(id), acc, Preempt.ids())

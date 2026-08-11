@@ -1,0 +1,25 @@
+// Which entry survived? Probe by tag identity, not by count.
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+func inner() {
+    Cont.abort(OUTER, "AV")
+    return 0
+}
+func outer() {
+    return Cont.withPrompt(INNER, inner)
+}
+
+var r = Cont.withPrompt(OUTER, outer)
+print("outer withPrompt returned:")
+print(r)
+print("--- both prompts are now lexically and dynamically out of scope ---")
+
+// INNER should be gone (it was the top-of-stack entry that popPrompt removed).
+func probeInner() {
+    Cont.abort(INNER, "INNER-GHOST")
+    return 0
+}
+print("probing INNER (expect: prompt tag not found)")
+Cont.abort(INNER, "INNER-GHOST")
+print("INNER GHOST ACCEPTED")

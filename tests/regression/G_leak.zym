@@ -1,0 +1,21 @@
+// SEVERITY: one leaked prompt entry per nested control transfer.
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+func inner() {
+    Cont.abort(OUTER, 1)
+    return 0
+}
+func outer() {
+    return Cont.withPrompt(INNER, inner)
+}
+
+var i = 0
+while (i < 200) {
+    Cont.withPrompt(OUTER, outer)
+    i = i + 1
+    if (i % 10 == 0) {
+        print(i)
+    }
+}
+print("survived 200 iterations")

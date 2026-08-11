@@ -1,0 +1,16 @@
+@tco aggressive
+var f = Preempt.shieldDepth
+var hits = 0
+func cb() {
+    hits = hits + 1
+    return f()
+}
+var id = Preempt.every(2000, cb)
+var acc = 0
+for (var i = 0; i < 400000; i = i + 1) { acc = acc + 1 }
+print("T8 native-CLOSURE tail in callback: hits=%v remaining=%v", hits, Preempt.remaining(id))
+
+func shieldBody() { return f() }
+print("T8 depth before shield = %v", Preempt.shieldDepth())
+Preempt.shield(shieldBody)
+print("T8 depth after  shield = %v", Preempt.shieldDepth())

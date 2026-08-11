@@ -1,0 +1,21 @@
+var OUTER = Cont.newPrompt("outer")
+var INNER = Cont.newPrompt("inner")
+
+func g() {
+    print("g: before capture(OUTER)")
+    var v = Cont.capture(OUTER)
+    print("g: resumed with v =")
+    print(v)
+    return 99
+}
+func f() {
+    var r = Cont.withPrompt(INNER, g)
+    print("f: inner withPrompt yielded")
+    return r
+}
+
+var res = Cont.withPrompt(OUTER, f)
+print("captured. resuming...")
+var out = Cont.resume(res, 42)
+print("resume produced:")
+print(out)

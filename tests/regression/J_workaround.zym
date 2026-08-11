@@ -1,0 +1,28 @@
+// Is "the caller should re-push the inner prompt" a valid workaround for half 2?
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+func innerBody() {
+    var v = Cont.capture(OUTER)
+    print("innerBody: resumed with")
+    print(v)
+    print("innerBody: capturing INNER (re-pushed by the caller at the resume site)")
+    var w = Cont.capture(INNER)
+    print("innerBody: INNER capture returned; is continuation?")
+    print(Cont.isContinuation(w))
+    return 7
+}
+func outerBody() {
+    var x = Cont.withPrompt(INNER, innerBody)
+    print("outerBody: inner returned")
+    print(x)
+    return x
+}
+
+var k = Cont.withPrompt(OUTER, outerBody)
+print("--- resuming, with INNER manually re-pushed first ---")
+Cont.pushPrompt(INNER)
+var r = Cont.resume(k, 42)
+print("resume returned")
+print(r)
+print("DONE")

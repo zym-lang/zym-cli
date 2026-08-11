@@ -1,0 +1,11 @@
+@tco aggressive
+var hits = 0
+func cb() {
+    hits = hits + 1
+    var t = clock()
+    return t
+}
+var id = Preempt.every(2000, cb)
+var acc = 0
+for (var i = 0; i < 400000; i = i + 1) { acc = acc + 1 }
+print("T2 aggressive+native-NONtail hits=%v remaining=%v acc=%v ids=%v", hits, Preempt.remaining(id), acc, Preempt.ids())

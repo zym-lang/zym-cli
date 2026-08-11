@@ -1,0 +1,471 @@
+// C3 -- a captured continuation does not carry the parallel spill stack.
+//
+// Spilled locals used to live inside the frame's own register window; they now
+// live on a separate VM-level array, vm->spill_stack, with each CallFrame
+// recording its base in `spill_base` and the VM tracking the high-water mark in
+// `spill_top`. ObjContinuation predates that move. captureContinuation memcpys
+// the CallFrame array -- so each frame's `spill_base` integer rides along as a
+// raw field -- and the value stack, but nothing copies the spill VALUES; and
+// resumeContinuation restores neither those values nor spill_base/spill_top, so
+// the integer that came along means nothing once the VM's spill stack has moved
+// on. The two halves show up separately:
+//
+//   - the values were never snapshotted, so anything that runs on the spill
+//     stack while the continuation is suspended overwrites them in place
+//     (case 2), and a collection while suspended does not even see them as
+//     roots (case 4);
+//   - `spill_base` is restored verbatim, so a resumed frame and the next callee
+//     pushed above it can be handed the very same spill offsets (cases 1, 3, 5).
+//
+// This file needs NO environment variable. Every function below declares 260
+// locals, past the 252 the default register window allows, so all of them spill
+// under a plain `zym c3_continuation_spill_snapshot.zym`. That is the whole
+// point: C3 is reachable from ordinary code, not only under a debug knob. Only
+// a252..a259 actually land on the spill stack, so only those are read back.
+//
+// Its companion c3_continuation_spill_snapshot_forced.zym covers the same
+// ground cheaply under ZYM_FORCE_SPILL_AT. It has to be a separate file: a
+// lowered cap applies to the implicit <script> function too, and top-level
+// `var`s and `func` declarations are all locals of it, so a file with this many
+// declarations cannot compile in that mode however small its bodies are.
+//
+// Sums accumulate one term at a time rather than as one long '+' chain, for the
+// same reason tests/core/continuations_spill.zym does it: a chain of spilled
+// reads needs more scratch registers than SPILL_SCRATCH_COUNT leaves.
+
+var TAG  = Cont.newPrompt("c3")
+var TAG2 = Cont.newPrompt("c3-shift")
+var HELD = null          // parking slot for the continuation under test
+
+// Resuming through a named global rather than a closure keeps the continuation
+// out of an upvalue, which is a different question than the one under test.
+func resumeHeld() { return Cont.resume(HELD, 0) }
+
+// A callee whose only job is to occupy spill slots. It is pushed at whatever
+// base frame push hands it -- which is the point: if a resumed frame's
+// spill_base was never rebased, that base is the resumed frame's own.
+func clobber(n) {
+    var c0 = n + 0  var c1 = n + 1  var c2 = n + 2  var c3 = n + 3  var c4 = n + 4  var c5 = n + 5  var c6 = n + 6  var c7 = n + 7
+    var c8 = n + 8  var c9 = n + 9  var c10 = n + 10  var c11 = n + 11  var c12 = n + 12  var c13 = n + 13  var c14 = n + 14  var c15 = n + 15
+    var c16 = n + 16  var c17 = n + 17  var c18 = n + 18  var c19 = n + 19  var c20 = n + 20  var c21 = n + 21  var c22 = n + 22  var c23 = n + 23
+    var c24 = n + 24  var c25 = n + 25  var c26 = n + 26  var c27 = n + 27  var c28 = n + 28  var c29 = n + 29  var c30 = n + 30  var c31 = n + 31
+    var c32 = n + 32  var c33 = n + 33  var c34 = n + 34  var c35 = n + 35  var c36 = n + 36  var c37 = n + 37  var c38 = n + 38  var c39 = n + 39
+    var c40 = n + 40  var c41 = n + 41  var c42 = n + 42  var c43 = n + 43  var c44 = n + 44  var c45 = n + 45  var c46 = n + 46  var c47 = n + 47
+    var c48 = n + 48  var c49 = n + 49  var c50 = n + 50  var c51 = n + 51  var c52 = n + 52  var c53 = n + 53  var c54 = n + 54  var c55 = n + 55
+    var c56 = n + 56  var c57 = n + 57  var c58 = n + 58  var c59 = n + 59  var c60 = n + 60  var c61 = n + 61  var c62 = n + 62  var c63 = n + 63
+    var c64 = n + 64  var c65 = n + 65  var c66 = n + 66  var c67 = n + 67  var c68 = n + 68  var c69 = n + 69  var c70 = n + 70  var c71 = n + 71
+    var c72 = n + 72  var c73 = n + 73  var c74 = n + 74  var c75 = n + 75  var c76 = n + 76  var c77 = n + 77  var c78 = n + 78  var c79 = n + 79
+    var c80 = n + 80  var c81 = n + 81  var c82 = n + 82  var c83 = n + 83  var c84 = n + 84  var c85 = n + 85  var c86 = n + 86  var c87 = n + 87
+    var c88 = n + 88  var c89 = n + 89  var c90 = n + 90  var c91 = n + 91  var c92 = n + 92  var c93 = n + 93  var c94 = n + 94  var c95 = n + 95
+    var c96 = n + 96  var c97 = n + 97  var c98 = n + 98  var c99 = n + 99  var c100 = n + 100  var c101 = n + 101  var c102 = n + 102  var c103 = n + 103
+    var c104 = n + 104  var c105 = n + 105  var c106 = n + 106  var c107 = n + 107  var c108 = n + 108  var c109 = n + 109  var c110 = n + 110  var c111 = n + 111
+    var c112 = n + 112  var c113 = n + 113  var c114 = n + 114  var c115 = n + 115  var c116 = n + 116  var c117 = n + 117  var c118 = n + 118  var c119 = n + 119
+    var c120 = n + 120  var c121 = n + 121  var c122 = n + 122  var c123 = n + 123  var c124 = n + 124  var c125 = n + 125  var c126 = n + 126  var c127 = n + 127
+    var c128 = n + 128  var c129 = n + 129  var c130 = n + 130  var c131 = n + 131  var c132 = n + 132  var c133 = n + 133  var c134 = n + 134  var c135 = n + 135
+    var c136 = n + 136  var c137 = n + 137  var c138 = n + 138  var c139 = n + 139  var c140 = n + 140  var c141 = n + 141  var c142 = n + 142  var c143 = n + 143
+    var c144 = n + 144  var c145 = n + 145  var c146 = n + 146  var c147 = n + 147  var c148 = n + 148  var c149 = n + 149  var c150 = n + 150  var c151 = n + 151
+    var c152 = n + 152  var c153 = n + 153  var c154 = n + 154  var c155 = n + 155  var c156 = n + 156  var c157 = n + 157  var c158 = n + 158  var c159 = n + 159
+    var c160 = n + 160  var c161 = n + 161  var c162 = n + 162  var c163 = n + 163  var c164 = n + 164  var c165 = n + 165  var c166 = n + 166  var c167 = n + 167
+    var c168 = n + 168  var c169 = n + 169  var c170 = n + 170  var c171 = n + 171  var c172 = n + 172  var c173 = n + 173  var c174 = n + 174  var c175 = n + 175
+    var c176 = n + 176  var c177 = n + 177  var c178 = n + 178  var c179 = n + 179  var c180 = n + 180  var c181 = n + 181  var c182 = n + 182  var c183 = n + 183
+    var c184 = n + 184  var c185 = n + 185  var c186 = n + 186  var c187 = n + 187  var c188 = n + 188  var c189 = n + 189  var c190 = n + 190  var c191 = n + 191
+    var c192 = n + 192  var c193 = n + 193  var c194 = n + 194  var c195 = n + 195  var c196 = n + 196  var c197 = n + 197  var c198 = n + 198  var c199 = n + 199
+    var c200 = n + 200  var c201 = n + 201  var c202 = n + 202  var c203 = n + 203  var c204 = n + 204  var c205 = n + 205  var c206 = n + 206  var c207 = n + 207
+    var c208 = n + 208  var c209 = n + 209  var c210 = n + 210  var c211 = n + 211  var c212 = n + 212  var c213 = n + 213  var c214 = n + 214  var c215 = n + 215
+    var c216 = n + 216  var c217 = n + 217  var c218 = n + 218  var c219 = n + 219  var c220 = n + 220  var c221 = n + 221  var c222 = n + 222  var c223 = n + 223
+    var c224 = n + 224  var c225 = n + 225  var c226 = n + 226  var c227 = n + 227  var c228 = n + 228  var c229 = n + 229  var c230 = n + 230  var c231 = n + 231
+    var c232 = n + 232  var c233 = n + 233  var c234 = n + 234  var c235 = n + 235  var c236 = n + 236  var c237 = n + 237  var c238 = n + 238  var c239 = n + 239
+    var c240 = n + 240  var c241 = n + 241  var c242 = n + 242  var c243 = n + 243  var c244 = n + 244  var c245 = n + 245  var c246 = n + 246  var c247 = n + 247
+    var c248 = n + 248  var c249 = n + 249  var c250 = n + 250  var c251 = n + 251  var c252 = n + 252  var c253 = n + 253  var c254 = n + 254  var c255 = n + 255
+    var c256 = n + 256  var c257 = n + 257  var c258 = n + 258  var c259 = n + 259
+    var total = 0
+    total = total + c252
+    total = total + c253
+    total = total + c254
+    total = total + c255
+    total = total + c256
+    total = total + c257
+    total = total + c258
+    total = total + c259
+    return total
+}
+
+// ---------------------------------------------------------------------------
+// [1] The classic shape: capture inside a spilling body, resume it, and let the
+// resumed body call something. a252..a259 sum to 2044.
+// ---------------------------------------------------------------------------
+func c1_victim() {
+    var a0 = 0  var a1 = 1  var a2 = 2  var a3 = 3  var a4 = 4  var a5 = 5  var a6 = 6  var a7 = 7
+    var a8 = 8  var a9 = 9  var a10 = 10  var a11 = 11  var a12 = 12  var a13 = 13  var a14 = 14  var a15 = 15
+    var a16 = 16  var a17 = 17  var a18 = 18  var a19 = 19  var a20 = 20  var a21 = 21  var a22 = 22  var a23 = 23
+    var a24 = 24  var a25 = 25  var a26 = 26  var a27 = 27  var a28 = 28  var a29 = 29  var a30 = 30  var a31 = 31
+    var a32 = 32  var a33 = 33  var a34 = 34  var a35 = 35  var a36 = 36  var a37 = 37  var a38 = 38  var a39 = 39
+    var a40 = 40  var a41 = 41  var a42 = 42  var a43 = 43  var a44 = 44  var a45 = 45  var a46 = 46  var a47 = 47
+    var a48 = 48  var a49 = 49  var a50 = 50  var a51 = 51  var a52 = 52  var a53 = 53  var a54 = 54  var a55 = 55
+    var a56 = 56  var a57 = 57  var a58 = 58  var a59 = 59  var a60 = 60  var a61 = 61  var a62 = 62  var a63 = 63
+    var a64 = 64  var a65 = 65  var a66 = 66  var a67 = 67  var a68 = 68  var a69 = 69  var a70 = 70  var a71 = 71
+    var a72 = 72  var a73 = 73  var a74 = 74  var a75 = 75  var a76 = 76  var a77 = 77  var a78 = 78  var a79 = 79
+    var a80 = 80  var a81 = 81  var a82 = 82  var a83 = 83  var a84 = 84  var a85 = 85  var a86 = 86  var a87 = 87
+    var a88 = 88  var a89 = 89  var a90 = 90  var a91 = 91  var a92 = 92  var a93 = 93  var a94 = 94  var a95 = 95
+    var a96 = 96  var a97 = 97  var a98 = 98  var a99 = 99  var a100 = 100  var a101 = 101  var a102 = 102  var a103 = 103
+    var a104 = 104  var a105 = 105  var a106 = 106  var a107 = 107  var a108 = 108  var a109 = 109  var a110 = 110  var a111 = 111
+    var a112 = 112  var a113 = 113  var a114 = 114  var a115 = 115  var a116 = 116  var a117 = 117  var a118 = 118  var a119 = 119
+    var a120 = 120  var a121 = 121  var a122 = 122  var a123 = 123  var a124 = 124  var a125 = 125  var a126 = 126  var a127 = 127
+    var a128 = 128  var a129 = 129  var a130 = 130  var a131 = 131  var a132 = 132  var a133 = 133  var a134 = 134  var a135 = 135
+    var a136 = 136  var a137 = 137  var a138 = 138  var a139 = 139  var a140 = 140  var a141 = 141  var a142 = 142  var a143 = 143
+    var a144 = 144  var a145 = 145  var a146 = 146  var a147 = 147  var a148 = 148  var a149 = 149  var a150 = 150  var a151 = 151
+    var a152 = 152  var a153 = 153  var a154 = 154  var a155 = 155  var a156 = 156  var a157 = 157  var a158 = 158  var a159 = 159
+    var a160 = 160  var a161 = 161  var a162 = 162  var a163 = 163  var a164 = 164  var a165 = 165  var a166 = 166  var a167 = 167
+    var a168 = 168  var a169 = 169  var a170 = 170  var a171 = 171  var a172 = 172  var a173 = 173  var a174 = 174  var a175 = 175
+    var a176 = 176  var a177 = 177  var a178 = 178  var a179 = 179  var a180 = 180  var a181 = 181  var a182 = 182  var a183 = 183
+    var a184 = 184  var a185 = 185  var a186 = 186  var a187 = 187  var a188 = 188  var a189 = 189  var a190 = 190  var a191 = 191
+    var a192 = 192  var a193 = 193  var a194 = 194  var a195 = 195  var a196 = 196  var a197 = 197  var a198 = 198  var a199 = 199
+    var a200 = 200  var a201 = 201  var a202 = 202  var a203 = 203  var a204 = 204  var a205 = 205  var a206 = 206  var a207 = 207
+    var a208 = 208  var a209 = 209  var a210 = 210  var a211 = 211  var a212 = 212  var a213 = 213  var a214 = 214  var a215 = 215
+    var a216 = 216  var a217 = 217  var a218 = 218  var a219 = 219  var a220 = 220  var a221 = 221  var a222 = 222  var a223 = 223
+    var a224 = 224  var a225 = 225  var a226 = 226  var a227 = 227  var a228 = 228  var a229 = 229  var a230 = 230  var a231 = 231
+    var a232 = 232  var a233 = 233  var a234 = 234  var a235 = 235  var a236 = 236  var a237 = 237  var a238 = 238  var a239 = 239
+    var a240 = 240  var a241 = 241  var a242 = 242  var a243 = 243  var a244 = 244  var a245 = 245  var a246 = 246  var a247 = 247
+    var a248 = 248  var a249 = 249  var a250 = 250  var a251 = 251  var a252 = 252  var a253 = 253  var a254 = 254  var a255 = 255
+    var a256 = 256  var a257 = 257  var a258 = 258  var a259 = 259
+    var r = Cont.capture(TAG)
+    var junk = clobber(1000)
+    var total = 0
+    total = total + a252
+    total = total + a253
+    total = total + a254
+    total = total + a255
+    total = total + a256
+    total = total + a257
+    total = total + a258
+    total = total + a259
+    return total
+}
+
+func case1() {
+    HELD = Cont.withPrompt(TAG, c1_victim)
+    return Cont.withPrompt(TAG, resumeHeld)
+}
+
+// ---------------------------------------------------------------------------
+// [2] Same sum, but nothing runs inside the resumed body -- the damage is done
+// while it is suspended. After the capture vm->spill_top has dropped back below
+// the captured frame's slots, so the very next spilling call reuses them. This
+// is the half a rebase alone would not fix: the values have to have been copied
+// out at capture time.
+// ---------------------------------------------------------------------------
+func c2_victim() {
+    var a0 = 0  var a1 = 1  var a2 = 2  var a3 = 3  var a4 = 4  var a5 = 5  var a6 = 6  var a7 = 7
+    var a8 = 8  var a9 = 9  var a10 = 10  var a11 = 11  var a12 = 12  var a13 = 13  var a14 = 14  var a15 = 15
+    var a16 = 16  var a17 = 17  var a18 = 18  var a19 = 19  var a20 = 20  var a21 = 21  var a22 = 22  var a23 = 23
+    var a24 = 24  var a25 = 25  var a26 = 26  var a27 = 27  var a28 = 28  var a29 = 29  var a30 = 30  var a31 = 31
+    var a32 = 32  var a33 = 33  var a34 = 34  var a35 = 35  var a36 = 36  var a37 = 37  var a38 = 38  var a39 = 39
+    var a40 = 40  var a41 = 41  var a42 = 42  var a43 = 43  var a44 = 44  var a45 = 45  var a46 = 46  var a47 = 47
+    var a48 = 48  var a49 = 49  var a50 = 50  var a51 = 51  var a52 = 52  var a53 = 53  var a54 = 54  var a55 = 55
+    var a56 = 56  var a57 = 57  var a58 = 58  var a59 = 59  var a60 = 60  var a61 = 61  var a62 = 62  var a63 = 63
+    var a64 = 64  var a65 = 65  var a66 = 66  var a67 = 67  var a68 = 68  var a69 = 69  var a70 = 70  var a71 = 71
+    var a72 = 72  var a73 = 73  var a74 = 74  var a75 = 75  var a76 = 76  var a77 = 77  var a78 = 78  var a79 = 79
+    var a80 = 80  var a81 = 81  var a82 = 82  var a83 = 83  var a84 = 84  var a85 = 85  var a86 = 86  var a87 = 87
+    var a88 = 88  var a89 = 89  var a90 = 90  var a91 = 91  var a92 = 92  var a93 = 93  var a94 = 94  var a95 = 95
+    var a96 = 96  var a97 = 97  var a98 = 98  var a99 = 99  var a100 = 100  var a101 = 101  var a102 = 102  var a103 = 103
+    var a104 = 104  var a105 = 105  var a106 = 106  var a107 = 107  var a108 = 108  var a109 = 109  var a110 = 110  var a111 = 111
+    var a112 = 112  var a113 = 113  var a114 = 114  var a115 = 115  var a116 = 116  var a117 = 117  var a118 = 118  var a119 = 119
+    var a120 = 120  var a121 = 121  var a122 = 122  var a123 = 123  var a124 = 124  var a125 = 125  var a126 = 126  var a127 = 127
+    var a128 = 128  var a129 = 129  var a130 = 130  var a131 = 131  var a132 = 132  var a133 = 133  var a134 = 134  var a135 = 135
+    var a136 = 136  var a137 = 137  var a138 = 138  var a139 = 139  var a140 = 140  var a141 = 141  var a142 = 142  var a143 = 143
+    var a144 = 144  var a145 = 145  var a146 = 146  var a147 = 147  var a148 = 148  var a149 = 149  var a150 = 150  var a151 = 151
+    var a152 = 152  var a153 = 153  var a154 = 154  var a155 = 155  var a156 = 156  var a157 = 157  var a158 = 158  var a159 = 159
+    var a160 = 160  var a161 = 161  var a162 = 162  var a163 = 163  var a164 = 164  var a165 = 165  var a166 = 166  var a167 = 167
+    var a168 = 168  var a169 = 169  var a170 = 170  var a171 = 171  var a172 = 172  var a173 = 173  var a174 = 174  var a175 = 175
+    var a176 = 176  var a177 = 177  var a178 = 178  var a179 = 179  var a180 = 180  var a181 = 181  var a182 = 182  var a183 = 183
+    var a184 = 184  var a185 = 185  var a186 = 186  var a187 = 187  var a188 = 188  var a189 = 189  var a190 = 190  var a191 = 191
+    var a192 = 192  var a193 = 193  var a194 = 194  var a195 = 195  var a196 = 196  var a197 = 197  var a198 = 198  var a199 = 199
+    var a200 = 200  var a201 = 201  var a202 = 202  var a203 = 203  var a204 = 204  var a205 = 205  var a206 = 206  var a207 = 207
+    var a208 = 208  var a209 = 209  var a210 = 210  var a211 = 211  var a212 = 212  var a213 = 213  var a214 = 214  var a215 = 215
+    var a216 = 216  var a217 = 217  var a218 = 218  var a219 = 219  var a220 = 220  var a221 = 221  var a222 = 222  var a223 = 223
+    var a224 = 224  var a225 = 225  var a226 = 226  var a227 = 227  var a228 = 228  var a229 = 229  var a230 = 230  var a231 = 231
+    var a232 = 232  var a233 = 233  var a234 = 234  var a235 = 235  var a236 = 236  var a237 = 237  var a238 = 238  var a239 = 239
+    var a240 = 240  var a241 = 241  var a242 = 242  var a243 = 243  var a244 = 244  var a245 = 245  var a246 = 246  var a247 = 247
+    var a248 = 248  var a249 = 249  var a250 = 250  var a251 = 251  var a252 = 252  var a253 = 253  var a254 = 254  var a255 = 255
+    var a256 = 256  var a257 = 257  var a258 = 258  var a259 = 259
+    var r = Cont.capture(TAG)
+    var total = 0
+    total = total + a252
+    total = total + a253
+    total = total + a254
+    total = total + a255
+    total = total + a256
+    total = total + a257
+    total = total + a258
+    total = total + a259
+    return total
+}
+
+func case2() {
+    HELD = Cont.withPrompt(TAG, c2_victim)
+    var junk = clobber(7000)      // reuses the suspended frame's spill slots
+    return Cont.withPrompt(TAG, resumeHeld)
+}
+
+// ---------------------------------------------------------------------------
+// [3] Two spilling frames inside one capture. The captured extent runs from
+// frames[prompt_frame].spill_base upward, so `outer` and `inner` sit at
+// different offsets within it and each needs its own rebase -- a restore that
+// got the extent right but rebased every frame to the same base would pass
+// case 1 and fail here. inner returns 2044, outer adds 10044, total 12088.
+// ---------------------------------------------------------------------------
+func c3_inner() {
+    var a0 = 0  var a1 = 1  var a2 = 2  var a3 = 3  var a4 = 4  var a5 = 5  var a6 = 6  var a7 = 7
+    var a8 = 8  var a9 = 9  var a10 = 10  var a11 = 11  var a12 = 12  var a13 = 13  var a14 = 14  var a15 = 15
+    var a16 = 16  var a17 = 17  var a18 = 18  var a19 = 19  var a20 = 20  var a21 = 21  var a22 = 22  var a23 = 23
+    var a24 = 24  var a25 = 25  var a26 = 26  var a27 = 27  var a28 = 28  var a29 = 29  var a30 = 30  var a31 = 31
+    var a32 = 32  var a33 = 33  var a34 = 34  var a35 = 35  var a36 = 36  var a37 = 37  var a38 = 38  var a39 = 39
+    var a40 = 40  var a41 = 41  var a42 = 42  var a43 = 43  var a44 = 44  var a45 = 45  var a46 = 46  var a47 = 47
+    var a48 = 48  var a49 = 49  var a50 = 50  var a51 = 51  var a52 = 52  var a53 = 53  var a54 = 54  var a55 = 55
+    var a56 = 56  var a57 = 57  var a58 = 58  var a59 = 59  var a60 = 60  var a61 = 61  var a62 = 62  var a63 = 63
+    var a64 = 64  var a65 = 65  var a66 = 66  var a67 = 67  var a68 = 68  var a69 = 69  var a70 = 70  var a71 = 71
+    var a72 = 72  var a73 = 73  var a74 = 74  var a75 = 75  var a76 = 76  var a77 = 77  var a78 = 78  var a79 = 79
+    var a80 = 80  var a81 = 81  var a82 = 82  var a83 = 83  var a84 = 84  var a85 = 85  var a86 = 86  var a87 = 87
+    var a88 = 88  var a89 = 89  var a90 = 90  var a91 = 91  var a92 = 92  var a93 = 93  var a94 = 94  var a95 = 95
+    var a96 = 96  var a97 = 97  var a98 = 98  var a99 = 99  var a100 = 100  var a101 = 101  var a102 = 102  var a103 = 103
+    var a104 = 104  var a105 = 105  var a106 = 106  var a107 = 107  var a108 = 108  var a109 = 109  var a110 = 110  var a111 = 111
+    var a112 = 112  var a113 = 113  var a114 = 114  var a115 = 115  var a116 = 116  var a117 = 117  var a118 = 118  var a119 = 119
+    var a120 = 120  var a121 = 121  var a122 = 122  var a123 = 123  var a124 = 124  var a125 = 125  var a126 = 126  var a127 = 127
+    var a128 = 128  var a129 = 129  var a130 = 130  var a131 = 131  var a132 = 132  var a133 = 133  var a134 = 134  var a135 = 135
+    var a136 = 136  var a137 = 137  var a138 = 138  var a139 = 139  var a140 = 140  var a141 = 141  var a142 = 142  var a143 = 143
+    var a144 = 144  var a145 = 145  var a146 = 146  var a147 = 147  var a148 = 148  var a149 = 149  var a150 = 150  var a151 = 151
+    var a152 = 152  var a153 = 153  var a154 = 154  var a155 = 155  var a156 = 156  var a157 = 157  var a158 = 158  var a159 = 159
+    var a160 = 160  var a161 = 161  var a162 = 162  var a163 = 163  var a164 = 164  var a165 = 165  var a166 = 166  var a167 = 167
+    var a168 = 168  var a169 = 169  var a170 = 170  var a171 = 171  var a172 = 172  var a173 = 173  var a174 = 174  var a175 = 175
+    var a176 = 176  var a177 = 177  var a178 = 178  var a179 = 179  var a180 = 180  var a181 = 181  var a182 = 182  var a183 = 183
+    var a184 = 184  var a185 = 185  var a186 = 186  var a187 = 187  var a188 = 188  var a189 = 189  var a190 = 190  var a191 = 191
+    var a192 = 192  var a193 = 193  var a194 = 194  var a195 = 195  var a196 = 196  var a197 = 197  var a198 = 198  var a199 = 199
+    var a200 = 200  var a201 = 201  var a202 = 202  var a203 = 203  var a204 = 204  var a205 = 205  var a206 = 206  var a207 = 207
+    var a208 = 208  var a209 = 209  var a210 = 210  var a211 = 211  var a212 = 212  var a213 = 213  var a214 = 214  var a215 = 215
+    var a216 = 216  var a217 = 217  var a218 = 218  var a219 = 219  var a220 = 220  var a221 = 221  var a222 = 222  var a223 = 223
+    var a224 = 224  var a225 = 225  var a226 = 226  var a227 = 227  var a228 = 228  var a229 = 229  var a230 = 230  var a231 = 231
+    var a232 = 232  var a233 = 233  var a234 = 234  var a235 = 235  var a236 = 236  var a237 = 237  var a238 = 238  var a239 = 239
+    var a240 = 240  var a241 = 241  var a242 = 242  var a243 = 243  var a244 = 244  var a245 = 245  var a246 = 246  var a247 = 247
+    var a248 = 248  var a249 = 249  var a250 = 250  var a251 = 251  var a252 = 252  var a253 = 253  var a254 = 254  var a255 = 255
+    var a256 = 256  var a257 = 257  var a258 = 258  var a259 = 259
+    var r = Cont.capture(TAG)
+    var junk = clobber(3000)
+    var total = 0
+    total = total + a252
+    total = total + a253
+    total = total + a254
+    total = total + a255
+    total = total + a256
+    total = total + a257
+    total = total + a258
+    total = total + a259
+    return total
+}
+
+func c3_outer() {
+    var b0 = 1000  var b1 = 1001  var b2 = 1002  var b3 = 1003  var b4 = 1004  var b5 = 1005  var b6 = 1006  var b7 = 1007
+    var b8 = 1008  var b9 = 1009  var b10 = 1010  var b11 = 1011  var b12 = 1012  var b13 = 1013  var b14 = 1014  var b15 = 1015
+    var b16 = 1016  var b17 = 1017  var b18 = 1018  var b19 = 1019  var b20 = 1020  var b21 = 1021  var b22 = 1022  var b23 = 1023
+    var b24 = 1024  var b25 = 1025  var b26 = 1026  var b27 = 1027  var b28 = 1028  var b29 = 1029  var b30 = 1030  var b31 = 1031
+    var b32 = 1032  var b33 = 1033  var b34 = 1034  var b35 = 1035  var b36 = 1036  var b37 = 1037  var b38 = 1038  var b39 = 1039
+    var b40 = 1040  var b41 = 1041  var b42 = 1042  var b43 = 1043  var b44 = 1044  var b45 = 1045  var b46 = 1046  var b47 = 1047
+    var b48 = 1048  var b49 = 1049  var b50 = 1050  var b51 = 1051  var b52 = 1052  var b53 = 1053  var b54 = 1054  var b55 = 1055
+    var b56 = 1056  var b57 = 1057  var b58 = 1058  var b59 = 1059  var b60 = 1060  var b61 = 1061  var b62 = 1062  var b63 = 1063
+    var b64 = 1064  var b65 = 1065  var b66 = 1066  var b67 = 1067  var b68 = 1068  var b69 = 1069  var b70 = 1070  var b71 = 1071
+    var b72 = 1072  var b73 = 1073  var b74 = 1074  var b75 = 1075  var b76 = 1076  var b77 = 1077  var b78 = 1078  var b79 = 1079
+    var b80 = 1080  var b81 = 1081  var b82 = 1082  var b83 = 1083  var b84 = 1084  var b85 = 1085  var b86 = 1086  var b87 = 1087
+    var b88 = 1088  var b89 = 1089  var b90 = 1090  var b91 = 1091  var b92 = 1092  var b93 = 1093  var b94 = 1094  var b95 = 1095
+    var b96 = 1096  var b97 = 1097  var b98 = 1098  var b99 = 1099  var b100 = 1100  var b101 = 1101  var b102 = 1102  var b103 = 1103
+    var b104 = 1104  var b105 = 1105  var b106 = 1106  var b107 = 1107  var b108 = 1108  var b109 = 1109  var b110 = 1110  var b111 = 1111
+    var b112 = 1112  var b113 = 1113  var b114 = 1114  var b115 = 1115  var b116 = 1116  var b117 = 1117  var b118 = 1118  var b119 = 1119
+    var b120 = 1120  var b121 = 1121  var b122 = 1122  var b123 = 1123  var b124 = 1124  var b125 = 1125  var b126 = 1126  var b127 = 1127
+    var b128 = 1128  var b129 = 1129  var b130 = 1130  var b131 = 1131  var b132 = 1132  var b133 = 1133  var b134 = 1134  var b135 = 1135
+    var b136 = 1136  var b137 = 1137  var b138 = 1138  var b139 = 1139  var b140 = 1140  var b141 = 1141  var b142 = 1142  var b143 = 1143
+    var b144 = 1144  var b145 = 1145  var b146 = 1146  var b147 = 1147  var b148 = 1148  var b149 = 1149  var b150 = 1150  var b151 = 1151
+    var b152 = 1152  var b153 = 1153  var b154 = 1154  var b155 = 1155  var b156 = 1156  var b157 = 1157  var b158 = 1158  var b159 = 1159
+    var b160 = 1160  var b161 = 1161  var b162 = 1162  var b163 = 1163  var b164 = 1164  var b165 = 1165  var b166 = 1166  var b167 = 1167
+    var b168 = 1168  var b169 = 1169  var b170 = 1170  var b171 = 1171  var b172 = 1172  var b173 = 1173  var b174 = 1174  var b175 = 1175
+    var b176 = 1176  var b177 = 1177  var b178 = 1178  var b179 = 1179  var b180 = 1180  var b181 = 1181  var b182 = 1182  var b183 = 1183
+    var b184 = 1184  var b185 = 1185  var b186 = 1186  var b187 = 1187  var b188 = 1188  var b189 = 1189  var b190 = 1190  var b191 = 1191
+    var b192 = 1192  var b193 = 1193  var b194 = 1194  var b195 = 1195  var b196 = 1196  var b197 = 1197  var b198 = 1198  var b199 = 1199
+    var b200 = 1200  var b201 = 1201  var b202 = 1202  var b203 = 1203  var b204 = 1204  var b205 = 1205  var b206 = 1206  var b207 = 1207
+    var b208 = 1208  var b209 = 1209  var b210 = 1210  var b211 = 1211  var b212 = 1212  var b213 = 1213  var b214 = 1214  var b215 = 1215
+    var b216 = 1216  var b217 = 1217  var b218 = 1218  var b219 = 1219  var b220 = 1220  var b221 = 1221  var b222 = 1222  var b223 = 1223
+    var b224 = 1224  var b225 = 1225  var b226 = 1226  var b227 = 1227  var b228 = 1228  var b229 = 1229  var b230 = 1230  var b231 = 1231
+    var b232 = 1232  var b233 = 1233  var b234 = 1234  var b235 = 1235  var b236 = 1236  var b237 = 1237  var b238 = 1238  var b239 = 1239
+    var b240 = 1240  var b241 = 1241  var b242 = 1242  var b243 = 1243  var b244 = 1244  var b245 = 1245  var b246 = 1246  var b247 = 1247
+    var b248 = 1248  var b249 = 1249  var b250 = 1250  var b251 = 1251  var b252 = 1252  var b253 = 1253  var b254 = 1254  var b255 = 1255
+    var b256 = 1256  var b257 = 1257  var b258 = 1258  var b259 = 1259
+    var v = c3_inner()
+    var junk = clobber(4000)
+    var total = 0
+    total = total + b252
+    total = total + b253
+    total = total + b254
+    total = total + b255
+    total = total + b256
+    total = total + b257
+    total = total + b258
+    total = total + b259
+    total = total + v
+    return total
+}
+
+func case3() {
+    HELD = Cont.withPrompt(TAG, c3_outer)
+    return Cont.withPrompt(TAG, resumeHeld)
+}
+
+// ---------------------------------------------------------------------------
+// [4] GC reachability. gc.c marks vm->spill_stack[0, spill_top) -- but a
+// suspended continuation's slots sit above spill_top, and its snapshot (once
+// there is one) is not the VM's array at all. Spilled locals holding heap
+// objects therefore have no root while the continuation waits, so a collection
+// frees them and the resumed body reads through dangling pointers.
+//
+// The strings are built at run time by concatenation so they are genuine heap
+// objects rather than chunk constants, which the constant table would keep
+// alive regardless and hide the defect. Only the spilled slots need to hold
+// one; everything below the cap is an ordinary number.
+// ---------------------------------------------------------------------------
+func mk(s) { return "obj-" + s }
+
+func c4_victim() {
+    var a0 = 0  var a1 = 1  var a2 = 2  var a3 = 3  var a4 = 4  var a5 = 5  var a6 = 6  var a7 = 7
+    var a8 = 8  var a9 = 9  var a10 = 10  var a11 = 11  var a12 = 12  var a13 = 13  var a14 = 14  var a15 = 15
+    var a16 = 16  var a17 = 17  var a18 = 18  var a19 = 19  var a20 = 20  var a21 = 21  var a22 = 22  var a23 = 23
+    var a24 = 24  var a25 = 25  var a26 = 26  var a27 = 27  var a28 = 28  var a29 = 29  var a30 = 30  var a31 = 31
+    var a32 = 32  var a33 = 33  var a34 = 34  var a35 = 35  var a36 = 36  var a37 = 37  var a38 = 38  var a39 = 39
+    var a40 = 40  var a41 = 41  var a42 = 42  var a43 = 43  var a44 = 44  var a45 = 45  var a46 = 46  var a47 = 47
+    var a48 = 48  var a49 = 49  var a50 = 50  var a51 = 51  var a52 = 52  var a53 = 53  var a54 = 54  var a55 = 55
+    var a56 = 56  var a57 = 57  var a58 = 58  var a59 = 59  var a60 = 60  var a61 = 61  var a62 = 62  var a63 = 63
+    var a64 = 64  var a65 = 65  var a66 = 66  var a67 = 67  var a68 = 68  var a69 = 69  var a70 = 70  var a71 = 71
+    var a72 = 72  var a73 = 73  var a74 = 74  var a75 = 75  var a76 = 76  var a77 = 77  var a78 = 78  var a79 = 79
+    var a80 = 80  var a81 = 81  var a82 = 82  var a83 = 83  var a84 = 84  var a85 = 85  var a86 = 86  var a87 = 87
+    var a88 = 88  var a89 = 89  var a90 = 90  var a91 = 91  var a92 = 92  var a93 = 93  var a94 = 94  var a95 = 95
+    var a96 = 96  var a97 = 97  var a98 = 98  var a99 = 99  var a100 = 100  var a101 = 101  var a102 = 102  var a103 = 103
+    var a104 = 104  var a105 = 105  var a106 = 106  var a107 = 107  var a108 = 108  var a109 = 109  var a110 = 110  var a111 = 111
+    var a112 = 112  var a113 = 113  var a114 = 114  var a115 = 115  var a116 = 116  var a117 = 117  var a118 = 118  var a119 = 119
+    var a120 = 120  var a121 = 121  var a122 = 122  var a123 = 123  var a124 = 124  var a125 = 125  var a126 = 126  var a127 = 127
+    var a128 = 128  var a129 = 129  var a130 = 130  var a131 = 131  var a132 = 132  var a133 = 133  var a134 = 134  var a135 = 135
+    var a136 = 136  var a137 = 137  var a138 = 138  var a139 = 139  var a140 = 140  var a141 = 141  var a142 = 142  var a143 = 143
+    var a144 = 144  var a145 = 145  var a146 = 146  var a147 = 147  var a148 = 148  var a149 = 149  var a150 = 150  var a151 = 151
+    var a152 = 152  var a153 = 153  var a154 = 154  var a155 = 155  var a156 = 156  var a157 = 157  var a158 = 158  var a159 = 159
+    var a160 = 160  var a161 = 161  var a162 = 162  var a163 = 163  var a164 = 164  var a165 = 165  var a166 = 166  var a167 = 167
+    var a168 = 168  var a169 = 169  var a170 = 170  var a171 = 171  var a172 = 172  var a173 = 173  var a174 = 174  var a175 = 175
+    var a176 = 176  var a177 = 177  var a178 = 178  var a179 = 179  var a180 = 180  var a181 = 181  var a182 = 182  var a183 = 183
+    var a184 = 184  var a185 = 185  var a186 = 186  var a187 = 187  var a188 = 188  var a189 = 189  var a190 = 190  var a191 = 191
+    var a192 = 192  var a193 = 193  var a194 = 194  var a195 = 195  var a196 = 196  var a197 = 197  var a198 = 198  var a199 = 199
+    var a200 = 200  var a201 = 201  var a202 = 202  var a203 = 203  var a204 = 204  var a205 = 205  var a206 = 206  var a207 = 207
+    var a208 = 208  var a209 = 209  var a210 = 210  var a211 = 211  var a212 = 212  var a213 = 213  var a214 = 214  var a215 = 215
+    var a216 = 216  var a217 = 217  var a218 = 218  var a219 = 219  var a220 = 220  var a221 = 221  var a222 = 222  var a223 = 223
+    var a224 = 224  var a225 = 225  var a226 = 226  var a227 = 227  var a228 = 228  var a229 = 229  var a230 = 230  var a231 = 231
+    var a232 = 232  var a233 = 233  var a234 = 234  var a235 = 235  var a236 = 236  var a237 = 237  var a238 = 238  var a239 = 239
+    var a240 = 240  var a241 = 241  var a242 = 242  var a243 = 243  var a244 = 244  var a245 = 245  var a246 = 246  var a247 = 247
+    var a248 = 248  var a249 = 249  var a250 = 250  var a251 = 251  var a252 = mk("252")  var a253 = mk("253")  var a254 = mk("254")  var a255 = mk("255")
+    var a256 = mk("256")  var a257 = mk("257")  var a258 = mk("258")  var a259 = mk("259")
+    var r = Cont.capture(TAG)
+    var junk = clobber(6000)
+    var joined = a252
+    joined = joined + "|"
+    joined = joined + a255
+    joined = joined + "|"
+    joined = joined + a259
+    return joined
+}
+
+func case4() {
+    HELD = Cont.withPrompt(TAG, c4_victim)
+    GC.cycle()
+    GC.cycle()
+    return Cont.withPrompt(TAG, resumeHeld)
+}
+
+// ---------------------------------------------------------------------------
+// [5] Cont.shift reaches captureContinuation by its own path and then pushes
+// the handler frame itself, so it gets its own case. The handler parks the
+// continuation and returns; resuming it later must still find 2044.
+// ---------------------------------------------------------------------------
+func c5_handler(k) {
+    HELD = k
+    return 0
+}
+
+func c5_victim() {
+    var a0 = 0  var a1 = 1  var a2 = 2  var a3 = 3  var a4 = 4  var a5 = 5  var a6 = 6  var a7 = 7
+    var a8 = 8  var a9 = 9  var a10 = 10  var a11 = 11  var a12 = 12  var a13 = 13  var a14 = 14  var a15 = 15
+    var a16 = 16  var a17 = 17  var a18 = 18  var a19 = 19  var a20 = 20  var a21 = 21  var a22 = 22  var a23 = 23
+    var a24 = 24  var a25 = 25  var a26 = 26  var a27 = 27  var a28 = 28  var a29 = 29  var a30 = 30  var a31 = 31
+    var a32 = 32  var a33 = 33  var a34 = 34  var a35 = 35  var a36 = 36  var a37 = 37  var a38 = 38  var a39 = 39
+    var a40 = 40  var a41 = 41  var a42 = 42  var a43 = 43  var a44 = 44  var a45 = 45  var a46 = 46  var a47 = 47
+    var a48 = 48  var a49 = 49  var a50 = 50  var a51 = 51  var a52 = 52  var a53 = 53  var a54 = 54  var a55 = 55
+    var a56 = 56  var a57 = 57  var a58 = 58  var a59 = 59  var a60 = 60  var a61 = 61  var a62 = 62  var a63 = 63
+    var a64 = 64  var a65 = 65  var a66 = 66  var a67 = 67  var a68 = 68  var a69 = 69  var a70 = 70  var a71 = 71
+    var a72 = 72  var a73 = 73  var a74 = 74  var a75 = 75  var a76 = 76  var a77 = 77  var a78 = 78  var a79 = 79
+    var a80 = 80  var a81 = 81  var a82 = 82  var a83 = 83  var a84 = 84  var a85 = 85  var a86 = 86  var a87 = 87
+    var a88 = 88  var a89 = 89  var a90 = 90  var a91 = 91  var a92 = 92  var a93 = 93  var a94 = 94  var a95 = 95
+    var a96 = 96  var a97 = 97  var a98 = 98  var a99 = 99  var a100 = 100  var a101 = 101  var a102 = 102  var a103 = 103
+    var a104 = 104  var a105 = 105  var a106 = 106  var a107 = 107  var a108 = 108  var a109 = 109  var a110 = 110  var a111 = 111
+    var a112 = 112  var a113 = 113  var a114 = 114  var a115 = 115  var a116 = 116  var a117 = 117  var a118 = 118  var a119 = 119
+    var a120 = 120  var a121 = 121  var a122 = 122  var a123 = 123  var a124 = 124  var a125 = 125  var a126 = 126  var a127 = 127
+    var a128 = 128  var a129 = 129  var a130 = 130  var a131 = 131  var a132 = 132  var a133 = 133  var a134 = 134  var a135 = 135
+    var a136 = 136  var a137 = 137  var a138 = 138  var a139 = 139  var a140 = 140  var a141 = 141  var a142 = 142  var a143 = 143
+    var a144 = 144  var a145 = 145  var a146 = 146  var a147 = 147  var a148 = 148  var a149 = 149  var a150 = 150  var a151 = 151
+    var a152 = 152  var a153 = 153  var a154 = 154  var a155 = 155  var a156 = 156  var a157 = 157  var a158 = 158  var a159 = 159
+    var a160 = 160  var a161 = 161  var a162 = 162  var a163 = 163  var a164 = 164  var a165 = 165  var a166 = 166  var a167 = 167
+    var a168 = 168  var a169 = 169  var a170 = 170  var a171 = 171  var a172 = 172  var a173 = 173  var a174 = 174  var a175 = 175
+    var a176 = 176  var a177 = 177  var a178 = 178  var a179 = 179  var a180 = 180  var a181 = 181  var a182 = 182  var a183 = 183
+    var a184 = 184  var a185 = 185  var a186 = 186  var a187 = 187  var a188 = 188  var a189 = 189  var a190 = 190  var a191 = 191
+    var a192 = 192  var a193 = 193  var a194 = 194  var a195 = 195  var a196 = 196  var a197 = 197  var a198 = 198  var a199 = 199
+    var a200 = 200  var a201 = 201  var a202 = 202  var a203 = 203  var a204 = 204  var a205 = 205  var a206 = 206  var a207 = 207
+    var a208 = 208  var a209 = 209  var a210 = 210  var a211 = 211  var a212 = 212  var a213 = 213  var a214 = 214  var a215 = 215
+    var a216 = 216  var a217 = 217  var a218 = 218  var a219 = 219  var a220 = 220  var a221 = 221  var a222 = 222  var a223 = 223
+    var a224 = 224  var a225 = 225  var a226 = 226  var a227 = 227  var a228 = 228  var a229 = 229  var a230 = 230  var a231 = 231
+    var a232 = 232  var a233 = 233  var a234 = 234  var a235 = 235  var a236 = 236  var a237 = 237  var a238 = 238  var a239 = 239
+    var a240 = 240  var a241 = 241  var a242 = 242  var a243 = 243  var a244 = 244  var a245 = 245  var a246 = 246  var a247 = 247
+    var a248 = 248  var a249 = 249  var a250 = 250  var a251 = 251  var a252 = 252  var a253 = 253  var a254 = 254  var a255 = 255
+    var a256 = 256  var a257 = 257  var a258 = 258  var a259 = 259
+    var r = Cont.shift(TAG2, c5_handler)
+    var junk = clobber(8000)
+    var total = 0
+    total = total + a252
+    total = total + a253
+    total = total + a254
+    total = total + a255
+    total = total + a256
+    total = total + a257
+    total = total + a258
+    total = total + a259
+    return total
+}
+
+func case5() {
+    var suspended = Cont.withPrompt(TAG2, c5_victim)
+    var junk = clobber(2000)
+    return Cont.withPrompt(TAG2, resumeHeld)
+}
+
+// ---------------------------------------------------------------------------
+// Driver
+// ---------------------------------------------------------------------------
+var r1 = case1()
+print("[1] callee after resume       = %v  (expect 2044)", r1)
+assert(r1 == 2044, "[1] spilled locals of a resumed frame were overwritten by its callee")
+
+var r2 = case2()
+print("[2] clobbered while suspended = %v  (expect 2044)", r2)
+assert(r2 == 2044, "[2] spilled locals were not snapshotted -- overwritten while suspended")
+
+var r3 = case3()
+print("[3] two captured frames       = %v  (expect 12088)", r3)
+assert(r3 == 12088, "[3] nested captured frames did not each get their own spill base back")
+
+var r4 = case4()
+print("[4] heap objects in spills    = %v  (expect obj-252|obj-255|obj-259)", r4)
+assert(r4 == "obj-252|obj-255|obj-259", "[4] a collection while suspended did not treat the captured spills as roots")
+
+var r5 = case5()
+print("[5] Cont.shift round trip     = %v  (expect 2044)", r5)
+assert(r5 == 2044, "[5] spilled locals lost across a Cont.shift capture and resume")
+
+print("C3 OK")

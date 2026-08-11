@@ -1,0 +1,169 @@
+// C3 (forced-spill half) -- a captured continuation does not carry the parallel
+// spill stack. Companion to c3_continuation_spill_snapshot.zym, which proves
+// the same defect with no env var at all; this file is the cheap version:
+//
+//   ZYM_FORCE_SPILL_AT=8 zym c3_continuation_spill_snapshot_forced.zym
+//   ZYM_FORCE_SPILL_AT=6 zym c3_continuation_spill_snapshot_forced.zym
+//
+// 8 and 6 are the useful settings. At 4 this file no longer compiles -- see the
+// note on the top-level surface below -- so do not add it to that list.
+//
+// Under the default 252-local window nothing here spills and every case passes
+// vacuously, which is exactly why the companion file exists.
+//
+// Spilled locals no longer live in the frame's own register window; they live
+// on vm->spill_stack, each frame recording its base in CallFrame.spill_base and
+// the VM tracking the high-water mark in spill_top. ObjContinuation predates
+// that move: capture memcpys the CallFrame array (so spill_base rides along as
+// a meaningless raw integer) and the value stack, but never the spill VALUES,
+// and resume restores neither the values nor spill_base/spill_top.
+//
+// Two shapes below are load-bearing under a lowered cap, and match what
+// tests/core/continuations_spill.zym already does:
+//
+//   - sums accumulate one term at a time. A twelve-term '+' chain of spilled
+//     reads needs more scratch than SPILL_SCRATCH_COUNT leaves and the file
+//     will not compile.
+//   - the top-level surface is kept tiny. Top-level `var`s AND top-level
+//     `func` declarations are both locals of the implicit <script> function and
+//     compete for the same budget; a couple more of either and this file stops
+//     compiling under ZYM_FORCE_SPILL_AT=4 no matter how small the bodies are.
+//     That is also why continuations are parked in the global HELD rather than
+//     in a local closed over by the resuming closure, and why each case prints
+//     its own result instead of the driver binding one.
+
+var TAG  = Cont.newPrompt("c3f")
+var HELD = null
+
+func resumeHeld() { return Cont.resume(HELD, 0) }
+
+// Occupies spill slots and nothing else. Under a lowered cap its locals past
+// the cap land on vm->spill_stack at whatever base frame push hands it -- which
+// is the point: if a resumed frame's spill_base was never rebased, that base is
+// the resumed frame's own.
+func clobber(n) {
+    var c0 = n + 0  var c1 = n + 1  var c2 = n + 2  var c3 = n + 3
+    var c4 = n + 4  var c5 = n + 5  var c6 = n + 6  var c7 = n + 7
+    var c8 = n + 8  var c9 = n + 9  var c10 = n + 10  var c11 = n + 11
+    var total = 0
+    total = total + c0
+    total = total + c1
+    total = total + c2
+    total = total + c3
+    total = total + c4
+    total = total + c5
+    total = total + c6
+    total = total + c7
+    total = total + c8
+    total = total + c9
+    total = total + c10
+    total = total + c11
+    return total
+}
+
+// [A] Capture, resume, and let the resumed body call something. 1..12 = 78.
+func victimA() {
+    var a0 = 1  var a1 = 2  var a2 = 3  var a3 = 4
+    var a4 = 5  var a5 = 6  var a6 = 7  var a7 = 8
+    var a8 = 9  var a9 = 10  var a10 = 11  var a11 = 12
+    var r = Cont.capture(TAG)
+    var junk = clobber(5000)
+    var total = 0
+    total = total + a0
+    total = total + a1
+    total = total + a2
+    total = total + a3
+    total = total + a4
+    total = total + a5
+    total = total + a6
+    total = total + a7
+    total = total + a8
+    total = total + a9
+    total = total + a10
+    total = total + a11
+    return total
+}
+
+// [B] Nothing runs inside the resumed body; the damage happens while it is
+// suspended. After the capture vm->spill_top has dropped back below the
+// captured frame's slots, so the next spilling call simply reuses them. This is
+// the half a rebase alone would not fix -- the values must be copied out at
+// capture time.
+func victimB() {
+    var a0 = 1  var a1 = 2  var a2 = 3  var a3 = 4
+    var a4 = 5  var a5 = 6  var a6 = 7  var a7 = 8
+    var a8 = 9  var a9 = 10  var a10 = 11  var a11 = 12
+    var r = Cont.capture(TAG)
+    var total = 0
+    total = total + a0
+    total = total + a1
+    total = total + a2
+    total = total + a3
+    total = total + a4
+    total = total + a5
+    total = total + a6
+    total = total + a7
+    total = total + a8
+    total = total + a9
+    total = total + a10
+    total = total + a11
+    return total
+}
+
+// [C] Cont.shift reaches captureContinuation by its own path and pushes the
+// handler frame itself. The handler parks the continuation; resuming it later
+// must still find 78.
+func handlerC(k) {
+    HELD = k
+    return 0
+}
+
+func victimC() {
+    var a0 = 1  var a1 = 2  var a2 = 3  var a3 = 4
+    var a4 = 5  var a5 = 6  var a6 = 7  var a7 = 8
+    var a8 = 9  var a9 = 10  var a10 = 11  var a11 = 12
+    var r = Cont.shift(TAG, handlerC)
+    var junk = clobber(8000)
+    var total = 0
+    total = total + a0
+    total = total + a1
+    total = total + a2
+    total = total + a3
+    total = total + a4
+    total = total + a5
+    total = total + a6
+    total = total + a7
+    total = total + a8
+    total = total + a9
+    total = total + a10
+    total = total + a11
+    return total
+}
+
+func caseA() {
+    HELD = Cont.withPrompt(TAG, victimA)
+    var got = Cont.withPrompt(TAG, resumeHeld)
+    print("[A] callee after resume    = %v  (expect 78)", got)
+    return got
+}
+
+func caseB() {
+    HELD = Cont.withPrompt(TAG, victimB)
+    var junk = clobber(9000)
+    var got = Cont.withPrompt(TAG, resumeHeld)
+    print("[B] clobbered while suspended = %v  (expect 78)", got)
+    return got
+}
+
+func caseC() {
+    var suspended = Cont.withPrompt(TAG, victimC)
+    var junk = clobber(2000)
+    var got = Cont.withPrompt(TAG, resumeHeld)
+    print("[C] Cont.shift round trip  = %v  (expect 78)", got)
+    return got
+}
+
+assert(caseA() == 78, "[A] spilled locals of a resumed frame were overwritten by its callee")
+assert(caseB() == 78, "[B] spilled locals were not snapshotted -- overwritten while suspended")
+assert(caseC() == 78, "[C] spilled locals lost across a Cont.shift capture and resume")
+print("C3-forced OK")

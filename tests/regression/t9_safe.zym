@@ -1,0 +1,10 @@
+@tco safe
+var hits = 0
+func cb() { hits = hits + 1; return clock() }
+var id = Preempt.every(2000, cb)
+var acc = 0
+for (var i = 0; i < 400000; i = i + 1) { acc = acc + 1 }
+print("T9 @tco safe   : hits=%v", hits)
+func sb() { return clock() }
+Preempt.shield(sb)
+print("T9 @tco safe   : shieldDepth after shield=%v", Preempt.shieldDepth())

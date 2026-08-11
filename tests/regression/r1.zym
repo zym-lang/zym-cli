@@ -1,0 +1,73 @@
+// C3-spill probe: do a captured function's SPILLED locals survive a resume?
+//
+// spillBody() holds 12 locals. Under ZYM_FORCE_SPILL_AT=N (N<12) the ones past
+// the cap live on vm->spill_stack. It captures a continuation in the middle,
+// the top level then runs clobber() (which itself spills, so it reserves the
+// very slots the capture's frame had rolled back), and only then resumes.
+// If spills are part of the continuation, the sum after resume is 1..12 = 78.
+
+var TAG = Cont.newPrompt("t")
+var SAVED = null
+
+func clobber() {
+    var p = 900
+    var q = 901
+    var r = 902
+    var s = 903
+    var t = 904
+    var u = 905
+    var v = 906
+    var w = 907
+    var x = 908
+    var y = 909
+    var z = 910
+    var zz = 911
+    var acc = p + q
+    acc = acc + r
+    acc = acc + s
+    acc = acc + t
+    acc = acc + u
+    acc = acc + v
+    acc = acc + w
+    acc = acc + x
+    acc = acc + y
+    acc = acc + z
+    acc = acc + zz
+    return acc
+}
+
+func spillBody() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var h = 8
+    var i = 9
+    var j = 10
+    var k = 11
+    var l = 12
+    Cont.capture(TAG)
+    var total = a + b
+    total = total + c
+    total = total + d
+    total = total + e
+    total = total + f
+    total = total + g
+    total = total + h
+    total = total + i
+    total = total + j
+    total = total + k
+    total = total + l
+    return total
+}
+
+Cont.pushPrompt(TAG)
+SAVED = spillBody()
+print("captured=%v", Cont.isContinuation(SAVED))
+print("clobber=%v", clobber())
+Cont.pushPrompt(TAG)
+print("resumed=%v", Cont.resume(SAVED, null))
+print("expected  = 78")

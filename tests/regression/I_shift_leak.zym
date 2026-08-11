@@ -1,0 +1,17 @@
+var T = Cont.newPrompt("T")
+var I = Cont.newPrompt("I")
+
+func innerShift() {
+    Cont.shift(T, func (k) { return 5 })
+    return 0
+}
+func outerShift() { return Cont.withPrompt(I, innerShift) }
+
+print("--- shift path ---")
+var r = Cont.withPrompt(T, outerShift)
+print("shift returned:")
+print(r)
+Cont.popPrompt()
+print("shift: LEAK pop#1 ok")
+Cont.popPrompt()
+print("shift: LEAK pop#2 ok")

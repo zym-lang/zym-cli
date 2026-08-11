@@ -1,0 +1,128 @@
+// C4(a) REGRESSION: a tagged control transfer (capture / abort / shift) that
+// matches an OUTER prompt THROUGH an inner prompt must pop EVERY prompt entry
+// at or above the matched one. Popping exactly once removes the INNER entry
+// and leaves the matched OUTER entry behind as a ghost: a stale bookmark that
+// is still accepted outside its real dynamic extent, and that permanently
+// occupies one of the MAX_PROMPTS (64) slots.
+//
+// Two independent observables, both asserted below:
+//   A1..A3  slot leak      - one prompt slot lost per nested transfer, so a
+//                            loop longer than MAX_PROMPTS dies with
+//                            "Prompt stack overflow (max 64 nested prompts)."
+//   A4      stale acceptance - a ghost entry sitting ABOVE a genuinely live
+//                            entry for the same tag wins findPrompt(), so the
+//                            transfer lands on a dead frame index instead of
+//                            the live prompt.
+
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+// More than MAX_PROMPTS (64) so a one-slot-per-iteration leak is fatal.
+var ITERS = 200
+
+// ---------------------------------------------------------------- A1: capture
+func capInner() {
+    Cont.capture(OUTER)
+    return 0
+}
+func capOuter() {
+    return Cont.withPrompt(INNER, capInner)
+}
+
+var i = 0
+var seen = 0
+var k = null
+while (i < ITERS) {
+    k = Cont.withPrompt(OUTER, capOuter)
+    if (Cont.isContinuation(k)) {
+        seen = seen + 1
+    }
+    i = i + 1
+}
+assert(seen == ITERS, "A1: every nested Cont.capture must yield a continuation")
+print("A1 capture through inner prompt: ok")
+
+// ------------------------------------------------------------------ A2: abort
+func abInner() {
+    Cont.abort(OUTER, "AV")
+    return 0
+}
+func abOuter() {
+    return Cont.withPrompt(INNER, abInner)
+}
+
+i = 0
+seen = 0
+var v = null
+while (i < ITERS) {
+    v = Cont.withPrompt(OUTER, abOuter)
+    if (v == "AV") {
+        seen = seen + 1
+    }
+    i = i + 1
+}
+assert(seen == ITERS, "A2: every nested Cont.abort must deliver its value")
+print("A2 abort through inner prompt: ok")
+
+// ------------------------------------------------------------------ A3: shift
+func shHandler(cont) {
+    return "SV"
+}
+func shInner() {
+    Cont.shift(OUTER, shHandler)
+    return 0
+}
+func shOuter() {
+    return Cont.withPrompt(INNER, shInner)
+}
+
+i = 0
+seen = 0
+while (i < ITERS) {
+    v = Cont.withPrompt(OUTER, shOuter)
+    if (v == "SV") {
+        seen = seen + 1
+    }
+    i = i + 1
+}
+assert(seen == ITERS, "A3: every nested Cont.shift must run its handler")
+print("A3 shift through inner prompt: ok")
+
+// -------------------------------------------- A4: ghost shadows a LIVE prompt
+// makeGhost() captures T through INNER. The matched T entry is the one it
+// pushed itself, so after the transfer that entry must be gone. If it survives
+// it sits ABOVE the still-live T entry pushed by the outermost withPrompt, and
+// findPrompt -- which scans from the top -- hands the later abort a bookmark
+// whose frames no longer exist.
+var T = Cont.newPrompt("T")
+
+func ghostInner() {
+    Cont.capture(T)
+    return 0
+}
+func ghostMid() {
+    return Cont.withPrompt(INNER, ghostInner)
+}
+func makeGhost() {
+    var c = Cont.withPrompt(T, ghostMid)
+    assert(Cont.isContinuation(c), "A4: inner capture(T) must yield a continuation")
+    return 0
+}
+
+var reachedUnreachable = 0
+func liveBody() {
+    makeGhost()
+    Cont.abort(T, "V")
+    reachedUnreachable = reachedUnreachable + 1
+    return "not-reached"
+}
+
+var tailRuns = 0
+var r = Cont.withPrompt(T, liveBody)
+tailRuns = tailRuns + 1
+assert(tailRuns == 1, "A4: a stale prompt entry re-entered the tail of the script")
+assert(reachedUnreachable == 0, "A4: abort(T) must not fall through")
+assert(r == "V", "A4: abort(T) must unwind to the LIVE T prompt and return its value")
+print("A4 ghost does not shadow a live prompt: ok")
+
+print("C4a PASS")

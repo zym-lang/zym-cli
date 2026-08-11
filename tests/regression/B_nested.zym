@@ -1,0 +1,28 @@
+// NESTED: outer withPrompt(OUTER) -> inner withPrompt(INNER) -> abort(OUTER).
+// No manual pushPrompt anywhere: the script cannot itself leak a prompt.
+// Expect (if the VM is correct): prompt_count back to 0 -> first pop ERRORS.
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+func inner() {
+    print("inner: aborting to OUTER from inside INNER")
+    Cont.abort(OUTER, "AV")
+    print("inner: NOT REACHED")
+    return 0
+}
+
+func outer() {
+    var x = Cont.withPrompt(INNER, inner)
+    print("outer: NOT REACHED")
+    return x
+}
+
+var r = Cont.withPrompt(OUTER, outer)
+print("withPrompt returned:")
+print(r)
+
+print("now probing leftover prompt entries...")
+Cont.popPrompt()
+print("LEAK: pop #1 succeeded (prompt_count was >= 1)")
+Cont.popPrompt()
+print("LEAK: pop #2 succeeded (prompt_count was >= 2)")

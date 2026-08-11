@@ -1,0 +1,21 @@
+@tco aggressive
+func bodyNativeTail() { return clock() }
+func bodySafe() { var t = clock(); return t }
+func bodyScriptTail() { return bodySafe() }
+
+print("depth start        = %v", Preempt.shieldDepth())
+Preempt.shield(bodySafe)
+print("after safe body    = %v", Preempt.shieldDepth())
+Preempt.shield(bodyScriptTail)
+print("after script-tail  = %v", Preempt.shieldDepth())
+Preempt.shield(bodyNativeTail)
+print("after native-tail  = %v", Preempt.shieldDepth())
+Preempt.shield(bodyNativeTail)
+print("after 2nd nat-tail = %v", Preempt.shieldDepth())
+
+var hits = 0
+func cb() { hits = hits + 1 }
+var id = Preempt.every(2000, cb)
+var acc = 0
+for (var i = 0; i < 400000; i = i + 1) { acc = acc + 1 }
+print("masked work: hits=%v remaining=%v shieldDepth=%v acc=%v", hits, Preempt.remaining(id), Preempt.shieldDepth(), acc)

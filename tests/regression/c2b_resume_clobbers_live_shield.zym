@@ -1,0 +1,76 @@
+// C2b: resuming a continuation must not destroy the resumer's live shield.
+//
+// captureContinuation saves a shield depth measured against the CAPTURER's
+// stack. resumeContinuation installed it with `=`, so a resume performed from
+// inside a live Preempt.shield(fn) overwrote that shield's depth with the
+// capturer's. The shield frame is still on the stack and will still decrement
+// on the way out, but the counter it depends on has been replaced, so maskable
+// entries fire inside a section that is supposed to be masked.
+//
+// Correct behaviour: the resumer keeps its own shields; the restored frames add
+// back only what the captured extent itself contributed.
+//
+// Fails before the fix (fired > 0 inside the shield), passes after.
+
+var pt = Cont.newPrompt("c2b")
+
+// ---------------------------------------------------------------------------
+// Control: a shield on a pristine VM masks a maskable entry.
+// Establishes that the harness can observe masking at all, so a later
+// "fired == 0" is meaningful rather than vacuous.
+// ---------------------------------------------------------------------------
+var ctrlFired = 0
+var ctrlId = Preempt.every(2000, func() { ctrlFired = ctrlFired + 1 })
+
+var ctrlInside = Preempt.shield(func() {
+    var acc = 0
+    for (var i = 0; i < 200000; i = i + 1) { acc = acc + i }
+    return ctrlFired
+})
+print("control: fired-inside-shield %n (expect 0)", ctrlInside)
+assert(ctrlInside == 0, "control: shield did not mask on a pristine VM -- harness is not measuring masking")
+Preempt.cancel(ctrlId)
+
+// ---------------------------------------------------------------------------
+// Capture a continuation with NO shield active, so the saved depth is 0.
+// ---------------------------------------------------------------------------
+var k = Cont.withPrompt(pt, func() {
+    return Cont.capture(pt)          // returns the continuation to the prompt
+})
+assert(Cont.isContinuation(k), "setup: capture did not yield a continuation")
+print("captured with shieldDepth %n (expect 0)", Preempt.shieldDepth())
+
+// ---------------------------------------------------------------------------
+// Subject: resume that continuation from INSIDE a live shield.
+// The resumer's depth is 1; the continuation's saved depth is 0. Installing
+// verbatim drops the live shield to 0 and unmasks the section.
+// ---------------------------------------------------------------------------
+var fired = 0
+var id = Preempt.every(2000, func() { fired = fired + 1 })
+
+var depthInside = -1
+var firedInside = Preempt.shield(func() {
+    Cont.resume(k, "go")                 // <-- clobbers the shield depth pre-fix
+    depthInside = Preempt.shieldDepth()
+    var acc = 0
+    for (var i = 0; i < 200000; i = i + 1) { acc = acc + i }
+    return fired
+})
+
+print("after-resume-inside-shield: depth %n (expect 1), fired %n (expect 0)",
+      depthInside, firedInside)
+
+assert(depthInside == 1,
+       "resume destroyed the resumer's live shield: depth inside the shield is not 1")
+assert(firedInside == 0,
+       "maskable entry fired inside a shield that resume had silently unmasked")
+
+Preempt.cancel(id)
+
+// ---------------------------------------------------------------------------
+// The shield must still unwind to 0, i.e. the fix must not leak depth either.
+// ---------------------------------------------------------------------------
+print("final depth %n (expect 0)", Preempt.shieldDepth())
+assert(Preempt.shieldDepth() == 0, "shield depth leaked after the shield returned")
+
+print("c2b ok")

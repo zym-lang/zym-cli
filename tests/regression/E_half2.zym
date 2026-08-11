@@ -1,0 +1,32 @@
+// HALF 2: an inner prompt that is inside the captured extent is not restored
+// on resume, even though the FRAMES of that extent are.
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+func innerBody() {
+    print("innerBody: INNER is live here (about to capture OUTER)")
+    var v = Cont.capture(OUTER)
+    // Execution below only happens after resume. If the frames are restored,
+    // we are back inside innerBody, i.e. dynamically inside withPrompt(INNER).
+    print("innerBody: RESUMED (so the frame WAS restored); v =")
+    print(v)
+    print("innerBody: now capturing INNER, which was live at capture time")
+    Cont.capture(INNER)
+    print("innerBody: INNER capture succeeded")
+    return 7
+}
+
+func outerBody() {
+    var x = Cont.withPrompt(INNER, innerBody)
+    print("outerBody: inner returned")
+    print(x)
+    return x
+}
+
+var k = Cont.withPrompt(OUTER, outerBody)
+print("is continuation?")
+print(Cont.isContinuation(k))
+print("--- resuming ---")
+var r = Cont.resume(k, 42)
+print("resume returned")
+print(r)

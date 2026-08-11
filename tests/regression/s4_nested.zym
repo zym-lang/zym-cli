@@ -1,0 +1,37 @@
+// Does the excluded-frame loop subtract once per PREEMPT frame?
+// Nest two preempt callbacks and capture from the inner one.
+var TAG = Cont.newPrompt("t")
+func spin(n) { var j = 0  while (j < n) { j = j + 1 }  return j }
+
+var idA = 0
+var idB = 0
+var didCapture = false
+
+func onB() {
+    if (didCapture) { return null }
+    didCapture = true
+    print("[B] depth inside nested callback = %v", Preempt.shieldDepth())
+    Cont.capture(TAG)
+}
+
+func onA() {
+    print("[A] entered outer callback")
+    idB = Preempt.every(150, onB)   // arm B from inside A's callback
+    spin(20000)                     // let B fire on top of A
+    print("[A] returning normally (B never fired?)")
+}
+
+idA = Preempt.every(3000, onA)
+
+var k = Cont.withPrompt(TAG, func() {
+    spin(200000)
+    return "body-finished"
+})
+
+Preempt.cancel(idA)
+Preempt.cancel(idB)
+
+print("captured? %v", Cont.isContinuation(k))
+var r = Cont.withPrompt(TAG, func() { return Cont.resume(k, null) })
+print("resume result = %v", r)
+print("depth after resume = %v", Preempt.shieldDepth())

@@ -1,0 +1,49 @@
+var TAG = Cont.newPrompt("t")
+var fires = 0
+var armed = true
+
+func cb() {
+    fires = fires + 1
+    if (armed) {
+        armed = false
+        Cont.capture(TAG)
+    }
+}
+
+var id = Preempt.every(200, cb)
+
+print("depth at start = %v", Preempt.shieldDepth())
+
+// sanity: shield works BEFORE the round trip
+fires = 0
+Preempt.shield(func() {
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+})
+print("shield #1: fired = %v (expect 0)", fires)
+
+// now the capture/resume round trip through a preempt callback
+var result = Cont.withPrompt(TAG, func() {
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+    return "body-finished"
+})
+print("captured? %v", Cont.isContinuation(result))
+print("depth after capture = %v", Preempt.shieldDepth())
+
+if (Cont.isContinuation(result)) {
+    var r = Cont.withPrompt(TAG, func() {
+        return Cont.resume(result, null)
+    })
+    print("resume result = %v", r)
+}
+print("depth after resume = %v", Preempt.shieldDepth())
+
+fires = 0
+Preempt.shield(func() {
+    print("shield #2: depth inside = %v (expect 1)", Preempt.shieldDepth())
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+})
+print("shield #2: fired = %v (expect 0)", fires)
+print("depth at end = %v", Preempt.shieldDepth())

@@ -1,0 +1,25 @@
+// Can the resumer re-establish INNER by hand? pushPrompt records the frame
+// index / stack top AT THE RESUME SITE, not the position inside the restored
+// frames, so the reinstated prompt delimits the wrong extent.
+var OUTER = Cont.newPrompt("outer")
+var INNER = Cont.newPrompt("inner")
+
+func g() {
+    var v = Cont.capture(OUTER)
+    print("g: resumed")
+    var v2 = Cont.capture(INNER)
+    print("g: NOT REACHED after inner capture")
+    return "g-ret"
+}
+func f() {
+    var r = Cont.withPrompt(INNER, g)
+    print("f: inner withPrompt yielded -- THIS is where capture(INNER) should land")
+    return r
+}
+
+var res = Cont.withPrompt(OUTER, f)
+print("--- resuming, with INNER manually re-pushed ---")
+Cont.pushPrompt(INNER)
+var out = Cont.resume(res, 42)
+print("control landed back at top level instead; out =")
+print(Cont.isContinuation(out))

@@ -1,0 +1,11 @@
+var OUTER = Cont.newPrompt("outer")
+var INNER = Cont.newPrompt("inner")
+func handler(k) { return "handled" }
+func g() { return Cont.shift(OUTER, handler) }
+func f() { return Cont.withPrompt(INNER, g) }
+var i = 0
+while (i < 100) {
+    var r = Cont.withPrompt(OUTER, f)
+    i = i + 1
+}
+print("shift: finished 100 nested shifts")

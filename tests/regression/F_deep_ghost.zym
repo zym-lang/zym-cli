@@ -1,0 +1,39 @@
+// SEVERITY: leak the ghost with a DEEP frame_index, then fire it from a
+// SHALLOW stack. prompt->frame_index is then > vm->frame_count, so
+// unwindFrames() is a no-op while `vm->stack_top = prompt->stack_base`
+// still runs with a stale, much-higher stack_base.
+var OUTER = Cont.newPrompt("OUTER")
+var INNER = Cont.newPrompt("INNER")
+
+func inner() {
+    Cont.abort(OUTER, "AV")
+    return 0
+}
+func outer() {
+    return Cont.withPrompt(INNER, inner)
+}
+
+func d5() { return Cont.withPrompt(OUTER, outer) }
+func d4() { var a = 40 var b = 41 var c = d5() return c + a - a + b - b }
+func d3() { var a = 30 var b = 31 var c = d4() return c + a - a + b - b }
+func d2() { var a = 20 var b = 21 var c = d3() return c + a - a + b - b }
+func d1() { var a = 10 var b = 11 var c = d2() return c + a - a + b - b }
+
+var r = d1()
+print("deep nest returned:")
+print(r)
+print("--- now firing the ghost from top level (shallow stack) ---")
+var g = Cont.abort(OUTER, "DEEPGHOST")
+print("ghost abort returned:")
+print(g)
+print("still alive; allocating and computing to see if the stack is sane")
+var acc = 0
+var i = 0
+while (i < 2000) {
+    var m = { a: i, b: i + 1 }
+    acc = acc + m.a + m.b
+    i = i + 1
+}
+print("acc =")
+print(acc)
+print("DONE")

@@ -1,0 +1,53 @@
+// Memory-safety follow-on: the resumed frame's spilled locals hold heap
+// objects. markRoots only scans vm->spill_stack[0 .. spill_top), and a resumed
+// frame's spill_base is a leftover that can sit outside the frame's real area,
+// so the objects a resumed function spills need not be reachable by the GC.
+// Allocate hard between capture and resume, then touch the strings.
+
+var TAG = Cont.newPrompt("t")
+var SAVED = null
+
+func spillBody() {
+    var a = "AA"
+    var b = "BB"
+    var c = "CC"
+    var d = "DD"
+    var e = "EE"
+    var f = "FF"
+    var g = "GG"
+    var h = "HH"
+    var i = "II"
+    var j = "JJ"
+    var k = "KK"
+    var l = "LL"
+    Cont.capture(TAG)
+    var s = a + b
+    s = s + c
+    s = s + d
+    s = s + e
+    s = s + f
+    s = s + g
+    s = s + h
+    s = s + i
+    s = s + j
+    s = s + k
+    s = s + l
+    return s
+}
+
+func churn() {
+    var n = 0
+    var acc = ""
+    while (n < 20000) {
+        acc = acc + "xyzw"
+        if (n % 64 == 0) { acc = "" }
+        n = n + 1
+    }
+    return n
+}
+
+Cont.pushPrompt(TAG)
+SAVED = spillBody()
+print("churn = %v", churn())
+Cont.pushPrompt(TAG)
+print("resumed = %v   (expect AABBCCDDEEFFGGHHIIJJKKLL)", Cont.resume(SAVED, null))

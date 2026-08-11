@@ -1,0 +1,35 @@
+// Full fiber shape: capture in callback, RESUME the continuation, then keep running.
+var TAG = Cont.newPrompt("f")
+var hits = 0
+var armed = true
+
+func onPreempt() {
+    hits = hits + 1
+    if (armed) { Cont.capture(TAG) }
+}
+var id = Preempt.every(2000, onPreempt)
+
+func work() {
+    var s = 0
+    for (var i = 0; i < 100000; i = i + 1) { s = s + i }
+    return "done"
+}
+
+var r = Cont.withPrompt(TAG, work)
+print("1 first-slice   hits=%v isCont=%v remaining=%v", hits, Cont.isContinuation(r), Preempt.remaining(id))
+
+// Resume the captured fiber inside a fresh prompt and let it run to completion.
+var r2 = Cont.withPrompt(TAG, func() { return Cont.resume(r, null) })
+print("2 after-resume  hits=%v isCont=%v result=%v remaining=%v",
+      hits, Cont.isContinuation(r2), r2, Preempt.remaining(id))
+
+armed = false
+var s = 0
+for (var i = 0; i < 400000; i = i + 1) { s = s + i }
+print("3 after-400k    hits=%v remaining=%v", hits, Preempt.remaining(id))
+
+// Any call that re-arms the shared countdown should restore natural firing.
+Preempt.setSlice(id, 2000)
+for (var i = 0; i < 100000; i = i + 1) { s = s + i }
+print("4 after-setSlice+100k hits=%v remaining=%v", hits, Preempt.remaining(id))
+Preempt.cancel(id)

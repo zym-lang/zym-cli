@@ -1,0 +1,28 @@
+@tco aggressive
+var hitsA = 0
+var hitsB = 0
+func cbA() {
+    hitsA = hitsA + 1
+    return clock()
+}
+func cbB() {
+    hitsB = hitsB + 1
+}
+var idA = Preempt.every(2000, cbA)
+var acc = 0
+for (var i = 0; i < 100000; i = i + 1) { acc = acc + 1 }
+print("phase1  hitsA=%v hitsB=%v", hitsA, hitsB)
+
+var idB = Preempt.every(2000, cbB)
+for (var i = 0; i < 300000; i = i + 1) { acc = acc + 1 }
+print("phase2  hitsA=%v hitsB=%v remA=%v remB=%v", hitsA, hitsB, Preempt.remaining(idA), Preempt.remaining(idB))
+
+var reqA = Preempt.request(idA)
+for (var i = 0; i < 100000; i = i + 1) { acc = acc + 1 }
+print("phase3  request(idA)=%v hitsA=%v hitsB=%v remA=%v", reqA, hitsA, hitsB, Preempt.remaining(idA))
+
+Preempt.cancel(idA)
+Preempt.cancel(idB)
+var idC = Preempt.every(2000, cbA)
+for (var i = 0; i < 300000; i = i + 1) { acc = acc + 1 }
+print("phase4  fresh entry, same closure: hitsA=%v remC=%v", hitsA, Preempt.remaining(idC))

@@ -1,0 +1,10 @@
+var OUTER = Cont.newPrompt("outer")
+var INNER = Cont.newPrompt("inner")
+func g() { return Cont.abort(OUTER, "x") }
+func f() { return Cont.withPrompt(INNER, g) }
+var i = 0
+while (i < 100) {
+    var r = Cont.withPrompt(OUTER, f)
+    i = i + 1
+}
+print("abort: finished 100 nested aborts")

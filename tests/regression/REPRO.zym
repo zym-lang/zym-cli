@@ -1,0 +1,53 @@
+// ============================================================================
+// C4-prompts repro: tagged capture across NESTED prompts
+//   half 1 - ghost: the matched OUTER prompt entry survives its dynamic extent
+//   half 2 - loss:  the INNER prompt inside the captured extent is not restored
+// ============================================================================
+var OUTER = Cont.newPrompt("outer")
+var INNER = Cont.newPrompt("inner")
+
+func g() {
+    print("g: capture(OUTER) from inside the INNER prompt")
+    var v = Cont.capture(OUTER)
+    print("g: resumed, v =")
+    print(v)
+    print("g: capture(INNER) -- INNER was live here at capture time")
+    var v2 = Cont.capture(INNER)
+    print("g: capture(INNER) SUCCEEDED")
+    return 99
+}
+func f() {
+    var r = Cont.withPrompt(INNER, g)
+    print("f: inner withPrompt yielded")
+    return r
+}
+
+var res = Cont.withPrompt(OUTER, f)
+print("--- outer withPrompt returned; both prompts are now out of scope ---")
+
+// ---- half 1: ghost acceptance (no prompt is live at this point) ----------
+func lvl3() {
+    print("lvl3: Cont.abort(OUTER, 'GHOST') outside any withPrompt")
+    var x = Cont.abort(OUTER, "GHOST")
+    print("lvl3: NOT REACHED")
+    return x
+}
+func lvl2() {
+    var a = lvl3()
+    print("lvl2: NOT REACHED")
+    return a
+}
+func lvl1() {
+    var a = lvl2()
+    print("lvl1: NOT REACHED")
+    return a
+}
+var ghosted = lvl1()
+print("ghost abort landed back at top level with value:")
+print(ghosted)
+
+// ---- half 2: inner prompt not restored on resume -------------------------
+print("--- resuming the continuation ---")
+var out = Cont.resume(res, 42)
+print("resume produced:")
+print(out)

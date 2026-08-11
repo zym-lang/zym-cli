@@ -1,0 +1,13 @@
+@tco off
+func bodyNativeTail() { return clock() }
+print("depth start        = %v", Preempt.shieldDepth())
+Preempt.shield(bodyNativeTail)
+print("after native-tail  = %v", Preempt.shieldDepth())
+Preempt.shield(bodyNativeTail)
+print("after 2nd nat-tail = %v", Preempt.shieldDepth())
+var hits = 0
+func cb() { hits = hits + 1 }
+var id = Preempt.every(2000, cb)
+var acc = 0
+for (var i = 0; i < 400000; i = i + 1) { acc = acc + 1 }
+print("work: hits=%v shieldDepth=%v", hits, Preempt.shieldDepth())

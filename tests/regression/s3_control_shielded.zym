@@ -1,0 +1,37 @@
+// CONTROL B: same preempt-capture, but with a live shield frame BELOW the prompt.
+// Depth at capture is 1; the excluded-frame loop still subtracts 1 for the
+// PREEMPT frame, so resume should install 0 while the shield frame is still live.
+var TAG = Cont.newPrompt("t")
+
+func spin(n) { var j = 0  while (j < n) { j = j + 1 }  return j }
+
+var k = null
+var innerFired = 0
+
+func onTick() {
+    print("[cb] depth inside preempt callback = %v", Preempt.shieldDepth())
+    Cont.capture(TAG)
+}
+
+var id = Preempt.every(400, onTick)
+
+Preempt.shield(func() {
+    print("inside shield, depth = %v", Preempt.shieldDepth())
+    k = Cont.withPrompt(TAG, func() {
+        spin(50000)
+        return "body-finished"
+    })
+    print("after capture (still inside shield), depth = %v", Preempt.shieldDepth())
+    Preempt.cancel(id)
+
+    var r = Cont.withPrompt(TAG, func() { return Cont.resume(k, null) })
+    print("resume result = %v", r)
+    print("after resume (still inside shield), depth = %v", Preempt.shieldDepth())
+
+    var id2 = Preempt.every(200, func() { innerFired = innerFired + 1 })
+    innerFired = 0
+    spin(20000)
+    print("fired while STILL inside the shield = %v", innerFired)
+    Preempt.cancel(id2)
+})
+print("depth after shield returns = %v", Preempt.shieldDepth())

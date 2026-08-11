@@ -1,0 +1,31 @@
+// CONTROL: same prompt/capture/resume/shield shape, but capture is NOT
+// taken from inside a preempt callback -- no FRAME_FLAG_PREEMPT frame exists.
+var TAG = Cont.newPrompt("t")
+var fires = 0
+func cb() { fires = fires + 1 }
+var id = Preempt.every(200, cb)
+
+print("depth before = %v", Preempt.shieldDepth())
+
+var result = Cont.withPrompt(TAG, func() {
+    Cont.capture(TAG)
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+    return "body-finished"
+})
+print("captured? %v", Cont.isContinuation(result))
+print("depth after capture = %v", Preempt.shieldDepth())
+
+if (Cont.isContinuation(result)) {
+    var r = Cont.withPrompt(TAG, func() { return Cont.resume(result, null) })
+    print("resume result = %v", r)
+}
+print("depth after resume = %v (expect 0)", Preempt.shieldDepth())
+
+fires = 0
+Preempt.shield(func() {
+    print("  inside shield, depth = %v (expect 1)", Preempt.shieldDepth())
+    var k = 0
+    while (k < 20000) { k = k + 1 }
+})
+print("fired DURING shield = %v (expect 0)", fires)

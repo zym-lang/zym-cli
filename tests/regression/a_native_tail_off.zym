@@ -1,0 +1,19 @@
+@tco off
+
+var hits = 0
+
+func nativeTail() {
+    hits = hits + 1
+    return sqrt(4.0)
+}
+
+var id = Preempt.every(100, nativeTail)
+print("registered id %v", id)
+
+var acc = 0
+for (var i = 0; i < 10000; i = i + 1) {
+    acc = acc + 1
+}
+
+print("native-tail-TCO-OFF hits %v remaining %v result %v", hits, Preempt.remaining(id), acc)
+Preempt.cancel(id)

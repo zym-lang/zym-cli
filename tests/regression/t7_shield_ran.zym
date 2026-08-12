@@ -1,6 +1,6 @@
 @tco aggressive
 var ran = 0
-func bodyNativeTail() { ran = ran + 1; return clock() }
+func bodyNativeTail() { ran = ran + 1; return abs(-3) }
 print("before: depth=%v ran=%v", Preempt.shieldDepth(), ran)
 Preempt.shield(bodyNativeTail)
 print("after : depth=%v ran=%v", Preempt.shieldDepth(), ran)

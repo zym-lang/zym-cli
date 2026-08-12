@@ -1,9 +1,9 @@
 var hits = 0
-func cb() { hits = hits + 1; return clock() }
+func cb() { hits = hits + 1; return abs(-3) }
 var id = Preempt.every(2000, cb)
 var acc = 0
 for (var i = 0; i < 400000; i = i + 1) { acc = acc + 1 }
 print("T10 default mode: hits=%v", hits)
-func sb() { return clock() }
+func sb() { return abs(-3) }
 Preempt.shield(sb)
 print("T10 default mode: shieldDepth after shield=%v", Preempt.shieldDepth())

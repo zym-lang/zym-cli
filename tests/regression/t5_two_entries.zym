@@ -3,7 +3,7 @@ var hitsA = 0
 var hitsB = 0
 func cbA() {
     hitsA = hitsA + 1
-    return clock()
+    return abs(-3)
 }
 func cbB() {
     hitsB = hitsB + 1

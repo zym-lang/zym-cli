@@ -2,7 +2,7 @@
 var hits = 0
 func cb() {
     hits = hits + 1
-    return clock()
+    return abs(-3)
 }
 var id = Preempt.every(2000, cb)
 var acc = 0

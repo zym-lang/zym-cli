@@ -1,6 +1,6 @@
 @tco aggressive
-func bodyNativeTail() { return clock() }
-func bodySafe() { var t = clock(); return t }
+func bodyNativeTail() { return abs(-3) }
+func bodySafe() { var t = abs(-3); return t }
 func bodyScriptTail() { return bodySafe() }
 
 print("depth start        = %v", Preempt.shieldDepth())

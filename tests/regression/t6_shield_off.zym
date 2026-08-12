@@ -1,5 +1,5 @@
 @tco off
-func bodyNativeTail() { return clock() }
+func bodyNativeTail() { return abs(-3) }
 print("depth start        = %v", Preempt.shieldDepth())
 Preempt.shield(bodyNativeTail)
 print("after native-tail  = %v", Preempt.shieldDepth())

@@ -47,7 +47,7 @@ assert(scriptHits >= MIN_HITS,
 var nativeHits = 0
 func nativeTailCb() {
     nativeHits = nativeHits + 1
-    return clock()
+    return abs(-3)
 }
 
 var idB = Preempt.every(SLICE, nativeTailCb)
@@ -88,7 +88,7 @@ print("4 depth after script-tail shield = %v", Preempt.shieldDepth())
 assert(Preempt.shieldDepth() == 0,
        "baseline broken: script-tail shield body leaked shield depth")
 
-func shieldNativeTail() { return clock() }
+func shieldNativeTail() { return abs(-3) }
 Preempt.shield(shieldNativeTail)
 print("5 depth after 1 native-tail shield = %v", Preempt.shieldDepth())
 assert(Preempt.shieldDepth() == 0,

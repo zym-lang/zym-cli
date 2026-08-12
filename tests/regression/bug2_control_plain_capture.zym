@@ -1,0 +1,12 @@
+// No preemption at all: ordinary capture/resume round trip.
+var P = Cont.newPrompt("plain")
+func inner() {
+    var v = Cont.capture(P)      // suspends; on resume yields the resume value
+    return { got: v }
+}
+var r = Cont.withPrompt(P, func () { return inner() })
+print("after capture: type %v isCont %v", typeof(r), Cont.isContinuation(r))
+var k = r
+var r2 = Cont.withPrompt(P, func () { return Cont.resume(k, 42) })
+print("after resume: type %v", typeof(r2))
+print("value: %v", r2)

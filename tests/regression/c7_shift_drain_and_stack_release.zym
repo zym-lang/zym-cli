@@ -1,0 +1,147 @@
+// C7 REGRESSION: releasing value-stack slots, and the one unwind path that
+// forgot to drain its resume boundaries.
+//
+//   C7a  Cont.shift never dropped the resume boundaries its own unwind
+//        invalidated. cont_capture and cont_abort have both run that loop all
+//        along; shift went straight from popPromptsThrough to pushing the
+//        handler frame. A boundary left behind names a frame index that no
+//        longer exists, and it fires on whatever unrelated call next returns at
+//        that depth -- taking the early-DISPATCH path that skips
+//        `stack[frame->stack_base] = value`, so the caller silently never
+//        receives its callee's return value.
+//
+//   C7b  lowering vm->stack_top released slots without clearing them. The mark
+//        bounds the GC's scan of the value stack (markRoots walks
+//        [0, stack_top)), and it used to be monotonic, so every slot below it
+//        held a real object and a stale one merely over-retained. Lowering it
+//        un-roots the released slots; their objects are collected; the next
+//        call raises the mark back over the same slots, still holding the now
+//        dangling pointers, and markObject reads freed memory. All four
+//        lowering sites (capture, abort, shift, and the resume-boundary return)
+//        go through lowerStackTop, which closes upvalues into the region and
+//        clears it.
+//
+// C7a is directly observable and asserted below. C7b is a use-after-free: it
+// does not reliably corrupt anything visible from script, so the sections that
+// target it drive allocation hard and are meant to be run under
+// zym-minimal/build-asan as well as normally. They assert what they can.
+//
+//   A1  shift out through a live resume boundary, then ordinary calls
+//   A2  the same, with heavy allocation in the frame that follows
+//   A3  abort out of a deep frame, then allocate across a re-raised mark
+//   A4  capture out of a deep frame, same shape
+
+var P = Cont.newPrompt("P")
+
+// ------------------- A1: shift out through a live resume boundary
+// body() suspends once, is resumed (which pushes a resume boundary one frame
+// above P's prompt frame), and then shifts out. The shift's unwind kills the
+// frame that boundary names. Un-drained, the boundary survives and fires on the
+// next ordinary return that lands at that depth.
+func a1Body() {
+    var a = Cont.capture(P)
+    var b = Cont.shift(P, func (k) { return 99 })
+    return a + b
+}
+
+var a1k = Cont.withPrompt(P, func () { return a1Body() })
+assert(Cont.isContinuation(a1k), "A1: capture must yield a continuation")
+
+var a1r = Cont.withPrompt(P, func () { return Cont.resume(a1k, 10) })
+assert(a1r == 99, "A1: the shift handler's value must reach the prompt")
+
+// The victims. leaf() returns at exactly the depth the stale boundary named.
+func a1Leaf() { return 7 }
+func a1Mid() { var v = a1Leaf(); return v + 1 }
+func a1Top() { var v = a1Mid(); return v + 1 }
+
+assert(a1Leaf() == 7, "A1: a plain call must return correctly after a shift")
+assert(a1Mid() == 8, "A1: a nested call must not lose its callee's value to a stale boundary")
+assert(a1Top() == 9, "A1: two levels of nesting must return correctly")
+print("A1 shift drains its resume boundaries: ok")
+
+// ---------------- A2: the same, with allocation pressure after the shift
+// A stale boundary also reinstated a stack_top from the torn-down layout. When
+// that mark landed below the live registers of the frame running at the time,
+// markRoots stopped scanning them and the next allocation collected locals that
+// were still in use.
+func a2Body() {
+    var a = Cont.capture(P)
+    var b = Cont.shift(P, func (k) { return 5 })
+    return a + b
+}
+
+var a2k = Cont.withPrompt(P, func () { return a2Body() })
+var a2r = Cont.withPrompt(P, func () { return Cont.resume(a2k, 1) })
+assert(a2r == 5, "A2: the shift handler's value must reach the prompt")
+
+func a2Leaf() { return 3 }
+
+func a2Victim() {
+    // A sentinel that must survive every collection below, held only by this
+    // frame's register -- exactly what an under-scanned mark would drop.
+    var keep = { tag: "SENTINEL", n: 4242, kids: [1, 2, 3, 4, 5, 6, 7, 8] }
+    var v = a2Leaf()
+    var s = ""
+    var m = { a: 1 }
+    var i = 0
+    while (i < 40000) {
+        s = s + "y"
+        m = { a: i, b: s }
+        i = i + 1
+    }
+    assert(keep.tag == "SENTINEL", "A2: the sentinel map must survive collection")
+    assert(keep.n == 4242, "A2: the sentinel's contents must survive collection")
+    assert(keep.kids[7] == 8, "A2: the sentinel's nested list must survive collection")
+    assert(m.a == 39999, "A2: the last allocation must be intact")
+    return v
+}
+assert(a2Victim() == 3, "A2: the victim frame must return its callee's value")
+print("A2 shift release keeps live locals rooted: ok")
+
+// --------------- A3: abort out of a deep frame, then re-raise the mark
+// Cont.abort lowers the mark to the prompt's base the same way, and had the
+// same defect -- no resume boundary involved at all. Deep locals so the
+// released region is wide, then non-tail recursion to raise the mark back over
+// it while collecting on the way in.
+func a3Deep() {
+    var m1 = [1, 2, 3, 4, 5, 6, 7, 8]
+    var m2 = [1, 2, 3, 4, 5, 6, 7, 8]
+    var m3 = { a: m1, b: m2 }
+    var m4 = { c: m3 }
+    Cont.abort(P, 5)
+    return 0
+}
+
+var a3r = Cont.withPrompt(P, func () { return a3Deep() })
+assert(a3r == 5, "A3: abort must deliver its value to the prompt")
+
+func a3Climb(n) {
+    var pad = { d: [n, n, n, n, n, n, n, n] }
+    if (n > 0) {
+        var r = a3Climb(n - 1)
+        assert(pad.d[0] == n, "A3: a local must survive a collection under a re-raised mark")
+        return r + 1
+    }
+    return 0
+}
+assert(a3Climb(30) == 30, "A3: the recursion must unwind correctly")
+print("A3 abort release keeps the mark honest: ok")
+
+// ------------------------ A4: capture out of a deep frame, same shape
+func a4Deep() {
+    var m1 = [1, 2, 3, 4, 5, 6, 7, 8]
+    var m2 = { a: m1 }
+    var m3 = { b: m2, c: m1 }
+    Cont.capture(P)
+    return m3.b.a[0]
+}
+
+var a4k = Cont.withPrompt(P, func () { return a4Deep() })
+assert(Cont.isContinuation(a4k), "A4: capture must yield a continuation")
+a4k = null
+
+assert(a3Climb(30) == 30, "A4: the recursion must unwind correctly after a capture")
+print("A4 capture release keeps the mark honest: ok")
+
+print("C7 PASS")

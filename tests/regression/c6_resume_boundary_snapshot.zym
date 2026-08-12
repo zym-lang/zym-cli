@@ -1,0 +1,191 @@
+// C6 REGRESSION: two defects in the same mechanism -- the resume boundary.
+//
+// A resume boundary is the only thing that tells RET where a restored frame's
+// return value goes. Cont.resume splices the captured frames on top of the
+// resumer's, and the bottom frame of that splice sits at a stack_base the
+// restore picked -- not at its caller's result register -- so the ordinary
+// "callee writes to its own stack_base" convention lands the value in a slot
+// nobody reads. vm->resume_stack carries the real destination, and it also
+// carries the value-stack mark to put back when the splice is done.
+//
+//   C6a  the boundary was not part of a continuation's snapshot.
+//        Capture across a previous resume and the mapping was dropped: the
+//        frames came back, the wiring between two of them did not, and the
+//        caller received whatever the result register still held -- in every
+//        natural spelling of the idiom, the callee `Cont.resume` itself.
+//
+//   C6b  the boundary never put vm->stack_top back. stack_top is a high-water
+//        mark that RET does not lower, which costs nothing for ordinary calls
+//        but leaks a whole slice per resume, because a resume bases its splice
+//        AT the mark and then raises it. Worse than linear: the next capture
+//        measures its slice up to the drifted mark, so each leak enlarges the
+//        next. A capture already reclaimed (unwinding resets stack_top to the
+//        prompt's base); the path that RETURNS did not.
+//
+// Both hide until a resumed computation RETURNS. Every re-suspension unwinds
+// through capture instead, so a scheduler ran correctly for N-1 slices and
+// then produced a function on the Nth -- and a test that resumed to completion
+// in a loop died of stack overflow around the eighth iteration.
+//
+//   A1  two captures in one body -- the plain, preemption-free case
+//   A2  the value threads through a chain three splices deep
+//   A3  a restored splice point is consumed, not leaked
+//   A4  resuming to completion reclaims its slice (C6b)
+//   A5  external preemptive scheduling, the shape that found this
+
+var P = Cont.newPrompt("P")
+
+// ------------------------------------------- A1: two captures in one body
+// The second capture is taken while the first one's resume boundary is live
+// and inside the extent, so r2 spans a splice point. Nothing here preempts:
+// the defect was never preemption-specific, that is only where it was found.
+func a1Body() {
+    var a = Cont.capture(P)
+    var b = Cont.capture(P)
+    return { a: a, b: b }
+}
+
+var a1r1 = Cont.withPrompt(P, func () { return a1Body() })
+assert(Cont.isContinuation(a1r1), "A1: first capture must yield a continuation")
+
+var a1r2 = Cont.withPrompt(P, func () { return Cont.resume(a1r1, 10) })
+assert(Cont.isContinuation(a1r2), "A1: second capture must yield a continuation")
+
+var a1r3 = Cont.withPrompt(P, func () { return Cont.resume(a1r2, 20) })
+assert(!Cont.isContinuation(a1r3), "A1: the completing resume must not yield a continuation")
+assert(typeof(a1r3) == "map", "A1: the completing resume must deliver the body's return value, not the resume callee")
+assert(a1r3.a == 10, "A1: first resume value must reach the restored frame")
+assert(a1r3.b == 20, "A1: second resume value must reach the restored frame")
+print("A1 capture across a live resume boundary: ok")
+
+// -------------------------------------------------- A2: three splices deep
+// Each round trip adds one frame and one boundary to the extent, so this walks
+// a chain whose returns have to thread back through three restored splices in
+// order. A boundary restored at the wrong depth would misroute exactly one of
+// them, which a single-splice test cannot see.
+var a2Order = ""
+
+func a2Body() {
+    var v1 = Cont.capture(P)
+    a2Order = a2Order + "1"
+    var v2 = Cont.capture(P)
+    a2Order = a2Order + "2"
+    var v3 = Cont.capture(P)
+    a2Order = a2Order + "3"
+    return v1 + v2 + v3
+}
+
+var a2k = Cont.withPrompt(P, func () { return a2Body() })
+var a2n = 0
+var a2vals = [100, 20, 3]
+while (Cont.isContinuation(a2k) and a2n < 3) {
+    var k = a2k
+    var v = a2vals[a2n]
+    a2n = a2n + 1
+    a2k = Cont.withPrompt(P, func () { return Cont.resume(k, v) })
+}
+assert(a2n == 3, "A2: the body must suspend exactly three times")
+assert(a2Order == "123", "A2: the restored body must run its segments in order")
+assert(typeof(a2k) == "number", "A2: a three-splice chain must return the body's value")
+assert(a2k == 123, "A2: the value must thread back through every restored splice")
+print("A2 value threads through a three-splice chain: ok")
+
+// ------------------------------- A3: a restored splice point is consumed
+// The mirror-image failure, and the reason the restore is paired with a pop
+// rather than left to unwind: an entry put back on vm->resume_stack that is
+// never taken off is a live boundary naming a frame index some later,
+// unrelated call will occupy -- and when that call returns, RET hands its
+// value to the stale boundary's slot instead of its caller's register. Both
+// call depths are checked because the boundary a chain leaves behind names
+// the splice bottom, and this chain's sits at one of them.
+func a3Leaf() { return 7 }
+func a3Mid() { var v = a3Leaf(); return v + 1 }
+func a3Top() { var v = a3Mid(); return v + 1 }
+
+assert(a3Top() == 9, "A3: ordinary nested calls must return correctly before any resume")
+
+var a3Rounds = 0
+while (a3Rounds < 5) {
+    a3Rounds = a3Rounds + 1
+
+    var a3k1 = Cont.withPrompt(P, func () { return a1Body() })
+    var a3k2 = Cont.withPrompt(P, func () { return Cont.resume(a3k1, 1) })
+    var a3out = Cont.withPrompt(P, func () { return Cont.resume(a3k2, 2) })
+    assert(typeof(a3out) == "map", "A3: every round must complete normally")
+
+    // The real check: a boundary left behind by the round just finished would
+    // misroute one of these two returns.
+    assert(a3Leaf() == 7, "A3: a plain call must return correctly after a resumed chain")
+    assert(a3Top() == 9, "A3: nested calls must return correctly after a resumed chain")
+}
+print("A3 restored splice points are consumed, not leaked: ok")
+
+// ------------------------ A4: resuming to completion reclaims its slice
+// C6b directly. Each round captures twice and resumes to completion twice, so
+// a resume that does not put vm->stack_top back leaks two slices per round and
+// enlarges every slice that follows. Unbounded before the fix -- the value
+// stack (STACK_MAX 65536) ran out around round 8 -- so the count here is well
+// past the old ceiling and the check is simply that it finishes.
+//
+// The assertions inside the loop matter as much as the count: a reclaim that
+// lowered the mark too far would hand the next capture a truncated slice and
+// corrupt the value rather than overflow.
+var a4Total = 0
+var a4Rounds = 0
+while (a4Rounds < 400) {
+    a4Rounds = a4Rounds + 1
+
+    var a4k1 = Cont.withPrompt(P, func () { return a1Body() })
+    var a4k2 = Cont.withPrompt(P, func () { return Cont.resume(a4k1, 3) })
+    var a4out = Cont.withPrompt(P, func () { return Cont.resume(a4k2, 4) })
+
+    assert(typeof(a4out) == "map", "A4: every round must complete normally")
+    a4Total = a4Total + a4out.a + a4out.b
+}
+assert(a4Rounds == 400, "A4: all 400 rounds must run")
+assert(a4Total == 2800, "A4: 400 rounds of (3 + 4) must total 2800")
+print("A4 resuming to completion reclaims its slice: ok")
+
+// --------------------------------------------- A5: preemptive scheduling
+// The shape both defects were found with: an external scheduler slices a plain
+// computation with Preempt.every and drives it to completion. The extent grows
+// by one splice per slice, so the final step returns through all of them.
+//
+// The loop is bounded rather than open so a re-suspension bug cannot turn this
+// into a hang; A1 and A2 already pin the value, this pins the integration.
+var A5_LIMIT = 50000
+var a5Captures = 0
+var SCHED = Cont.newPrompt("SCHED")
+
+func a5Work(limit) {
+    var i = 0
+    var sum = 0
+    while (i < limit) {
+        sum = sum + i
+        i = i + 1
+    }
+    return { sum: sum, iterations: i }
+}
+
+var a5Slicer = Preempt.every(5000, func () {
+    a5Captures = a5Captures + 1
+    Cont.capture(SCHED)
+})
+
+var a5r = Cont.withPrompt(SCHED, func () { return a5Work(A5_LIMIT) })
+var a5Steps = 0
+while (Cont.isContinuation(a5r) and a5Steps < 400) {
+    var k = a5r
+    a5Steps = a5Steps + 1
+    a5r = Cont.withPrompt(SCHED, func () { return Cont.resume(k, null) })
+}
+Preempt.cancel(a5Slicer)
+
+assert(a5Captures > 1, "A5: the workload must be sliced more than once, or nothing is being tested")
+assert(a5Steps == a5Captures, "A5: every capture must be resumed exactly once")
+assert(!Cont.isContinuation(a5r), "A5: the scheduler must drive the work to completion")
+assert(typeof(a5r) == "map", "A5: the completing slice must deliver the work's return value")
+assert(a5r.iterations == A5_LIMIT, "A5: the sliced work must run its full iteration count")
+print("A5 external preemptive scheduling: ok")
+
+print("C6 PASS")

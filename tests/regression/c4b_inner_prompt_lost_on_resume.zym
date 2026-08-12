@@ -81,11 +81,12 @@ print("B2 shift to restored inner prompt: ok")
 // ABOVE the live INNER pushed by the outermost withPrompt here, and findPrompt
 // scans from the top, so the abort below would take the dead one.
 //
-// This is a loop-free check on purpose. Cont.resume splices the captured slice
-// in at vm->stack_top and nothing lowers stack_top when the resumed extent
-// returns, so repeated resumes exhaust the value stack -- a separate,
-// pre-existing defect that reproduces with no inner prompt in sight, and not
-// what this file is about.
+// Looped ITERS times so a one-entry-per-iteration leak overruns MAX_PROMPTS
+// (64) rather than having to be caught by the abort alone. This ran loop-free
+// for a while because repeated resumes exhausted the value stack -- Cont.resume
+// spliced its slice in at vm->stack_top and nothing lowered the mark when the
+// resumed extent returned. That was a real defect rather than a fact of life
+// here, and it is fixed (C6b); the loop this test wanted is back.
 func b3InnerBody() {
     Cont.capture(OUTER)
     return "li"
@@ -97,10 +98,14 @@ func b3OuterBody() {
 
 var b3Unreachable = 0
 func b3Body() {
-    var k3 = Cont.withPrompt(OUTER, b3OuterBody)
-    assert(Cont.isContinuation(k3), "B3: capture(OUTER) must yield a continuation")
-    var out = Cont.resume(k3, 1)
-    assert(out == "li", "B3: the resumed extent must return normally through withPrompt(INNER)")
+    var i = 0
+    while (i < ITERS) {
+        i = i + 1
+        var k3 = Cont.withPrompt(OUTER, b3OuterBody)
+        assert(Cont.isContinuation(k3), "B3: capture(OUTER) must yield a continuation")
+        var out = Cont.resume(k3, 1)
+        assert(out == "li", "B3: the resumed extent must return normally through withPrompt(INNER)")
+    }
     Cont.abort(INNER, "V3")
     b3Unreachable = b3Unreachable + 1
     return "not-reached"

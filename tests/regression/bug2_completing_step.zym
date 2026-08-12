@@ -1,0 +1,15 @@
+var P = Cont.newPrompt("p")
+var n = 0
+var s = Preempt.every(20000, func () { n = n + 1; Cont.capture(P) })
+func work(lim) { var i = 0; while (i < lim) { i = i + 1 } return { done: i } }
+var r = Cont.withPrompt(P, func () { return work(30000) })
+print("initial: %v", typeof(r))
+var steps = 0
+while (Cont.isContinuation(r) and steps < 10) {
+    var k = r
+    steps = steps + 1
+    r = Cont.withPrompt(P, func () { return Cont.resume(k, null) })
+    print("  step %v -> %v  isCont=%v", steps, typeof(r), Cont.isContinuation(r))
+}
+Preempt.cancel(s)
+print("captures=%v steps=%v final=%v", n, steps, typeof(r))

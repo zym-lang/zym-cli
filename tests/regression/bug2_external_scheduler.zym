@@ -1,0 +1,30 @@
+print("=== EXTERNAL PREEMPTIVE SCHEDULING ===")
+var FIBER = Cont.newPrompt("external-scheduler")
+var captures = 0
+var slicer = Preempt.every(5000, func () {
+    captures = captures + 1
+    Cont.capture(FIBER)
+})
+func ordinaryWork(limit) {
+    var i = 0
+    var sum = 0
+    var checksum = 0
+    while (i < limit) {
+        sum = sum + i
+        if (i % 7 == 0) { checksum = checksum + i }
+        i = i + 1
+    }
+    return { sum: sum, checksum: checksum, iterations: i }
+}
+var result = Cont.withPrompt(FIBER, func () { return ordinaryWork(50000) })
+var resumes = 0
+while (Cont.isContinuation(result)) {
+    var k = result
+    resumes = resumes + 1
+    result = Cont.withPrompt(FIBER, func () { return Cont.resume(k, null) })
+}
+Preempt.cancel(slicer)
+print("captures %v", captures)
+print("resumes %v", resumes)
+print("iterations %v", result.iterations)
+print("result-is-cont %v", Cont.isContinuation(result))

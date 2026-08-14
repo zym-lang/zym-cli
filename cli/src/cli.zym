@@ -4,7 +4,7 @@ var PKG_URL = "https://raw.githubusercontent.com/zym-lang/modules/refs/heads/mai
 
 var drainAndPrintDiagnostics = import("./diagnostics.zym").drainAndPrintDiagnostics
 
-var ZYM_VERSION = "0.3.0"
+var ZYM_VERSION = "0.3.1"
 var RUNNING_BINARY_PATH
 var RUNNING_BINARY_PLATFORM
 
@@ -657,7 +657,7 @@ func printHeader()
 {
     print("  ====================================================================================")
     print("  |                                                                                  |")
-    print("  |           ########  ##    ##  ##     ##              v0.3.0                      |")
+    print("  |           ########  ##    ##  ##     ##              v0.3.1                      |")
     print("  |              ##      ##  ##   ###   ###                                          |")
     print("  |             ##        ####    #### ####         Programming Language             |")
     print("  |            ##          ##     ## ### ##                                          |")

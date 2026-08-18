@@ -1,0 +1,35 @@
+// A closure capturing a local of a frame inside a continuation's extent
+// must still alias that local after the continuation resumes. Capture
+// seals open upvalues (the frames unwind); resume must put the alias
+// back. Reported by an external user: the closure kept mutating the
+// sealed cell while the restored frame worked on its own snapshot copy,
+// splitting one binding into two values (42/110/42/42 instead of
+// 42/142/142/142).
+@tco off
+
+var tag = Cont.newPrompt("closure-mutation");
+
+func outer() {
+    var x = 10;
+
+    func changeX() {
+        x = x + 100;
+        return x;
+    }
+
+    var resumed = Cont.capture(tag);
+
+    x = x + resumed;
+    assert(x == 42, "resumed local restored with resume value");
+    assert(changeX() == 142, "closure aliases the restored local");
+    assert(x == 142, "mutation through the closure reaches the local");
+
+    return x;
+}
+
+Cont.pushPrompt(tag);
+var k = outer();
+
+var result = Cont.resume(k, 32);
+assert(result == 142, "return value flows through the restored alias");
+print("c8 ok");

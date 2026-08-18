@@ -1,0 +1,40 @@
+// The half of the aliasing contract the basic repro cannot see: a
+// closure that ESCAPED before capture and runs while the continuation
+// is parked writes through the sealed cell. Resume must treat the cell
+// as authoritative (the binding is one location for its whole life),
+// not clobber it with the snapshot slot, and the closure must alias the
+// restored slot afterward, in both directions, including after the
+// captured frame finally returns and the upvalue closes for good.
+@tco off
+
+var tag = Cont.newPrompt("parked-mutation");
+var g = null;
+
+func outer() {
+    var x = 10;
+
+    func bump() {
+        x = x + 100;
+        return x;
+    }
+    g = bump;
+
+    var resumed = Cont.capture(tag);
+
+    x = x + resumed;
+    assert(x == 142, "resume carries the parked mutation into the slot");
+    assert(bump() == 242, "closure aliases the restored slot");
+    assert(x == 242, "alias is two-way after resume");
+
+    return x;
+}
+
+Cont.pushPrompt(tag);
+var k = outer();
+
+assert(g() == 110, "parked closure writes through the sealed cell");
+
+var result = Cont.resume(k, 32);
+assert(result == 242, "outer returns through the alias");
+assert(g() == 342, "closure keeps the binding after outer returned");
+print("c8b ok");

@@ -1,0 +1,69 @@
+// A struct or enum declared inside a function must be visible from
+// nested functions of that function. compile_function_body hoisted and
+// compiled nested functions (Pass 2) BEFORE ordinary statements (Pass 3),
+// and struct/enum schemas were only registered in Pass 3 -- so a nested
+// body found the parent's schema table empty in any source order, fell
+// through to the global path, and died at runtime with "Undefined
+// identifier". The top-level compiler always had the pre-pass; function
+// bodies now do too. Reported by an external user (Toggle benchmark
+// wrapped in a run() function).
+
+// struct, declared before the nested function
+func a() {
+    struct T { v }
+    func make() { return T(7) }
+    return make().v
+}
+assert(a() == 7, "struct visible from nested fn (struct first)")
+
+// struct, declared AFTER the nested function -- order must not matter
+func b() {
+    func make() { return T(8) }
+    struct T { v }
+    return make().v
+}
+assert(b() == 8, "struct visible from nested fn (fn first)")
+
+// enum, both orders
+func c() {
+    enum Color { Red, Green }
+    func pick() { return Color.Green }
+    return pick() == Color.Green
+}
+assert(c(), "enum visible from nested fn (enum first)")
+
+func d() {
+    func pick() { return Color.Red }
+    enum Color { Red, Green }
+    return pick() == Color.Red
+}
+assert(d(), "enum visible from nested fn (fn first)")
+
+// two levels down, and used through a sibling closure that captures state
+func e() {
+    struct Toggle { value; activate }
+    func makeToggle(start) {
+        var on = start
+        var self = Toggle(value, activate)
+        func value() { return on }
+        func activate() { on = !on
+            return self }
+        return self
+    }
+    var t = makeToggle(true)
+    var v = t.activate().value()
+    v = t.activate().value()
+    return v
+}
+assert(e() == true, "struct + captured state two levels down")
+
+// tail-position scan: a return followed only by declarations is still tail
+func f() {
+    func g(n) { if (n == 0) return 0
+        return g(n - 1) }
+    return g(3)
+    struct After { x }
+}
+assert(f() == 0, "trailing declarations do not break the return")
+
+print("c9 ok")

@@ -4,7 +4,7 @@ var PKG_URL = "https://raw.githubusercontent.com/zym-lang/modules/refs/heads/mai
 
 var drainAndPrintDiagnostics = import("./diagnostics.zym").drainAndPrintDiagnostics
 
-var ZYM_VERSION = "0.3.1"
+var ZYM_VERSION = "0.3.2"
 var RUNNING_BINARY_PATH
 var RUNNING_BINARY_PLATFORM
 
@@ -393,7 +393,7 @@ func main(argv)
     var isScriptArgs = false
 
     if (argsLength == 0) {  print(""); printHeader(); print("") }
-    else if (args[0] == "-v" || args[0] == "--version") { print("ZYM %v (c) 2025-2026 Anatole DP" , ZYM_VERSION) }
+    else if (args[0] == "-v" || args[0] == "--version") { print("ZYM %v Copyright (C) 2025-2026 zym-lang.org, Anatole DP" , ZYM_VERSION) }
     else if (args[0] == "-h" || args[0] == "--help") { print(""); printHeader(); print(""); printUseage(); print("") }
     else if (startsWith(args[0], "-") || startsWith(args[0], "--")) { print("Error: unknown argument: '%v'", args[0]) }
     else {
@@ -657,7 +657,7 @@ func printHeader()
 {
     print("  ====================================================================================")
     print("  |                                                                                  |")
-    print("  |           ########  ##    ##  ##     ##              v0.3.1                      |")
+    print("  |           ########  ##    ##  ##     ##              v%v                      |", ZYM_VERSION)
     print("  |              ##      ##  ##   ###   ###                                          |")
     print("  |             ##        ####    #### ####         Programming Language             |")
     print("  |            ##          ##     ## ### ##                                          |")

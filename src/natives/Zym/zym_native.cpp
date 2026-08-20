@@ -706,7 +706,21 @@ ZymValue cv_disassembleChunk(ZymVM* parentVm, ZymValue context,
 // called back into the child would be something the child could intercept
 // or loop inside.
 
+#if !ZYM_HAS_HOST_GUARD
+// Guard-off build: the child-VM sandbox controls ride the host guard's
+// counter channel, which this build compiled out. The natives stay
+// registered so the vm.* surface is stable; calling one reports why it
+// cannot work rather than pretending to.
+static ZymValue guardless(ZymVM* parentVm) {
+    zym_runtimeError(parentVm,
+        "this zym build has no host guard (ZYM_ENABLE_HOST_GUARD=OFF): "
+        "watchdogs, stop, and the memory ceiling are unavailable");
+    return ZYM_ERROR;
+}
+#endif
+
 ZymValue cv_setWatchdog(ZymVM* parentVm, ZymValue context, ZymValue sliceV) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     if (!zym_isNumber(sliceV)) {
@@ -730,14 +744,23 @@ ZymValue cv_setWatchdog(ZymVM* parentVm, ZymValue context, ZymValue sliceV) {
         return ZYM_ERROR;
     }
     return zym_newNumber((double)id);
+#else
+    (void)context; (void)sliceV;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_clearWatchdog(ZymVM* parentVm, ZymValue context, ZymValue idV) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     if (!zym_isNumber(idV)) return zym_newBool(false);
     return zym_newBool(
         zym_preemptUnregister(h->child, (ZymPreemptId)zym_asNumber(idV)));
+#else
+    (void)context; (void)idV;
+    return guardless(parentVm);
+#endif
 }
 
 // Continue a child that stopped. After ABORTED the child's frames, ip, and
@@ -767,23 +790,38 @@ ZymValue cv_resume(ZymVM* parentVm, ZymValue context) {
 }
 
 ZymValue cv_requestStop(ZymVM* parentVm, ZymValue context) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     zym_requestStop(h->child);
     return zym_newNull();
+#else
+    (void)context;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_clearStop(ZymVM* parentVm, ZymValue context) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     zym_clearStop(h->child);
     return zym_newNull();
+#else
+    (void)context;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_stopRequested(ZymVM* parentVm, ZymValue context) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     return zym_newBool(zym_stopRequested(h->child));
+#else
+    (void)context;
+    return guardless(parentVm);
+#endif
 }
 
 // ---- memory ceiling ------------------------------------------------------
@@ -816,42 +854,31 @@ ZymValue cv_info(ZymVM* parentVm, ZymValue context) {
     return m;
 }
 
-ZymValue cv_setPreemptReserve(ZymVM* parentVm, ZymValue context, ZymValue slotsV) {
-    auto* h = require_child(parentVm, context, /*setupOnly*/ true);
-    if (!h) return ZYM_ERROR;
-    if (!zym_isNumber(slotsV)) {
-        zym_runtimeError(parentVm, "setPreemptReserve(slots) expects a number");
-        return ZYM_ERROR;
-    }
-    double slots = zym_asNumber(slotsV);
-    if (slots < 0 || slots > (double)zym_preemptCapacity()) {
-        zym_runtimeError(parentVm,
-            "setPreemptReserve(slots): must be between 0 and %d", zym_preemptCapacity());
-        return ZYM_ERROR;
-    }
-    return zym_newBool(zym_setHostPreemptReserve(h->child, (int)slots));
-}
-
-ZymValue cv_preemptReserve(ZymVM* parentVm, ZymValue context) {
-    auto* h = require_child(parentVm, context, /*setupOnly*/ false);
-    if (!h) return ZYM_ERROR;
-    return zym_newNumber((double)zym_getHostPreemptReserve(h->child));
-}
-
 ZymValue cv_preemptCapacity(ZymVM* parentVm, ZymValue context) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     (void)h;
     return zym_newNumber((double)zym_preemptCapacity());
+#else
+    (void)context;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_preemptUsed(ZymVM* parentVm, ZymValue context) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
-    return zym_newNumber((double)zym_preemptCount(h->child, /*script_owned_only=*/false));
+    return zym_newNumber((double)zym_preemptCount(h->child));
+#else
+    (void)context;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_setMemoryLimit(ZymVM* parentVm, ZymValue context, ZymValue bytesV) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     if (!zym_isNumber(bytesV)) {
@@ -865,12 +892,21 @@ ZymValue cv_setMemoryLimit(ZymVM* parentVm, ZymValue context, ZymValue bytesV) {
     }
     zym_setMemoryLimit(h->child, (size_t)bytes);
     return zym_newNull();
+#else
+    (void)context; (void)bytesV;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_memoryLimit(ZymVM* parentVm, ZymValue context) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     return zym_newNumber((double)zym_getMemoryLimit(h->child));
+#else
+    (void)context;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_memoryUsed(ZymVM* parentVm, ZymValue context) {
@@ -880,16 +916,26 @@ ZymValue cv_memoryUsed(ZymVM* parentVm, ZymValue context) {
 }
 
 ZymValue cv_oomPending(ZymVM* parentVm, ZymValue context) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     return zym_newBool(zym_oomPending(h->child));
+#else
+    (void)context;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_clearOom(ZymVM* parentVm, ZymValue context) {
+#if ZYM_HAS_HOST_GUARD
     auto* h = require_child(parentVm, context, /*setupOnly*/ false);
     if (!h) return ZYM_ERROR;
     zym_clearOom(h->child);
     return zym_newNull();
+#else
+    (void)context;
+    return guardless(parentVm);
+#endif
 }
 
 ZymValue cv_runChunk(ZymVM* parentVm, ZymValue context, ZymValue chunkV) {
@@ -1890,8 +1936,6 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     ZymValue mClrStop  = MK_CLOSURE("clearStop()", cv_clearStop);                                 zym_pushRoot(parentVm, mClrStop);
     ZymValue mStopped  = MK_CLOSURE("stopRequested()", cv_stopRequested);                         zym_pushRoot(parentVm, mStopped);
     ZymValue mInfo     = MK_CLOSURE("info()", cv_info);                                          zym_pushRoot(parentVm, mInfo);
-    ZymValue mSetRsv   = MK_CLOSURE("setPreemptReserve(slots)", cv_setPreemptReserve);          zym_pushRoot(parentVm, mSetRsv);
-    ZymValue mRsv      = MK_CLOSURE("preemptReserve()", cv_preemptReserve);                      zym_pushRoot(parentVm, mRsv);
     ZymValue mPCap     = MK_CLOSURE("preemptCapacity()", cv_preemptCapacity);                    zym_pushRoot(parentVm, mPCap);
     ZymValue mPUsed    = MK_CLOSURE("preemptUsed()", cv_preemptUsed);                            zym_pushRoot(parentVm, mPUsed);
     ZymValue mSetMem   = MK_CLOSURE("setMemoryLimit(bytes)", cv_setMemoryLimit);                  zym_pushRoot(parentVm, mSetMem);
@@ -1945,8 +1989,6 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "clearStop",          mClrStop);
     zym_mapSet(parentVm, obj, "stopRequested",      mStopped);
     zym_mapSet(parentVm, obj, "info",              mInfo);
-    zym_mapSet(parentVm, obj, "setPreemptReserve", mSetRsv);
-    zym_mapSet(parentVm, obj, "preemptReserve",    mRsv);
     zym_mapSet(parentVm, obj, "preemptCapacity",   mPCap);
     zym_mapSet(parentVm, obj, "preemptUsed",       mPUsed);
     zym_mapSet(parentVm, obj, "setMemoryLimit",     mSetMem);
@@ -1976,7 +2018,7 @@ ZymValue make_child_vm(ZymVM* parentVm, ChildVmHandle* handle) {
     zym_mapSet(parentVm, obj, "moduleLoader", mlObj);
 
     // ctx + 30 closures + 2 moduleLoader closures + obj + mlObj = 35
-    for (int i = 0; i < 46; i++) zym_popRoot(parentVm);
+    for (int i = 0; i < 44; i++) zym_popRoot(parentVm);
     return obj;
 }
 

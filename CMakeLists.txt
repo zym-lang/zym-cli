@@ -26,6 +26,13 @@ set(USE_COMPRESSION ON)
 # RUNTIME_ONLY: ON builds a runtime-only binary that skips compiling and
 # linking `full_executor` and only takes the `runtime_loader` path in main.
 set(RUNTIME_ONLY ON)
+# ZYM_ENABLE_HOST_GUARD: ON keeps the host guard (the per-instruction
+# countdown that drives host watchdogs, the hard stop, and the memory
+# ceiling). OFF compiles the check out of the dispatch loop for a fully
+# trusted build -- no mid-run interruption channel exists, and the
+# zym_preempt*/zym_requestStop/zym_setMemoryLimit APIs become compile
+# errors. Overrides zym_core's own default (ON).
+set(ZYM_ENABLE_HOST_GUARD OFF)
 # USE_ENGINE_ERRORS: ON keeps Godot's `ERROR: ... at: <fn> (file.cpp:N)` lines
 # on stderr (the engine's `ERR_FAIL_*` / `ERR_PRINT` macros). OFF compiles the
 # binary so engine-level error and warning output is suppressed at startup
@@ -507,24 +514,27 @@ if(WIN32)
     # ignores `.gnu.lto_*` sections, so ICF can fold native duplicates
     # but won't perform whole-program LTO. That's still a net win.
     #
-    # We probe for an lld variant that the mingw-gcc driver will accept
-    # via `-fuse-ld=lld`: a cross-prefixed `x86_64-w64-mingw32-ld.lld`,
-    # the generic `ld.lld`, or `lld` on PATH. If none is found, we stay
-    # on BFD ld and accept the loss of ICF (BFD has no equivalent flag).
+    # Probe by LINKING, not by PATH: find_program used to grab the first
+    # `ld.lld` visible, and an unrelated toolchain's lld (the ESP-IDF
+    # esp-clang one, once `get_idf` has been sourced) satisfies the name
+    # without the mingw-gcc driver ever using it -- the flags then reach
+    # BFD ld, which has no ICF, and the link dies on `--icf=safe`.
+    # check_linker_flag runs a real test link through the actual driver,
+    # so it answers the only question that matters.
     # `--icf=safe` is GNU-style and is accepted by lld on both ELF and
     # PE/COFF; lld translates it internally to the `/opt:icf` semantic
     # on COFF. Only address-not-taken functions are folded, so vtable
     # dispatch and function-pointer identity are preserved.
-    find_program(ZYM_LLD_EXECUTABLE
-            NAMES x86_64-w64-mingw32-ld.lld ld.lld lld)
-    if(ZYM_LLD_EXECUTABLE)
-        message(STATUS ">> ICF: using ${ZYM_LLD_EXECUTABLE} (-fuse-ld=lld -Wl,--icf=safe)")
+    include(CheckLinkerFlag)
+    check_linker_flag(CXX "-fuse-ld=lld;LINKER:--icf=safe" ZYM_MINGW_LLD_ICF_OK)
+    if(ZYM_MINGW_LLD_ICF_OK)
+        message(STATUS ">> ICF: mingw driver links with lld (-fuse-ld=lld -Wl,--icf=safe)")
         target_link_options(zym PRIVATE
                 -fuse-ld=lld
                 "-Wl,--icf=safe"
         )
     else()
-        message(STATUS ">> ICF: no ld.lld found; staying on mingw BFD ld (no --icf=safe; BFD has no ICF, gold is ELF-only)")
+        message(STATUS ">> ICF: no usable lld for the mingw driver; staying on BFD ld (no --icf=safe; BFD has no ICF, gold is ELF-only)")
     endif()
 else()
     find_program(ZYM_GOLD_EXECUTABLE NAMES ld.gold gold)

@@ -1,0 +1,12 @@
+// DELIBERATE ERROR + host-dependent: a guard park firing under a live
+// host call boundary is the 0.3.x boundary error (natives are atomic).
+var w = Fiber.new(func() {
+    reenter(func() {
+        var i = 0
+        while (i < 50000) { i = i + 1 }
+        return i
+    })
+    return 0
+})
+var id = guardPark(1000)
+Fiber.call(w)   // expiry lands inside the reenter'd C boundary

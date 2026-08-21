@@ -1,0 +1,20 @@
+// Host-armed guard CALLBACK entries fire in place, at root and inside
+// fibers (pushPreemptFrame path, untested since the 0.3.x corpus was
+// archived). NEEDS the test host (guardEvery/guardCancel).
+var hits = 0
+var id = guardEvery(1000, func() { hits = hits + 1 })
+var i = 0
+while (i < 20000) { i = i + 1 }
+guardCancel(id)
+assert(hits > 5, "callback fired repeatedly at root")
+var inner_hits = 0
+var id2 = guardEvery(1000, func() { inner_hits = inner_hits + 1 })
+var f = Fiber.new(func() {
+    var j = 0
+    while (j < 20000) { j = j + 1 }
+    return j
+})
+assert(Fiber.call(f) == 20000, "fiber ran under callback entry")
+guardCancel(id2)
+assert(inner_hits > 5, "callback fired inside the fiber too")
+print(str("h1 ok: root=%v fiber=%v hits", hits, inner_hits))

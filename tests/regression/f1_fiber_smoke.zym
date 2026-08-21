@@ -1,0 +1,102 @@
+// f1: create, call, complete with return value
+var f1 = Fiber.new(func() { return 42 })
+assert(Fiber.status(f1) == "new", "f1 new")
+var r1 = Fiber.call(f1)
+assert(r1 == 42, "f1 return value")
+assert(Fiber.status(f1) == "dead", "f1 dead")
+assert(Fiber.isDone(f1), "f1 isDone")
+print("f1 ok")
+
+// f2: yield value out, resume value in
+var f2 = Fiber.new(func() {
+    var got = Fiber.yield(10)
+    return got + 5
+})
+var out = Fiber.call(f2)
+assert(out == 10, "f2 yielded value")
+assert(Fiber.status(f2) == "suspended", "f2 suspended")
+var fin = Fiber.call(f2, 100)
+assert(fin == 105, "f2 resume value flows in")
+assert(Fiber.isDone(f2), "f2 done")
+print("f2 ok")
+
+// f3: first-call argument
+var f3 = Fiber.new(func(x) { return x * 2 })
+assert(Fiber.call(f3, 21) == 42, "f3 arg")
+print("f3 ok")
+
+// f4: generator loop
+var gen = Fiber.new(func() {
+    var i = 0
+    while (i < 5) {
+        Fiber.yield(i)
+        i = i + 1
+    }
+    return -1
+})
+var sum = 0
+var v = Fiber.call(gen)
+while (!Fiber.isDone(gen)) {
+    sum = sum + v
+    v = Fiber.call(gen)
+}
+assert(sum == 0 + 1 + 2 + 3 + 4, "f4 generator sum")
+assert(v == -1, "f4 final return")
+print("f4 ok")
+
+// f5: nested fibers (fiber resumes fiber)
+var inner = Fiber.new(func() {
+    Fiber.yield("inner-first")
+    return "inner-done"
+})
+var outer = Fiber.new(func() {
+    var a = Fiber.call(inner)
+    Fiber.yield("outer saw " + a)
+    var b = Fiber.call(inner)
+    return "outer done, inner said " + b
+})
+assert(Fiber.call(outer) == "outer saw inner-first", "f5 outer yield")
+assert(Fiber.call(outer) == "outer done, inner said inner-done", "f5 completion")
+print("f5 ok")
+
+// f6: tail yield -- return Fiber.yield(v) from the top frame
+var f6 = Fiber.new(func() {
+    return Fiber.yield(7)
+})
+assert(Fiber.call(f6) == 7, "f6 tail yield out")
+assert(Fiber.status(f6) == "suspended", "f6 parked after tail yield")
+assert(Fiber.call(f6, 99) == 99, "f6 completion bounce returns resume value")
+assert(Fiber.isDone(f6), "f6 dead after bounce")
+print("f6 ok")
+
+// f7: yield from a helper (stackful requirement)
+func helper(n) {
+    Fiber.yield(n * 10)
+    return n
+}
+var f7 = Fiber.new(func() {
+    var x = helper(3)
+    return x + 1
+})
+assert(Fiber.call(f7) == 30, "f7 deep yield")
+assert(Fiber.call(f7) == 4, "f7 completes")
+print("f7 ok")
+
+// f8: deep recursion in a fiber (frame growth past FIBER_FRAMES_INITIAL)
+func countdown(n) {
+    if (n <= 0) { return 0 }
+    return countdown(n - 1) + 1
+}
+var f8 = Fiber.new(func() { return countdown(40) })
+assert(Fiber.call(f8) == 40, "f8 frame growth")
+print("f8 ok")
+
+// f9: Fiber.current
+assert(Fiber.current() == null, "f9 root current is null")
+var f9 = Fiber.new(func() {
+    return Fiber.current() != null
+})
+assert(Fiber.call(f9), "f9 current inside fiber")
+print("f9 ok")
+
+print("ALL FIBER SMOKE OK")

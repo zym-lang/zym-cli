@@ -1,0 +1,9 @@
+var i = 0
+while (i < 5000) {
+    var f = Fiber.new(func() { Fiber.yield(1) return 2 })
+    Fiber.call(f)          // park it, then abandon it (GC must reclaim)
+    var g = Fiber.new(func() { return 3 })
+    Fiber.call(g)          // complete it (eager release)
+    i = i + 1
+}
+print("leak loop ok")

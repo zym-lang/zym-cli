@@ -1,0 +1,30 @@
+// FLAGSHIP (test-plan class 3/5/6): the host-armed park guard slices a
+// running fiber; a script scheduler resumes it to completion with the
+// workload exactly intact. NEEDS the test host (guardPark/guardCancel).
+var worker = Fiber.new(func() {
+    var total = 0
+    var i = 0
+    while (i < 50000) {
+        total = total + i % 7
+        i = i + 1
+    }
+    return total
+})
+var parks = 0
+var id = guardPark(2000)
+var v = Fiber.call(worker)
+while (Fiber.status(worker) == "preempted") {
+    parks = parks + 1
+    v = Fiber.call(worker)
+}
+guardCancel(id)
+assert(Fiber.isDone(worker), "worker completed")
+assert(parks > 5, "guard parked the worker repeatedly")
+var expect = 0
+var j = 0
+while (j < 50000) {
+    expect = expect + j % 7
+    j = j + 1
+}
+assert(v == expect, "workload result exactly intact across parks")
+print(str("flagship ok: %v parks, result %v", parks, v))

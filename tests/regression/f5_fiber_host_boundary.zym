@@ -1,0 +1,17 @@
+// Host-boundary doctrine (ported from 0.3.x capture, stamped by the
+// author 2026-08-20): a fiber switch may never cross a LIVE host call
+// boundary -- the native's C frame cannot be parked or resumed. A
+// boundary that opened and closed before the switch is fine.
+//
+// NEEDS a host that registers `reenter(fn)` (calls zym_callClosurev) --
+// the test minihost provides it; the packed CLI does not.
+
+// Legal: boundary closed before the switch.
+var f = Fiber.new(func() {
+    var x = reenter(func() { return 21 })
+    Fiber.yield(x * 2)
+    return x
+})
+assert(Fiber.call(f) == 42, "switch after boundary closed")
+assert(Fiber.call(f) == 21, "completes")
+print("fiber host-boundary legal shapes ok")

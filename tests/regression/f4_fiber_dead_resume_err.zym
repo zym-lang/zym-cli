@@ -1,0 +1,5 @@
+// DELIBERATE ERROR: resuming a dead fiber must be a clean runtime error
+// (fiber design, test-plan class 7).
+var f = Fiber.new(func() { return 1 })
+Fiber.call(f)
+Fiber.call(f)

@@ -1,0 +1,8 @@
+// DELIBERATE ERROR + host-dependent (needs `reenter`, see f5): yielding
+// across a live host call boundary must be the teaching runtime error,
+// never corruption. Ported 0.3.x doctrine: natives are atomic.
+var f = Fiber.new(func() {
+    reenter(func() { Fiber.yield(1) })
+    return 0
+})
+Fiber.call(f)

@@ -1,0 +1,34 @@
+// The MCU practitioner pattern (field report, fiber_design.md): a guard
+// callback checks a budget and yields the hogging fiber FROM INSIDE the
+// callback frame; entry re-arms on every pop (c1-class invariant across
+// fiber park/resume). NEEDS the test host (guardEvery/guardCancel).
+// Their 3ms pattern, deterministic form: the callback checks a budget and
+// voluntarily yields the hogging fiber FROM INSIDE the callback frame.
+var checks = 0
+var parks = 0
+var id = guardEvery(2000, func() {
+    checks = checks + 1
+    if (Fiber.current() != null) {
+        Fiber.yield("budget")     // yield from a guard-callback frame
+    }
+})
+var w = Fiber.new(func() {
+    var total = 0
+    var i = 0
+    while (i < 30000) {
+        total = total + 1
+        i = i + 1
+    }
+    return total
+})
+var v = Fiber.call(w)
+while (!Fiber.isDone(w)) {
+    assert(v == "budget", "yield-from-callback delivered its value")
+    assert(Fiber.status(w) == "suspended", "voluntary yield: suspended, not preempted")
+    parks = parks + 1
+    v = Fiber.call(w)
+}
+guardCancel(id)
+assert(v == 30000, "workload intact across callback-yields")
+assert(parks > 3, "budget yielded repeatedly (entry re-fired after each pop)")
+print(str("h2 ok: %v checks, %v budget-yields, result %v", checks, parks, v))

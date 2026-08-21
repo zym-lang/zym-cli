@@ -1,0 +1,12 @@
+// DELIBERATE ERROR + host-dependent: a preempted fiber resumes at the
+// exact interrupted instruction -- passing a value is a misuse.
+var w = Fiber.new(func() {
+    var i = 0
+    while (i < 100000) { i = i + 1 }
+    return i
+})
+var id = guardPark(1000)
+Fiber.call(w)
+guardCancel(id)
+assert(Fiber.status(w) == "preempted", "parked")
+Fiber.call(w, 42)   // DELIBERATE ERROR

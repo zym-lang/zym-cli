@@ -1,0 +1,3 @@
+// DELIBERATE ERROR: yielding from the root context must be a clean
+// runtime error (fiber design, test-plan class 7).
+Fiber.yield(1)
